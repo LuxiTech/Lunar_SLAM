@@ -1,0 +1,18 @@
+# Excluded standalone demo repository
+/demo/luxi_-lunar/
+
+# ROS/colcon generated directories (at any workspace depth)
+build/
+install/
+log/
+
+# Common generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor and OS metadata
+.vscode/
+.idea/
+*.swp
+.DS_Store
