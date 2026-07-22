@@ -218,6 +218,18 @@ Visualization Manager:
         Value: /rtabmap/map_updates
       Use Timestamp: false
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Semantic Obstacles
+      Namespaces:
+        semantic_obstacles: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /semantic_annotation/markers
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -232,6 +244,14 @@ Visualization Manager:
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
       Line color: 128; 128; 0
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
   Transformation:
     Current:
       Class: rviz_default_plugins/TF
