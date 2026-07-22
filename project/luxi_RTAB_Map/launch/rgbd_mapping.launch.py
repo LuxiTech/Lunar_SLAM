@@ -6,6 +6,7 @@ data provider and this package remains the mapping algorithm owner.
 """
 
 import os
+import re
 import signal
 import subprocess
 import time
@@ -42,6 +43,28 @@ TEST_PROCESS_MARKERS = (
     "__node:=base_to_d435i_tf",
 )
 
+MAPS_DIRECTORY = "/home/lunar/project/lunar_slam/maps"
+
+
+def _prepare_database_path(context: object) -> list[LogInfo]:
+    """Use the next numbered map database unless the caller selected one."""
+    configured_path = LaunchConfiguration("database_path").perform(context).strip()
+    if configured_path:
+        database_path = os.path.abspath(os.path.expanduser(configured_path))
+        os.makedirs(os.path.dirname(database_path), exist_ok=True)
+    else:
+        os.makedirs(MAPS_DIRECTORY, exist_ok=True)
+        existing_indices = []
+        for filename in os.listdir(MAPS_DIRECTORY):
+            match = re.fullmatch(r"map(\d+)\.db(?:-(?:shm|wal))?", filename)
+            if match:
+                existing_indices.append(int(match.group(1)))
+        map_index = max(existing_indices, default=0) + 1
+        database_path = os.path.join(MAPS_DIRECTORY, f"map{map_index:03d}.db")
+
+    context.launch_configurations["database_path"] = database_path
+    return [LogInfo(msg=f"RTAB-Map database: {database_path}")]
+
 
 def _wait_for_camera_inputs(context: object) -> list[LogInfo]:
     enabled = LaunchConfiguration("wait_for_camera").perform(context).lower()
@@ -72,8 +95,11 @@ def _wait_for_camera_inputs(context: object) -> list[LogInfo]:
                     "topic",
                     "echo",
                     "--once",
-                    "--qos-reliability",
-                    "best_effort",
+                    "--no-daemon",
+                    "--field",
+                    "header",
+                    "--qos-profile",
+                    "sensor_data",
                     topic,
                 ],
                 stdout=subprocess.DEVNULL,
@@ -285,7 +311,11 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("rviz", default_value="true"),
             DeclareLaunchArgument("rtabmap_viz", default_value="false"),
-            DeclareLaunchArgument("database_path", default_value="~/.ros/luxi_rtab_map.db"),
+            DeclareLaunchArgument(
+                "database_path",
+                default_value="",
+                description="Existing database to continue; empty creates the next maps/mapNNN.db.",
+            ),
             DeclareLaunchArgument("base_frame", default_value="base_link"),
             DeclareLaunchArgument("camera_frame", default_value="camera_link"),
             DeclareLaunchArgument("map_frame", default_value="map"),
@@ -346,6 +376,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("log_level", default_value="warn"),
             OpaqueFunction(function=_terminate_processes),
+            OpaqueFunction(function=_prepare_database_path),
             OpaqueFunction(function=_wait_for_camera_inputs),
             base_to_camera_tf,
             imu_filter,

@@ -18,9 +18,48 @@ project/luxi_RTAB_Map
 后续定位、导航和语义识别也应作为 `project` 下的独立 ROS2 包接入上述
 标准话题，避免把算法代码放入硬件驱动目录。
 
-## 启动
+## 从开机到建图
 
-先在 Docker 容器中启动 D435i 硬件驱动：
+开机后打开两个 `lunar@lunar_slam` 容器终端，按以下顺序启动。
+
+### 启动前：检查并关闭旧进程
+
+同一台 D435i 不能同时被两个驱动进程占用。启动相机前先检查是否残留旧的相机或
+建图进程：
+
+```bash
+pgrep -af 'ros2 launch lunar_realsense_bringup|realsense2_camera_node'
+pgrep -af 'ros2 launch luxi_rtab_map|rgbd_odometry|rtabmap_slam/rtabmap'
+```
+
+如果旧程序所在终端仍然存在，优先回到对应终端按 `Ctrl-C`，等待进程正常退出。
+如果找不到原终端，可以向旧的 ROS 2 launch 进程发送与 `Ctrl-C` 相同的 `SIGINT`：
+
+```bash
+pkill -SIGINT -f 'ros2 launch luxi_rtab_map rgbd_mapping.launch.py'
+pkill -SIGINT -f 'ros2 launch lunar_realsense_bringup d435i.launch.py'
+sleep 3
+```
+
+然后确认没有残留进程：
+
+```bash
+pgrep -af 'realsense2_camera_node|rgbd_odometry|rtabmap_slam/rtabmap'
+```
+
+没有输出表示相关进程已经关闭。若仍有输出，记录显示的 PID，只对这些明确的残留
+进程发送 `SIGTERM`，例如：
+
+```bash
+kill -SIGTERM <PID>
+```
+
+不要在旧相机驱动仍运行时再次启动相机，否则可能出现 `failed to set power state`
+或设备忙错误。正常建图时只需各启动一个相机进程和一个建图进程。
+
+### 终端一：启动相机
+
+执行后保持这个终端运行，看到 `RealSense Node Is Up!` 后再使用终端二：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -28,6 +67,137 @@ source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
 ros2 launch lunar_realsense_bringup d435i.launch.py \
   rviz:=false enable_imu:=true unite_imu_method:=2 enable_pointcloud:=false
 ```
+
+### 终端二：启动建图和 RViz
+
+```bash
+export DISPLAY=:0
+export XAUTHORITY=/tmp/.docker.xauth
+export QT_X11_NO_MITSHM=1
+
+source /opt/ros/humble/setup.bash
+source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
+source /home/lunar/project/lunar_slam/install/setup.bash
+ros2 launch luxi_rtab_map rgbd_mapping.launch.py
+```
+
+每次启动会自动选择下一个未使用的数据库，例如：
+
+```bash
+/home/lunar/project/lunar_slam/maps/map001.db
+/home/lunar/project/lunar_slam/maps/map002.db
+```
+
+在建图终端按 `Ctrl-C` 并等待 RTAB-Map 正常退出后，当前地图已保存。查看、导出和
+继续已有地图的方法见 [maps/README.md](../../../maps/README.md)。
+
+<!-- 以下为历史详细排障记录，默认不参与文档阅读。
+
+以下流程适用于当前 Jetson 图形桌面和名为 `lunar_slam` 的 Docker 容器。必须先登录
+Jetson 本地图形桌面；仅停留在登录界面或只通过 SSH 启动时，不保证存在可供 RViz
+连接的用户图形会话。
+
+### 1. 在 Jetson 主机确认显示服务并启动容器
+
+打开 Jetson 本地桌面的终端，不是在容器里执行。主机提示符通常包含
+`luxi-jetson`；如果提示符是 `lunar@lunar_slam`，说明已经在容器里，不能执行
+`docker` 命令：
+
+```bash
+echo "$DISPLAY"
+ls -l /tmp/.X11-unix/
+docker start lunar_slam
+```
+
+当前机器的正常结果是 `DISPLAY=:0`，并且 X11 socket 为
+`/tmp/.X11-unix/X0`。如果 `echo` 的结果和 socket 编号不同，以实际存在的 socket
+编号为准。当前容器已经挂载主机的 `/tmp/.X11-unix`，并将主机 Xauthority 挂载为
+容器内只读文件 `/tmp/.docker.xauth`。
+
+可在主机确认挂载仍然存在：
+
+```bash
+docker inspect lunar_slam --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}' \
+  | grep -E 'X11-unix|docker.xauth'
+```
+
+### 2. 进入容器并验证 RViz 显示链路
+
+在主机终端进入容器，同时覆盖容器中可能过期的 `DISPLAY`：
+
+```bash
+docker exec -it \
+  -e DISPLAY=:0 \
+  -e XAUTHORITY=/tmp/.docker.xauth \
+  -e QT_X11_NO_MITSHM=1 \
+  lunar_slam bash
+```
+
+如果当前已经处于 `lunar@lunar_slam` 容器 shell，无需退出或再次执行
+`docker exec`，直接在当前 shell 修正环境：
+
+```bash
+export DISPLAY=:0
+export XAUTHORITY=/tmp/.docker.xauth
+export QT_X11_NO_MITSHM=1
+```
+
+进入容器后先检查配置。不能只看 `echo $DISPLAY`，还要确认对应 socket 存在：
+
+```bash
+echo "$DISPLAY"
+test -S /tmp/.X11-unix/X${DISPLAY#:} && echo "X11 socket OK"
+glxinfo -B | grep -E 'direct rendering|OpenGL vendor|OpenGL renderer|OpenGL version'
+```
+
+当前机器应显示 `direct rendering: Yes`、NVIDIA Tegra 渲染器和 OpenGL 4.6。
+需要单独验证窗口时可运行：
+
+```bash
+timeout 10 rviz2
+```
+
+RViz 窗口能够在 Jetson 桌面出现，且终端输出 OpenGL 版本而不是 `could not connect
+to display`，说明 GUI 链路正常。`timeout` 会在 10 秒后关闭这个测试窗口。
+
+### 3. 终端一：启动 D435i
+
+先确认没有旧的相机驱动占用同一设备：
+
+```bash
+pgrep -af realsense2_camera_node || true
+```
+
+如果已经存在一个正常运行的 `realsense2_camera_node`，直接复用它，不要再次启动。
+同一台 D435i 不能被两个驱动进程同时打开；重复启动会出现
+`RS2_USB_STATUS_BUSY`、`failed to claim usb interface` 和
+`failed to set power state`。
+
+没有相机进程时，在容器终端一执行：
+
+```bash
+export DISPLAY=:0
+export XAUTHORITY=/tmp/.docker.xauth
+export QT_X11_NO_MITSHM=1
+
+source /opt/ros/humble/setup.bash
+source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
+ros2 launch lunar_realsense_bringup d435i.launch.py \
+  rviz:=false enable_imu:=true unite_imu_method:=2 enable_pointcloud:=false
+```
+
+保持终端一运行，直到日志出现 `RealSense Node Is Up!`。另开容器终端检查输入：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
+ros2 topic hz /camera/camera/color/image_raw
+ros2 topic hz /camera/camera/aligned_depth_to_color/image_raw
+ros2 topic hz /camera/camera/imu
+```
+
+RGB 和对齐深度应接近 30 Hz，IMU 应持续输出。按 `Ctrl-C` 退出频率检查，不要停止
+终端一的相机驱动。
 
 本 Jetson 内核没有启用 `CONFIG_HID_SENSOR_HUB`，系统自带 librealsense 的
 V4L2/IIO 后端只能识别 RGB 和深度，不能识别 D435i Motion Module。硬件启动包
@@ -49,7 +219,9 @@ ros2 topic hz /imu/data
 或项目私有 RSUSB 库不存在。此时不要启动建图；建图启动文件也会等待原始 IMU，
 超时后明确退出，避免静默退回容易在大转角时丢失的纯视觉模式。
 
-再开一个容器终端启动项目建图。RViz 显示在 Jetson 桌面时需要 X11 环境变量：
+### 4. 终端二：启动建图和 RViz
+
+从主机再执行一次第 2 步的 `docker exec`，进入容器终端二，然后执行：
 
 ```bash
 export DISPLAY=:0
@@ -61,6 +233,31 @@ source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
 source /home/lunar/project/lunar_slam/install/setup.bash
 ros2 launch luxi_rtab_map rgbd_mapping.launch.py
 ```
+
+正常情况下，Jetson 本地桌面会出现 RViz，ROS 图中至少包含：
+
+```text
+/camera/camera
+/d435i_imu_filter
+/rtabmap/rgbd_sync
+/rtabmap/rgbd_odometry
+/rtabmap/rtabmap
+/rviz
+```
+
+可在第三个容器终端验证：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/lunar/project/lunar_slam/install/setup.bash
+ros2 node list | sort
+ros2 topic hz /rtabmap/odom
+ros2 topic hz /rtabmap/mapData
+```
+
+当前实机验证结果为相机和里程计约 30 Hz、`/rtabmap/mapData` 约 1 Hz。RViz 日志
+显示 NVIDIA OpenGL 4.6，并持续输出 `Trying to create a map ...`，确认窗口、渲染和
+建图数据链路都已工作。
 
 首次创建一张全新的地图时使用：
 
@@ -82,6 +279,41 @@ ros2 launch luxi_rtab_map rgbd_mapping.launch.py new_map:=true
 ```bash
 ros2 launch luxi_rtab_map rgbd_mapping.launch.py camera_wait_timeout:=30.0
 ```
+
+### RViz 窗口不出现时
+
+先抓取最新 launch 日志并检查进程：
+
+```bash
+latest_log=$(ls -td ~/.ros/log/*/ | head -1)
+grep -RniE 'rviz|xcb|display|qt.qpa|error|failed' "$latest_log"
+pgrep -af 'rviz2|realsense2_camera_node|rgbd_odometry|rtabmap_slam/rtabmap'
+```
+
+本次故障的直接原因是容器环境为 `DISPLAY=:1`，而主机只挂载了 Xorg 的 `X0`
+socket。Qt 因此报告：
+
+```text
+qt.qpa.xcb: could not connect to display :1
+```
+
+修复当前终端后，可单独重新启动项目 RViz，不需要重启相机或建图：
+
+```bash
+export DISPLAY=:0
+export XAUTHORITY=/tmp/.docker.xauth
+export QT_X11_NO_MITSHM=1
+source /opt/ros/humble/setup.bash
+source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
+source /home/lunar/project/lunar_slam/install/setup.bash
+rviz2 -d /home/lunar/project/lunar_slam/install/luxi_rtab_map/share/luxi_rtab_map/rviz/rgbd_mapping.rviz
+```
+
+如果没有 `/tmp/.X11-unix/X0` 或 `/tmp/.docker.xauth`，说明容器创建时缺少 X11
+挂载；仅设置环境变量不能补救，需要在主机修正容器挂载后重建容器。如果 socket
+和授权文件存在但仍失败，先在容器运行 `glxinfo -B`，其错误通常比 RViz 更直接。
+
+-->
 
 ## 稳定性配置
 
@@ -181,27 +413,13 @@ D435i IMU 在这里提供旋转预测和重力方向，不能在没有视觉重�
 接受并造成地图折叠。若缓慢移动仍持续失败，再检查 RGB、对齐深度的频率、曝光、
 画面纹理和相机到目标的距离。
 
-默认数据库是 `~/.ros/luxi_rtab_map.db`。现在默认保留数据库，并在再次启动时
-继续使用已有地图。需要明确创建新地图时使用：
+默认启动会创建下一个编号数据库，例如 `maps/map001.db`、`maps/map002.db`，不会
+覆盖已有地图。需要继续已有地图时，显式指定其路径：
 
 ```bash
-ros2 launch luxi_rtab_map rgbd_mapping.launch.py new_map:=true
+ros2 launch luxi_rtab_map rgbd_mapping.launch.py \
+  database_path:=/home/lunar/project/lunar_slam/maps/map001.db
 ```
-
-不要把不同房间、多次失败测试或没有从已知位置开始的采集持续追加到同一个数据库。
-2026-07-15 抓取到的旧库已经达到 307 MB，包含近千个重复节点；日志连续出现
-`Rejecting all added loop closures`、`Loop closure ... rejected` 和
-`Graph has changed! The whole cloud is regenerated`。错误闭环候选触发全图重算时，
-RViz 中的地图会跳动或短暂消失。这不是单纯的 Jetson 算力不足。该旧库已经可逆地
-保存为：
-
-```text
-~/.ros/luxi_rtab_map.db.bad_20260715_1534
-```
-
-当前直接启动会创建新的干净 `~/.ros/luxi_rtab_map.db`。进入新环境前应先导出或
-备份当前地图，再使用 `new_map:=true`；只有在同一环境、相机从已有地图可识别的
-位置开始时，才继续复用原数据库。
 
 新地图第一次生成或优化累计点云时，单独出现一次
 `Graph has changed! The whole cloud is regenerated` 是正常行为；只有该消息伴随闭环
@@ -249,10 +467,10 @@ RTAB-Map 只能把具有连续里程计约束或闭环约束的关键帧放入�
 
 ## 保存和导出三维地图
 
-建图过程中所有关键帧、深度、位姿和图约束持续保存在：
+建图过程中所有关键帧、深度、位姿和图约束持续保存在下一个可用编号数据库：
 
 ```text
-~/.ros/luxi_rtab_map.db
+/home/lunar/project/lunar_slam/maps/mapNNN.db
 ```
 
 停止建图程序后，可导出为通用的彩色 PLY 点云：
@@ -264,12 +482,12 @@ source /home/lunar/project/lunar_slam/install/setup.bash
 ros2 run luxi_rtab_map export_3d_map.sh
 ```
 
-默认输出目录是 `~/.ros/luxi_rtab_map_exports`。也可以指定数据库和输出目录：
+建议显式指定要导出的地图和输出目录：
 
 ```bash
 ros2 run luxi_rtab_map export_3d_map.sh \
-  /path/to/map.db \
-  /path/to/output_directory
+  /home/lunar/project/lunar_slam/maps/map001.db \
+  /home/lunar/project/lunar_slam/maps/map001_export
 ```
 
 导出的 `*_cloud.ply` 可以使用 CloudCompare、MeshLab 或 PCL 工具查看。导出脚本

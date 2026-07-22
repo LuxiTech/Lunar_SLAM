@@ -2,8 +2,24 @@
 
 set -eo pipefail
 
-database_path="${1:-${HOME}/.ros/luxi_rtab_map.db}"
-output_directory="${2:-${HOME}/.ros/luxi_rtab_map_exports}"
+maps_directory="/home/lunar/project/lunar_slam/maps"
+
+if [[ $# -ge 1 ]]; then
+  database_path="$1"
+else
+  database_path="$(find "${maps_directory}" -maxdepth 1 -type f -name 'map*.db' -printf '%f\n' \
+    | sort -V | tail -n 1)"
+  if [[ -n "${database_path}" ]]; then
+    database_path="${maps_directory}/${database_path}"
+  fi
+fi
+
+if [[ $# -ge 2 ]]; then
+  output_directory="$2"
+else
+  database_name="$(basename "${database_path:-map}")"
+  output_directory="${maps_directory}/${database_name%.db}_export"
+fi
 
 if pgrep -f "/rtabmap_slam/lib/rtabmap_slam/rtabmap" >/dev/null; then
   echo "RTAB-Map is still running. Stop the mapping launch before exporting." >&2
@@ -11,7 +27,7 @@ if pgrep -f "/rtabmap_slam/lib/rtabmap_slam/rtabmap" >/dev/null; then
 fi
 
 if [[ ! -f "${database_path}" ]]; then
-  echo "Database does not exist: ${database_path}" >&2
+  echo "No saved map database found. Specify maps/mapNNN.db explicitly." >&2
   exit 3
 fi
 

@@ -16,3 +16,7 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+
+# Locally captured RTAB-Map databases and exports; keep maps/README.md tracked.
+/maps/map*.db*
+/maps/map*_export/
