@@ -1,0 +1,11 @@
+yesense_pub:
+  ros__parameters:
+    # Stable alias created by /etc/udev/rules.d/99-imu-usb.rules.
+    serial_port: /dev/imu-usb
+    baud_rate: 921600
+    frame_id: imu_link
+    driver_type: ros_serial
+    # Standard message for ROS 2 tools and later camera-IMU fusion.
+    imu_topic_ros: /imu/data
+    # WheelTec/Yesense extended message: temperature and sample fields.
+    imu_topic: /imu/data_extend

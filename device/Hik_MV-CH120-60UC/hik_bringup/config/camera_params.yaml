@@ -1,0 +1,6 @@
+stereo_node:
+  ros__parameters:
+    config_file: /home/changxin/LuXi_StereoCamera_ws/src/hikrobot_camera_driver/config/stereo_camera.xml
+    external_trigger: false
+    left_camera_info_file: /home/changxin/LuXi_StereoCamera_ws/src/hikrobot_camera_driver/config/stereo_left.yaml
+    right_camera_info_file: /home/changxin/LuXi_StereoCamera_ws/src/hikrobot_camera_driver/config/stereo_right.yaml
