@@ -1,0 +1,11 @@
+yesense_pub:
+    ros__parameters:
+        # Stable udev device name for the WheelTec H30 IMU.
+        serial_port: "/dev/imu-usb"
+        baud_rate: 921600
+        frame_id: "imu_link"
+        driver_type: "ros_serial"
+        # Standard ROS 2 IMU topic (sensor_msgs/msg/Imu).
+        imu_topic_ros: "/imu/data"
+        # Vendor message with sample counter, temperature, and raw IMU fields.
+        imu_topic: "/imu/data_extend"
