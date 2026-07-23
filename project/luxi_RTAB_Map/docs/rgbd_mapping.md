@@ -473,6 +473,17 @@ RTAB-Map 只能把具有连续里程计约束或闭环约束的关键帧放入�
 /home/lunar/project/lunar_slam/maps/mapNNN.db
 ```
 
+查看最近一次已经停止并保存的建图结果时，使用自动选择脚本，避免将三位编号
+`map010.db` 误写成四位编号 `map0010.db`：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/lunar/project/lunar_slam/install/setup.bash
+ros2 run luxi_rtab_map view_latest_map.sh
+```
+
+传入完整数据库路径可查看指定地图；传入 `--print-path` 只打印当前会选择的文件。
+
 停止建图程序后，可导出为通用的彩色 PLY 点云：
 
 ```bash

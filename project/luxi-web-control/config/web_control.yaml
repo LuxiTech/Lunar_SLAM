@@ -1,0 +1,33 @@
+web_control:
+  ros__parameters:
+    # Standard output topic. Remap or change this for any compatible robot.
+    cmd_vel_topic: /cmd_vel
+
+    # HTTP server. Use 127.0.0.1 if the page must not be exposed to the LAN.
+    bind_address: 0.0.0.0
+    http_port: 8080
+    auto_stop_existing_web_control: true
+
+    # A held web control is refreshed at 10 Hz; output is published at 20 Hz.
+    publish_rate: 20.0
+    command_timeout: 0.6
+
+    # Server-side safety limits, independent of browser slider values.
+    max_linear_x: 0.25
+    max_linear_y: 0.0
+    max_angular_z: 0.8
+    enable_output: true
+
+    # The web node can start/stop the project's RTAB-Map launch it owns.
+    # It sources the D435i overlay and the project workspace before launching.
+    enable_mapping_control: true
+    mapping_launch_package: luxi_rtab_map
+    mapping_launch_file: rgbd_mapping.launch.py
+    # D435i driver uses Cyclone DDS; /cmd_vel stays on Fast DDS in the web node.
+    mapping_rmw_implementation: rmw_cyclonedds_cpp
+
+    # Read-only RGB and sparse RTAB-Map cloud previews for the web page.
+    enable_preview: true
+    rgb_preview_topic: /camera/camera/color/image_raw/compressed
+    cloud_preview_topic: /rtabmap/cloud_map
+    max_cloud_points: 1800

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#10141d">
+  <title>Luxi 小车控制</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">LUXI · ROS 2</p>
+        <h1>小车遥控台</h1>
+      </div>
+      <div id="connection" class="connection offline">
+        <span class="dot"></span>
+        <span id="connectionText">正在连接</span>
+      </div>
+    </header>
+
+    <section class="status-card">
+      <div>
+        <span class="label">发布话题</span>
+        <strong id="topic">/cmd_vel</strong>
+      </div>
+      <div>
+        <span class="label">ROS 订阅者</span>
+        <strong id="subscribers">--</strong>
+      </div>
+      <div>
+        <span class="label">控制状态</span>
+        <strong id="state">等待中</strong>
+      </div>
+    </section>
+
+    <section class="control-grid">
+      <div class="panel drive-panel">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">DRIVE</p>
+            <h2>方向控制</h2>
+          </div>
+          <span class="hint">键盘 W A S D</span>
+        </div>
+
+        <div class="joystick-panel">
+          <div id="joystickPad" class="joystick-pad" role="application" aria-label="小车速度摇杆">
+            <div class="joystick-ring"></div>
+            <div class="joystick-cross horizontal"></div>
+            <div class="joystick-cross vertical"></div>
+            <span class="joystick-label forward-label">前进</span>
+            <span class="joystick-label left-label">左转</span>
+            <span class="joystick-label right-label">右转</span>
+            <span class="joystick-label backward-label">后退</span>
+            <div id="joystickKnob" class="joystick-knob"></div>
+          </div>
+          <div class="joystick-readout">
+            <span>线速度 <output id="joystickLinear">0.00</output> m/s</span>
+            <span>角速度 <output id="joystickAngular">0.00</output> rad/s</span>
+          </div>
+          <button id="stopButton" class="stop-button" aria-label="立即停止">
+            <span class="stop-icon"></span><strong>立即停止</strong>
+          </button>
+        </div>
+        <p class="safety-note">拖动摇杆控制前后和转向；松手自动回中并停车。</p>
+      </div>
+
+      <aside class="panel settings-panel">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">VELOCITY</p>
+            <h2>速度设置</h2>
+          </div>
+        </div>
+
+        <label class="slider-row">
+          <span><b>线速度</b><output id="linearValue">0.12 m/s</output></span>
+          <input id="linearSpeed" type="range" min="0.01" max="0.25" step="0.01" value="0.12">
+        </label>
+        <label class="slider-row">
+          <span><b>角速度</b><output id="angularValue">0.45 rad/s</output></span>
+          <input id="angularSpeed" type="range" min="0.05" max="0.80" step="0.05" value="0.45">
+        </label>
+
+        <div class="command-readout">
+          <span>当前目标</span>
+          <code id="commandValue">x 0.00 · yaw 0.00</code>
+        </div>
+
+        <section class="mapping-panel" aria-label="RTAB-Map 建图控制">
+          <div class="mapping-heading">
+            <div>
+              <p class="eyebrow">RTAB-MAP</p>
+              <h2>建图控制</h2>
+            </div>
+            <strong id="mappingState" class="mapping-state stopped">未启动</strong>
+          </div>
+          <p id="mappingDetail" class="mapping-detail">需要先启动 D435i 相机驱动。</p>
+          <div class="mapping-actions">
+            <button id="mappingStartButton" class="mapping-start">开始建图</button>
+            <button id="mappingStopButton" class="mapping-stop" disabled>停止建图</button>
+          </div>
+        </section>
+
+        <button id="estopButton" class="estop-button">
+          <span class="estop-symbol">!</span>
+          <span><strong>紧急停止</strong><small>立即锁定运动输出</small></span>
+        </button>
+        <button id="releaseButton" class="release-button" hidden>解除急停</button>
+      </aside>
+    </section>
+
+    <section class="preview-grid" aria-label="建图实时预览">
+      <article class="panel preview-panel">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">CAMERA</p>
+            <h2>当前 RGB</h2>
+          </div>
+          <span id="rgbPreviewState" class="preview-state">等待相机</span>
+        </div>
+        <div class="rgb-frame">
+          <img id="rgbPreview" alt="D435i 当前 RGB 图像">
+          <span id="rgbPreviewHint" class="preview-overlay">等待 D435i 图像</span>
+        </div>
+      </article>
+
+      <article class="panel preview-panel">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">RTAB-MAP</p>
+            <h2>稀疏点云</h2>
+          </div>
+          <span id="cloudPreviewState" class="preview-state">等待建图</span>
+        </div>
+        <div class="cloud-frame">
+          <canvas id="cloudPreview" aria-label="RTAB-Map 稀疏点云预览"></canvas>
+          <span id="cloudPreviewHint" class="preview-overlay">开始建图后显示点云</span>
+        </div>
+      </article>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

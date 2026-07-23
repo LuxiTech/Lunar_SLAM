@@ -8,6 +8,7 @@
 ```text
 luxi_RTAB_Map/     # RGB-D RTAB-Map 建图
 luxi_navigation/   # /cmd_vel WASD 键盘遥控
+luxi-web-control/  # 网页 WASD/触屏遥控，发布标准 /cmd_vel
 ```
 
 后续新增功能应使用独立包，例如定位、导航和语义识别，并订阅驱动或上游算法

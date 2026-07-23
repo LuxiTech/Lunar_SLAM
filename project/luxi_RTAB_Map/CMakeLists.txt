@@ -41,7 +41,9 @@ install(DIRECTORY launch docs rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(PROGRAMS scripts/export_3d_map.sh
+install(PROGRAMS
+  scripts/export_3d_map.sh
+  scripts/view_latest_map.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

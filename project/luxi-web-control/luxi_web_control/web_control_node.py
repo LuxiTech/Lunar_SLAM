@@ -1,0 +1,1095 @@
+# Copyright 2026 lunar
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Serve a browser controller and publish safe, standard Twist commands."""
+
+from dataclasses import dataclass
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shlex
+import signal
+import socket
+import struct
+import subprocess
+import threading
+import time
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlsplit
+
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import Twist
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
+from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
+
+
+MAX_REQUEST_BYTES = 16 * 1024
+SIOCGIFADDR = 0x8915
+
+
+def discover_lan_ipv4_addresses() -> list:
+    """Return non-loopback IPv4 addresses assigned to local interfaces."""
+    addresses = set()
+    physical_addresses = set()
+    try:
+        import fcntl
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            for _, interface_name in socket.if_nameindex():
+                try:
+                    request = struct.pack(
+                        "256s",
+                        interface_name[:15].encode("utf-8"),
+                    )
+                    response = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, request)
+                    address = socket.inet_ntoa(response[20:24])
+                    parsed = ipaddress.ip_address(address)
+                    if not parsed.is_loopback and not parsed.is_link_local:
+                        addresses.add(address)
+                        device_path = Path(
+                            "/sys/class/net",
+                            interface_name,
+                            "device",
+                        )
+                        if device_path.exists():
+                            physical_addresses.add(address)
+                except (OSError, UnicodeError, ValueError):
+                    continue
+    except (ImportError, OSError):
+        pass
+    preferred_addresses = physical_addresses or addresses
+    return sorted(
+        preferred_addresses,
+        key=lambda value: ipaddress.ip_address(value).packed,
+    )
+
+
+def make_access_urls(
+    bind_address: str,
+    port: int,
+    lan_addresses: Optional[list] = None,
+) -> list:
+    """Build browser URLs appropriate for the configured listen address."""
+    if bind_address == "0.0.0.0":
+        addresses = (
+            discover_lan_ipv4_addresses()
+            if lan_addresses is None
+            else lan_addresses
+        )
+        if not addresses:
+            addresses = ["127.0.0.1"]
+    else:
+        addresses = [bind_address]
+    return [f"http://{address}:{port}" for address in addresses]
+
+
+def is_managed_web_control_command(command: str) -> bool:
+    """Return whether a process command belongs to this web control package."""
+    return "luxi_web_control" in command and "web_control_node" in command
+
+
+def _listening_process_ids(port: int) -> list:
+    """Return process IDs listening on a TCP port using Linux ss output."""
+    try:
+        result = subprocess.run(
+            ["ss", "-H", "-ltnp", f"sport = :{port}"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    matches = re.findall(r"pid=(\d+)", result.stdout)
+    return sorted({int(match) for match in matches})
+
+
+def _process_command(pid: int) -> str:
+    """Return a process command line, or an empty string if it disappeared."""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(
+            b"\x00",
+            b" ",
+        ).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def stop_existing_web_control(
+    port: int,
+    timeout: float = 5.0,
+) -> Tuple[bool, str]:
+    """Stop only same-user luxi_web_control listeners on a requested port."""
+    pids = _listening_process_ids(port)
+    if not pids:
+        return True, ""
+
+    own_pids = []
+    foreign_pids = []
+    for pid in pids:
+        try:
+            same_user = os.stat(f"/proc/{pid}").st_uid == os.getuid()
+        except OSError:
+            continue
+        if same_user and is_managed_web_control_command(_process_command(pid)):
+            own_pids.append(pid)
+        else:
+            foreign_pids.append(pid)
+    if foreign_pids:
+        return False, (
+            f"port {port} is held by a non-web-control process: {foreign_pids}"
+        )
+    if not own_pids:
+        return False, (
+            f"port {port} is occupied but its owner cannot be identified"
+        )
+
+    for pid in own_pids:
+        try:
+            os.kill(pid, signal.SIGINT)
+        except ProcessLookupError:
+            continue
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = _listening_process_ids(port)
+        if not remaining:
+            return True, (
+                f"stopped previous web controller process(es): {own_pids}"
+            )
+        time.sleep(0.05)
+    return False, f"previous web controller did not release port {port}"
+
+
+@dataclass(frozen=True)
+class VelocityCommand:
+    """Planar velocity values used to construct a Twist message."""
+
+    linear_x: float = 0.0
+    linear_y: float = 0.0
+    angular_z: float = 0.0
+
+    @property
+    def moving(self) -> bool:
+        """Return whether any commanded axis is non-zero."""
+        return any(abs(value) > 1.0e-9 for value in self.as_tuple())
+
+    def as_tuple(self) -> Tuple[float, float, float]:
+        """Return values in x, y, yaw order."""
+        return self.linear_x, self.linear_y, self.angular_z
+
+    def as_dict(self) -> Dict[str, float]:
+        """Return a JSON-friendly representation."""
+        return {
+            "linear_x": self.linear_x,
+            "linear_y": self.linear_y,
+            "angular_z": self.angular_z,
+        }
+
+
+def clamp(value: float, limit: float) -> float:
+    """Clamp a signed value to a symmetric non-negative limit."""
+    return max(-limit, min(limit, value))
+
+
+def parse_velocity(
+    payload: Dict[str, Any],
+    limits: VelocityCommand,
+) -> VelocityCommand:
+    """Validate and clamp an API velocity payload."""
+    values = []
+    for name, limit in zip(
+        ("linear_x", "linear_y", "angular_z"),
+        limits.as_tuple(),
+    ):
+        raw_value = payload.get(name, 0.0)
+        if (
+            isinstance(raw_value, bool)
+            or not isinstance(raw_value, (int, float))
+        ):
+            raise ValueError(f"{name} must be a number")
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+        values.append(clamp(value, limit))
+    return VelocityCommand(*values)
+
+
+def extract_sparse_cloud(
+    message: PointCloud2,
+    max_points: int,
+) -> list:
+    """Extract finite XYZRGB samples from a PointCloud2 message."""
+    field_by_name = {field.name: field for field in message.fields}
+    required_fields = ("x", "y", "z")
+    if any(name not in field_by_name for name in required_fields):
+        return []
+    if message.point_step <= 0 or message.width <= 0 or message.height <= 0:
+        return []
+
+    total_points = message.width * message.height
+    stride = max(1, (total_points + max_points - 1) // max_points)
+    endian = ">" if message.is_bigendian else "<"
+    x_field = field_by_name["x"]
+    y_field = field_by_name["y"]
+    z_field = field_by_name["z"]
+    rgb_field = field_by_name.get("rgb") or field_by_name.get("rgba")
+    data = message.data
+    points = []
+
+    for point_index in range(0, total_points, stride):
+        row_index, column_index = divmod(point_index, message.width)
+        offset = row_index * message.row_step + column_index * message.point_step
+        try:
+            x = struct.unpack_from(endian + "f", data, offset + x_field.offset)[0]
+            y = struct.unpack_from(endian + "f", data, offset + y_field.offset)[0]
+            z = struct.unpack_from(endian + "f", data, offset + z_field.offset)[0]
+        except struct.error:
+            continue
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            continue
+
+        red, green, blue = 210, 225, 235
+        if rgb_field is not None:
+            try:
+                if rgb_field.datatype == PointField.FLOAT32:
+                    rgb_float = struct.unpack_from(
+                        endian + "f",
+                        data,
+                        offset + rgb_field.offset,
+                    )[0]
+                    rgb = struct.unpack(
+                        endian + "I",
+                        struct.pack(endian + "f", rgb_float),
+                    )[0]
+                elif rgb_field.datatype == PointField.UINT32:
+                    rgb = struct.unpack_from(
+                        endian + "I",
+                        data,
+                        offset + rgb_field.offset,
+                    )[0]
+                else:
+                    rgb = 0
+                red = (rgb >> 16) & 0xff
+                green = (rgb >> 8) & 0xff
+                blue = rgb & 0xff
+            except struct.error:
+                pass
+        points.append(
+            (round(x, 3), round(y, 3), round(z, 3), red, green, blue)
+        )
+    return points
+
+
+class MappingController:
+    """Own the RTAB-Map launch process started from the web interface."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        package: str,
+        launch_file: str,
+        rmw_implementation: str,
+        d435_setup: Path,
+        workspace_setup: Path,
+        log_path: Path,
+    ) -> None:
+        self.enabled = enabled
+        self.package = package
+        self.launch_file = launch_file
+        self.rmw_implementation = rmw_implementation
+        self.d435_setup = d435_setup
+        self.workspace_setup = workspace_setup
+        self.log_path = log_path
+        self._lock = threading.Lock()
+        self._process: Optional[subprocess.Popen] = None
+        self._started_at: Optional[float] = None
+        self._last_exit_code: Optional[int] = None
+        self._last_error = ""
+        self._stop_requested = False
+
+    def _command(self) -> list:
+        """Build a shell-free, source-aware RTAB-Map launch command."""
+        source_commands = [
+            f"source {shlex.quote(str(self.d435_setup))}",
+            f"source {shlex.quote(str(self.workspace_setup))}",
+            "export ROS_LOCALHOST_ONLY=0",
+            "export RMW_IMPLEMENTATION="
+            + shlex.quote(self.rmw_implementation),
+        ]
+        launch_command = shlex.join([
+            "ros2",
+            "launch",
+            self.package,
+            self.launch_file,
+            "rviz:=false",
+            "rtabmap_viz:=false",
+        ])
+        script = "set -e; " + "; ".join(source_commands)
+        script += f"; exec {launch_command}"
+        return ["/bin/bash", "-c", script]
+
+    def start(self) -> Tuple[bool, str]:
+        """Start a fresh managed RTAB-Map process when prerequisites exist."""
+        with self._lock:
+            if not self.enabled:
+                return False, "mapping control is disabled"
+            if self._process is not None and self._process.poll() is None:
+                return False, "RTAB-Map mapping is already running"
+            missing = [
+                path
+                for path in (self.d435_setup, self.workspace_setup)
+                if not path.is_file()
+            ]
+            if missing:
+                return False, (
+                    "mapping setup file is missing: "
+                    + ", ".join(str(path) for path in missing)
+                )
+            try:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(
+                        "\n===== RTAB-Map started by luxi_web_control =====\n"
+                    )
+                    self._process = subprocess.Popen(
+                        self._command(),
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        env=os.environ.copy(),
+                    )
+            except OSError as exc:
+                self._process = None
+                self._last_error = str(exc)
+                return False, f"unable to start RTAB-Map: {exc}"
+            self._started_at = time.monotonic()
+            self._last_exit_code = None
+            self._last_error = ""
+            self._stop_requested = False
+            return True, "RTAB-Map launch process started"
+
+    def stop(self) -> Tuple[bool, str]:
+        """Gracefully stop only this controller's RTAB-Map process."""
+        with self._lock:
+            process = self._process
+            if process is None or process.poll() is not None:
+                self._update_exit_state_locked()
+                return True, "RTAB-Map mapping is already stopped"
+            self._stop_requested = True
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                self._update_exit_state_locked()
+                return True, "RTAB-Map mapping is already stopped"
+
+        try:
+            process.wait(timeout=8.0)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2.0)
+
+        with self._lock:
+            self._update_exit_state_locked()
+        return True, "RTAB-Map mapping stopped"
+
+    def _update_exit_state_locked(self) -> None:
+        """Record a child exit code while holding the manager lock."""
+        if self._process is None:
+            return
+        exit_code = self._process.poll()
+        if exit_code is None:
+            return
+        self._last_exit_code = exit_code
+        if exit_code != 0 and not self._stop_requested:
+            self._last_error = self._latest_log_error()
+        self._stop_requested = False
+        self._process = None
+
+    def _latest_log_error(self) -> str:
+        """Extract the last useful error line from the managed launch log."""
+        try:
+            with self.log_path.open("rb") as log_file:
+                log_file.seek(0, os.SEEK_END)
+                size = log_file.tell()
+                log_file.seek(max(0, size - 8192))
+                log_text = log_file.read().decode("utf-8", errors="replace")
+                lines = log_text.splitlines()
+        except OSError:
+            return "RTAB-Map exited; mapping log is unavailable"
+        for line in reversed(lines):
+            clean_line = line.strip()
+            if "[ERROR]" in clean_line or "Caught exception" in clean_line:
+                return clean_line
+        return "RTAB-Map exited; inspect the mapping log"
+
+    def status(self) -> Dict[str, Any]:
+        """Return a JSON-friendly snapshot of the managed mapping process."""
+        with self._lock:
+            self._update_exit_state_locked()
+            running = self._process is not None
+            pid = self._process.pid if self._process is not None else None
+            started_at = self._started_at
+            exit_code = self._last_exit_code
+            error = self._last_error
+        if not self.enabled:
+            state = "disabled"
+        elif running:
+            state = "running"
+        elif exit_code not in (None, 0) and error:
+            state = "failed"
+        else:
+            state = "stopped"
+        return {
+            "enabled": self.enabled,
+            "state": state,
+            "pid": pid,
+            "uptime_seconds": (
+                None if started_at is None or not running
+                else round(time.monotonic() - started_at, 1)
+            ),
+            "last_exit_code": exit_code,
+            "last_error": error,
+            "log_path": str(self.log_path),
+        }
+
+
+class ControlHTTPServer(ThreadingHTTPServer):
+    """Threaded HTTP server carrying a reference to its ROS node."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        address: Tuple[str, int],
+        control_node: "WebControlNode",
+    ):
+        self.control_node = control_node
+        super().__init__(address, ControlRequestHandler)
+
+
+class ControlRequestHandler(BaseHTTPRequestHandler):
+    """Small same-origin REST API and static file handler."""
+
+    server: ControlHTTPServer
+
+    def log_message(self, _format: str, *args: Any) -> None:
+        """Keep normal requests out of stdout."""
+
+    def _send_headers(
+        self,
+        status: int,
+        content_type: str,
+        content_length: int,
+        cache_control: str = "no-store",
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(content_length))
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
+
+    def _send_json(self, status: int, body: Dict[str, Any]) -> None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self._send_headers(
+            status,
+            "application/json; charset=utf-8",
+            len(data),
+        )
+        self.wfile.write(data)
+
+    def _send_error_json(self, status: int, message: str) -> None:
+        self._send_json(status, {"ok": False, "error": message})
+
+    def _read_json(self) -> Dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("invalid Content-Length") from exc
+        if length <= 0:
+            return {}
+        if length > MAX_REQUEST_BYTES:
+            raise OverflowError("request body is too large")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("request body must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object")
+        return payload
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        """Answer browser CORS preflight requests."""
+        self._send_headers(HTTPStatus.NO_CONTENT, "text/plain", 0)
+
+    def do_GET(self) -> None:  # noqa: N802
+        """Serve current state or one of the bundled web assets."""
+        path = urlsplit(self.path).path
+        if path == "/api/status":
+            self._send_json(HTTPStatus.OK, self.server.control_node.status())
+            return
+        if path == "/api/preview/rgb":
+            image, content_type = self.server.control_node.rgb_preview()
+            if image is None:
+                self._send_error_json(HTTPStatus.NOT_FOUND, "RGB preview unavailable")
+                return
+            self._send_headers(HTTPStatus.OK, content_type, len(image))
+            self.wfile.write(image)
+            return
+        if path == "/api/preview/cloud":
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "cloud": self.server.control_node.cloud_preview()},
+            )
+            return
+
+        assets = {
+            "/": ("index.html", "text/html; charset=utf-8"),
+            "/index.html": ("index.html", "text/html; charset=utf-8"),
+            "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+            "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+        }
+        asset = assets.get(path)
+        if asset is None:
+            self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
+            return
+        filename, content_type = asset
+        try:
+            data = (self.server.control_node.web_root / filename).read_bytes()
+        except OSError:
+            self._send_error_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "web asset unavailable",
+            )
+            return
+        self._send_headers(
+            HTTPStatus.OK,
+            content_type,
+            len(data),
+            cache_control="public, max-age=60",
+        )
+        self.wfile.write(data)
+
+    def do_POST(self) -> None:  # noqa: N802
+        """Accept motion, emergency-stop, and RTAB-Map lifecycle requests."""
+        path = urlsplit(self.path).path
+        try:
+            payload = self._read_json()
+        except OverflowError as exc:
+            self._send_error_json(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                str(exc),
+            )
+            return
+        except ValueError as exc:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+
+        node = self.server.control_node
+        if path == "/api/cmd_vel":
+            try:
+                command = parse_velocity(payload, node.limits)
+                accepted, reason = node.accept_command(command)
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            if not accepted:
+                self._send_error_json(HTTPStatus.LOCKED, reason)
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "command": command.as_dict()},
+            )
+            return
+        if path == "/api/stop":
+            node.stop_motion()
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+        if path == "/api/estop":
+            active = payload.get("active", True)
+            if not isinstance(active, bool):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST,
+                    "active must be boolean",
+                )
+                return
+            node.set_estop(active)
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "estop_active": active},
+            )
+            return
+        if path == "/api/mapping/start":
+            started, message = node.start_mapping()
+            if not started:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.ACCEPTED,
+                {
+                    "ok": True,
+                    "message": message,
+                    "mapping": node.mapping_status(),
+                },
+            )
+            return
+        if path == "/api/mapping/stop":
+            stopped, message = node.stop_mapping()
+            if not stopped:
+                self._send_error_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    message,
+                )
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "message": message,
+                    "mapping": node.mapping_status(),
+                },
+            )
+            return
+        self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
+
+
+class WebControlNode(Node):
+    """Publish browser velocity requests as standard geometry_msgs/Twist."""
+
+    def __init__(self, parameter_overrides: Optional[list] = None) -> None:
+        super().__init__(
+            "web_control",
+            parameter_overrides=parameter_overrides,
+        )
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("bind_address", "0.0.0.0")
+        self.declare_parameter("http_port", 8080)
+        self.declare_parameter("auto_stop_existing_web_control", True)
+        self.declare_parameter("publish_rate", 20.0)
+        self.declare_parameter("command_timeout", 0.6)
+        self.declare_parameter("max_linear_x", 0.25)
+        self.declare_parameter("max_linear_y", 0.0)
+        self.declare_parameter("max_angular_z", 0.8)
+        self.declare_parameter("enable_output", True)
+        self.declare_parameter("web_root", "")
+        self.declare_parameter("enable_mapping_control", True)
+        self.declare_parameter("mapping_launch_package", "luxi_rtab_map")
+        self.declare_parameter("mapping_launch_file", "rgbd_mapping.launch.py")
+        self.declare_parameter(
+            "mapping_rmw_implementation",
+            "rmw_cyclonedds_cpp",
+        )
+        self.declare_parameter("mapping_d435_setup", "")
+        self.declare_parameter("mapping_workspace_setup", "")
+        self.declare_parameter("mapping_log_path", "")
+        self.declare_parameter("enable_preview", True)
+        self.declare_parameter(
+            "rgb_preview_topic",
+            "/camera/camera/color/image_raw/compressed",
+        )
+        self.declare_parameter("cloud_preview_topic", "/rtabmap/cloud_map")
+        self.declare_parameter("max_cloud_points", 1800)
+
+        self.cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
+        bind_address = str(self.get_parameter("bind_address").value)
+        http_port = int(self.get_parameter("http_port").value)
+        auto_stop_existing = bool(
+            self.get_parameter("auto_stop_existing_web_control").value
+        )
+        publish_rate = float(self.get_parameter("publish_rate").value)
+        self.command_timeout = float(
+            self.get_parameter("command_timeout").value
+        )
+        self.output_enabled = bool(self.get_parameter("enable_output").value)
+        self.limits = VelocityCommand(
+            float(self.get_parameter("max_linear_x").value),
+            float(self.get_parameter("max_linear_y").value),
+            float(self.get_parameter("max_angular_z").value),
+        )
+        package_share = Path(
+            get_package_share_directory("luxi_web_control")
+        ).resolve()
+        web_root = str(self.get_parameter("web_root").value)
+        if not web_root:
+            web_root = str(package_share / "web")
+        self.web_root = Path(web_root).resolve()
+
+        workspace_root = package_share.parents[3]
+        d435_setup = str(self.get_parameter("mapping_d435_setup").value)
+        workspace_setup = str(
+            self.get_parameter("mapping_workspace_setup").value
+        )
+        mapping_log_path = str(self.get_parameter("mapping_log_path").value)
+        self.mapping = MappingController(
+            enabled=bool(self.get_parameter("enable_mapping_control").value),
+            package=str(self.get_parameter("mapping_launch_package").value),
+            launch_file=str(self.get_parameter("mapping_launch_file").value),
+            rmw_implementation=str(
+                self.get_parameter("mapping_rmw_implementation").value
+            ),
+            d435_setup=Path(
+                d435_setup
+                or workspace_root / "device/D435i/ros2_ws/install/setup.bash"
+            ).resolve(),
+            workspace_setup=Path(
+                workspace_setup or workspace_root / "install/setup.bash"
+            ).resolve(),
+            log_path=Path(
+                mapping_log_path
+                or workspace_root / "log/luxi_web_control_rtabmap.log"
+            ).resolve(),
+        )
+        self.preview_enabled = bool(self.get_parameter("enable_preview").value)
+        self.rgb_preview_topic = str(
+            self.get_parameter("rgb_preview_topic").value
+        )
+        self.cloud_preview_topic = str(
+            self.get_parameter("cloud_preview_topic").value
+        )
+        self.max_cloud_points = int(
+            self.get_parameter("max_cloud_points").value
+        )
+
+        self._validate_parameters(http_port, publish_rate)
+        replacement_message = ""
+        if auto_stop_existing and http_port != 0:
+            replaced, replacement_message = stop_existing_web_control(
+                http_port
+            )
+            if not replaced:
+                raise RuntimeError(replacement_message)
+        self._lock = threading.Lock()
+        self._command = VelocityCommand()
+        self._last_command_time: Optional[float] = None
+        self._timed_out = False
+        self._estop_active = False
+        self._closed = False
+        self._preview_lock = threading.Lock()
+        self._rgb_image: Optional[bytes] = None
+        self._rgb_content_type = "image/jpeg"
+        self._rgb_received_at: Optional[float] = None
+        self._cloud_points = []
+        self._cloud_frame_id = ""
+        self._cloud_received_at: Optional[float] = None
+
+        qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.publisher = self.create_publisher(Twist, self.cmd_vel_topic, qos)
+        if self.preview_enabled:
+            image_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                durability=DurabilityPolicy.VOLATILE,
+            )
+            cloud_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.rgb_subscription = self.create_subscription(
+                CompressedImage,
+                self.rgb_preview_topic,
+                self._on_rgb_preview,
+                image_qos,
+            )
+            self.cloud_subscription = self.create_subscription(
+                PointCloud2,
+                self.cloud_preview_topic,
+                self._on_cloud_preview,
+                cloud_qos,
+            )
+        self.timer = self.create_timer(
+            1.0 / publish_rate,
+            self._on_publish_timer,
+        )
+
+        self.http_server = ControlHTTPServer((bind_address, http_port), self)
+        self.http_port = int(self.http_server.server_address[1])
+        self.access_urls = make_access_urls(bind_address, self.http_port)
+        self._http_thread = threading.Thread(
+            target=self.http_server.serve_forever,
+            kwargs={"poll_interval": 0.1},
+            name="luxi-web-control-http",
+            daemon=True,
+        )
+        self._http_thread.start()
+        url_lines = "\n  ".join(self.access_urls)
+        self.get_logger().info(
+            f"Web control is publishing Twist on {self.cmd_vel_topic}\n"
+            f"Open one of these addresses in a browser:\n  {url_lines}"
+        )
+        if replacement_message:
+            self.get_logger().info(replacement_message)
+        if not self.output_enabled:
+            self.get_logger().warning(
+                "enable_output is false; only zero velocity is published"
+            )
+
+    def _validate_parameters(
+        self,
+        http_port: int,
+        publish_rate: float,
+    ) -> None:
+        if not 0 <= http_port <= 65535:
+            raise ValueError("http_port must be between 0 and 65535")
+        if publish_rate <= 0.0:
+            raise ValueError("publish_rate must be greater than zero")
+        if self.command_timeout <= 0.0:
+            raise ValueError("command_timeout must be greater than zero")
+        if not 100 <= self.max_cloud_points <= 20000:
+            raise ValueError("max_cloud_points must be between 100 and 20000")
+        if not self.cmd_vel_topic:
+            raise ValueError("cmd_vel_topic must not be empty")
+        invalid_limits = any(
+            value < 0.0 or not math.isfinite(value)
+            for value in self.limits.as_tuple()
+        )
+        if invalid_limits:
+            raise ValueError("velocity limits must be finite and non-negative")
+        if not self.web_root.is_dir():
+            raise ValueError(f"web_root is not a directory: {self.web_root}")
+
+    def _twist(self, command: VelocityCommand) -> Twist:
+        message = Twist()
+        if self.output_enabled and not self._estop_active:
+            message.linear.x = command.linear_x
+            message.linear.y = command.linear_y
+            message.angular.z = command.angular_z
+        return message
+
+    def _publish(self, command: VelocityCommand) -> None:
+        self.publisher.publish(self._twist(command))
+
+    def _on_publish_timer(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if (
+                self._last_command_time is not None
+                and now - self._last_command_time > self.command_timeout
+            ):
+                self._command = VelocityCommand()
+                self._last_command_time = None
+                self._timed_out = True
+            command = self._command
+        self._publish(command)
+
+    def _on_rgb_preview(self, message: CompressedImage) -> None:
+        """Keep the newest compressed camera image for HTTP preview requests."""
+        image_format = message.format.lower()
+        content_type = "image/png" if "png" in image_format else "image/jpeg"
+        with self._preview_lock:
+            self._rgb_image = bytes(message.data)
+            self._rgb_content_type = content_type
+            self._rgb_received_at = time.monotonic()
+
+    def _on_cloud_preview(self, message: PointCloud2) -> None:
+        """Keep a bounded sparse RGB point cloud for browser rendering."""
+        points = extract_sparse_cloud(message, self.max_cloud_points)
+        with self._preview_lock:
+            self._cloud_points = points
+            self._cloud_frame_id = message.header.frame_id
+            self._cloud_received_at = time.monotonic()
+
+    def _clear_cloud_preview(self) -> None:
+        """Discard map data which belongs to a previous mapping session."""
+        with self._preview_lock:
+            self._cloud_points = []
+            self._cloud_frame_id = ""
+            self._cloud_received_at = None
+
+    def rgb_preview(self) -> Tuple[Optional[bytes], str]:
+        """Return the latest compressed RGB frame and its MIME type."""
+        with self._preview_lock:
+            return self._rgb_image, self._rgb_content_type
+
+    def cloud_preview(self) -> Dict[str, Any]:
+        """Return a bounded point-cloud snapshot for the browser Canvas."""
+        with self._preview_lock:
+            preview = self._cloud_preview_summary_locked()
+            preview["points"] = list(self._cloud_points)
+            return preview
+
+    def preview_status(self) -> Dict[str, Any]:
+        """Return lightweight preview availability without cloud point data."""
+        with self._preview_lock:
+            rgb_received_at = self._rgb_received_at
+            return {
+                "enabled": self.preview_enabled,
+                "rgb_topic": self.rgb_preview_topic,
+                "rgb_age_seconds": (
+                    None if rgb_received_at is None
+                    else round(time.monotonic() - rgb_received_at, 2)
+                ),
+                "cloud_topic": self.cloud_preview_topic,
+                "cloud": self._cloud_preview_summary_locked(),
+            }
+
+    def _cloud_preview_summary_locked(self) -> Dict[str, Any]:
+        """Return cloud metadata while the preview lock is held."""
+        received_at = self._cloud_received_at
+        return {
+            "frame_id": self._cloud_frame_id,
+            "age_seconds": (
+                None if received_at is None
+                else round(time.monotonic() - received_at, 2)
+            ),
+            "point_count": len(self._cloud_points),
+        }
+
+    def accept_command(self, command: VelocityCommand) -> Tuple[bool, str]:
+        """Store and immediately publish a validated browser command."""
+        with self._lock:
+            if self._estop_active and command.moving:
+                return False, "emergency stop is active"
+            self._command = command
+            self._last_command_time = (
+                time.monotonic() if command.moving else None
+            )
+            self._timed_out = False
+        self._publish(command)
+        return True, ""
+
+    def stop_motion(self) -> None:
+        """Clear motion and immediately publish zero velocity."""
+        with self._lock:
+            self._command = VelocityCommand()
+            self._last_command_time = None
+            self._timed_out = False
+        self._publish(VelocityCommand())
+
+    def set_estop(self, active: bool) -> None:
+        """Set the sticky software emergency stop; activation always stops."""
+        with self._lock:
+            self._estop_active = active
+            self._command = VelocityCommand()
+            self._last_command_time = None
+            self._timed_out = False
+        self._publish(VelocityCommand())
+
+    def start_mapping(self) -> Tuple[bool, str]:
+        """Start the managed RTAB-Map RGB-D mapping launch."""
+        started, message = self.mapping.start()
+        if started:
+            self._clear_cloud_preview()
+        return started, message
+
+    def stop_mapping(self) -> Tuple[bool, str]:
+        """Stop the managed RTAB-Map RGB-D mapping launch."""
+        stopped, message = self.mapping.stop()
+        if stopped:
+            self._clear_cloud_preview()
+        return stopped, message
+
+    def mapping_status(self) -> Dict[str, Any]:
+        """Return the state of the mapping process owned by this node."""
+        return self.mapping.status()
+
+    def status(self) -> Dict[str, Any]:
+        """Return a thread-safe, JSON-ready controller status snapshot."""
+        now = time.monotonic()
+        with self._lock:
+            command = self._command
+            age = (
+                None
+                if self._last_command_time is None
+                else max(0.0, now - self._last_command_time)
+            )
+            estop_active = self._estop_active
+            timed_out = self._timed_out
+        if not self.output_enabled:
+            state = "disabled"
+        elif estop_active:
+            state = "estop"
+        elif timed_out:
+            state = "timeout"
+        elif command.moving:
+            state = "moving"
+        else:
+            state = "idle"
+        return {
+            "ok": True,
+            "node": self.get_name(),
+            "state": state,
+            "cmd_vel_topic": self.cmd_vel_topic,
+            "http_port": self.http_port,
+            "access_urls": self.access_urls,
+            "output_enabled": self.output_enabled,
+            "estop_active": estop_active,
+            "timed_out": timed_out,
+            "command_age": age,
+            "command_timeout": self.command_timeout,
+            "command": command.as_dict(),
+            "limits": self.limits.as_dict(),
+            "subscriber_count": self.publisher.get_subscription_count(),
+            "mapping": self.mapping_status(),
+            "preview": self.preview_status(),
+        }
+
+    def close(self) -> None:
+        """Stop the HTTP service and leave the robot with a zero command."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.stop_mapping()
+            if rclpy.ok():
+                for _ in range(3):
+                    self.stop_motion()
+                    time.sleep(0.02)
+        finally:
+            self.http_server.shutdown()
+            self.http_server.server_close()
+            if self._http_thread.is_alive():
+                self._http_thread.join(timeout=1.0)
+
+
+def main(args: Optional[list] = None) -> None:
+    """Run the web control ROS node."""
+    # Keep ROS alive during Ctrl+C so close() can publish zero first.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    node: Optional[WebControlNode] = None
+    try:
+        node = WebControlNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if node is not None:
+            node.close()
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

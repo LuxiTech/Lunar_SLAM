@@ -26,10 +26,26 @@ source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
 source /home/lunar/project/lunar_slam/install/setup.bash
 ```
 
-例如查看第一张地图：
+推荐自动打开编号最大的、已经保存完成的地图：
 
 ```bash
-rtabmap-databaseViewer /home/lunar/project/lunar_slam/maps/map001.db
+source /opt/ros/humble/setup.bash
+source /home/lunar/project/lunar_slam/install/setup.bash
+ros2 run luxi_rtab_map view_latest_map.sh
+```
+
+脚本会自动选择最新的 `mapNNN.db`，例如当前的 `map011.db`；不需要手写编号。
+若需确认它将选择哪个文件但不打开图形界面：
+
+```bash
+ros2 run luxi_rtab_map view_latest_map.sh --print-path
+```
+
+也可以显式查看某一张地图，例如第一张地图：
+
+```bash
+ros2 run luxi_rtab_map view_latest_map.sh \
+  /home/lunar/project/lunar_slam/maps/map001.db
 ```
 
 打开后可在 RTAB-Map Database Viewer 中检查轨迹、关键帧、二维栅格地图和三维点云。
