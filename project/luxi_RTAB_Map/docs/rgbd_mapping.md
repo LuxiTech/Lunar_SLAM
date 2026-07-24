@@ -84,8 +84,8 @@ ros2 launch luxi_rtab_map rgbd_mapping.launch.py
 每次启动会自动选择下一个未使用的数据库，例如：
 
 ```bash
-/home/lunar/project/lunar_slam/maps/map001.db
-/home/lunar/project/lunar_slam/maps/map002.db
+/home/lunar/project/lunar_slam/maps/rtab_maps/map001.db
+/home/lunar/project/lunar_slam/maps/rtab_maps/map002.db
 ```
 
 在建图终端按 `Ctrl-C` 并等待 RTAB-Map 正常退出后，当前地图已保存。查看、导出和
@@ -413,13 +413,24 @@ D435i IMU 在这里提供旋转预测和重力方向，不能在没有视觉重�
 接受并造成地图折叠。若缓慢移动仍持续失败，再检查 RGB、对齐深度的频率、曝光、
 画面纹理和相机到目标的距离。
 
-默认启动会创建下一个编号数据库，例如 `maps/map001.db`、`maps/map002.db`，不会
+默认启动会创建下一个编号数据库，例如 `maps/rtab_maps/map001.db`、`maps/rtab_maps/map002.db`，不会
 覆盖已有地图。需要继续已有地图时，显式指定其路径：
 
 ```bash
 ros2 launch luxi_rtab_map rgbd_mapping.launch.py \
-  database_path:=/home/lunar/project/lunar_slam/maps/map001.db
+  database_path:=/home/lunar/project/lunar_slam/maps/rtab_maps/map001.db
 ```
+
+需要在已保存地图上定位而不继续写入地图时，使用专用定位 launch。空的
+`database_path` 会自动选择编号最大的 `mapNNN.db`：
+
+```bash
+ros2 launch luxi_rtab_map rgbd_localization.launch.py \
+  database_path:=/home/lunar/project/lunar_slam/maps/rtab_maps/map001.db
+```
+
+该 launch 将上游 RTAB-Map 的 `localization` 设为 `true`，保留视觉里程计输入和
+`map -> odom -> base_link` 定位链路，但不会把新的关键帧写入选中的数据库。
 
 新地图第一次生成或优化累计点云时，单独出现一次
 `Graph has changed! The whole cloud is regenerated` 是正常行为；只有该消息伴随闭环
@@ -470,7 +481,7 @@ RTAB-Map 只能把具有连续里程计约束或闭环约束的关键帧放入�
 建图过程中所有关键帧、深度、位姿和图约束持续保存在下一个可用编号数据库：
 
 ```text
-/home/lunar/project/lunar_slam/maps/mapNNN.db
+/home/lunar/project/lunar_slam/maps/rtab_maps/mapNNN.db
 ```
 
 查看最近一次已经停止并保存的建图结果时，使用自动选择脚本，避免将三位编号
@@ -497,8 +508,8 @@ ros2 run luxi_rtab_map export_3d_map.sh
 
 ```bash
 ros2 run luxi_rtab_map export_3d_map.sh \
-  /home/lunar/project/lunar_slam/maps/map001.db \
-  /home/lunar/project/lunar_slam/maps/map001_export
+  /home/lunar/project/lunar_slam/maps/rtab_maps/map001.db \
+  /home/lunar/project/lunar_slam/maps/octo_maps/map001_octomap
 ```
 
 导出的 `*_cloud.ply` 可以使用 CloudCompare、MeshLab 或 PCL 工具查看。导出脚本

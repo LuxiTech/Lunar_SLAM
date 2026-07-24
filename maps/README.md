@@ -3,9 +3,10 @@
 每次启动 `rgbd_mapping.launch.py` 都会自动创建下一个编号的 RTAB-Map 数据库：
 
 ```text
-map001.db
-map002.db
-map003.db
+rtab_maps/map001.db
+rtab_maps/map002.db
+octo_maps/map001_octomap/map001.bt
+occupancy_maps/semantic_obstacles.yaml
 ```
 
 建图时数据库会持续写入。停止建图时，先在运行建图的终端按 `Ctrl-C`，等待
@@ -45,7 +46,7 @@ ros2 run luxi_rtab_map view_latest_map.sh --print-path
 
 ```bash
 ros2 run luxi_rtab_map view_latest_map.sh \
-  /home/lunar/project/lunar_slam/maps/map001.db
+  /home/lunar/project/lunar_slam/maps/rtab_maps/map001.db
 ```
 
 打开后可在 RTAB-Map Database Viewer 中检查轨迹、关键帧、二维栅格地图和三维点云。
@@ -54,22 +55,36 @@ ros2 run luxi_rtab_map view_latest_map.sh \
 ## 导出为 PLY 三维点云
 
 停止建图后，以下命令会自动导出编号最大的地图，例如 `map001.db` 到
-`map001_export/`：
+`octo_maps/map001_octomap/`：
 
 ```bash
 ros2 run luxi_rtab_map export_3d_map.sh
 ```
 
-若要指定某一张地图，例如把 `map001.db` 导出到 `map001_export/`：
+若要指定某一张地图，例如把 `map001.db` 导出到 `octo_maps/map001_octomap/`：
 
 ```bash
 ros2 run luxi_rtab_map export_3d_map.sh \
-  /home/lunar/project/lunar_slam/maps/map001.db \
-  /home/lunar/project/lunar_slam/maps/map001_export
+  /home/lunar/project/lunar_slam/maps/rtab_maps/map001.db \
+  /home/lunar/project/lunar_slam/maps/octo_maps/map001_octomap
 ```
 
 导出的 `*_cloud.ply` 可使用 CloudCompare 或 MeshLab 打开。将命令中的 `map001`
 替换为所需地图编号即可。
+
+## 转换为导航 OctoMap
+
+项目提供了从保存数据库到 OctoMap 的一键工具。它会导出 PLY 后生成二进制体素地图
+`mapNNN.bt`，输出位于 `maps/octo_maps/mapNNN_octomap/`：
+
+```bash
+cd /home/lunar/project/lunar_slam
+tools/export_rtabmap_octomap.sh
+```
+
+实时定位、稀疏点云转 OctoMap 与路径规划的完整启动方法见
+`project/luxi_voxel_navigation/README.md`。路径跟随器默认发布到
+`/navigation/cmd_vel`，不会直接驱动底盘。
 
 ## 继续已有地图
 
@@ -77,5 +92,5 @@ ros2 run luxi_rtab_map export_3d_map.sh \
 
 ```bash
 ros2 launch luxi_rtab_map rgbd_mapping.launch.py \
-  database_path:=/home/lunar/project/lunar_slam/maps/map001.db
+  database_path:=/home/lunar/project/lunar_slam/maps/rtab_maps/map001.db
 ```

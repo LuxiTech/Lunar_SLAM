@@ -121,7 +121,7 @@ source /home/lunar/project/lunar_slam/install/setup.bash
 ros2 launch luxi_navigation manual_map_annotation.launch.py \
   map_id:=map004 \
   map_topic:=/rtabmap/map \
-  output_path:=/home/lunar/project/lunar_slam/maps/map004_semantic.yaml
+  output_path:=/home/lunar/project/lunar_slam/maps/occupancy_maps/map004_semantic.yaml
 ```
 
 如果使用 Nav2 `map_server` 发布的固化 `/map`，使用：
@@ -131,7 +131,7 @@ ros2 launch luxi_navigation manual_map_annotation.launch.py \
   map_id:=map004 \
   map_topic:=/map \
   map_transient_local:=true \
-  output_path:=/home/lunar/project/lunar_slam/maps/map004_semantic.yaml
+  output_path:=/home/lunar/project/lunar_slam/maps/occupancy_maps/map004_semantic.yaml
 ```
 
 当前项目 RTAB-Map RViz 配置已经加入 `Publish Point` 工具和

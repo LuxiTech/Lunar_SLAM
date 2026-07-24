@@ -143,12 +143,18 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py
 成功启动并收到 RTAB-Map 地图数据后才会出现。点云为浏览器实时查看而抽样的最多
 1800 个点，并不是完整地图导出；其显示采用固定等轴视角，适合确认重建是否持续更新。
 
-每一次新建图默认写入 `/home/lunar/project/lunar_slam/maps/mapNNN.db`。如果启动失败，
+每一次新建图默认写入 `/home/lunar/project/lunar_slam/maps/rtab_maps/mapNNN.db`。如果启动失败，
 网页会显示失败状态；详细日志位于
 `/home/lunar/project/lunar_slam/log/luxi_web_control_rtabmap.log`。常见原因是 D435i
 驱动尚未运行、没有相机 RGB-D 数据，或没有加载 D435i 工作区。
 
 网页只停止它自己启动的 RTAB-Map 进程，不会停止手工终端中已经运行的建图任务。
+
+网页还会列出 `maps/rtab_maps/mapNNN.db` 与
+`maps/octo_maps/mapNNN_octomap/mapNNN.bt` 同时存在的地图。选择后会启动保存地图定位、
+静态 OctoMap 加载和 A* 规划；体素地图以俯视图显示，点击位置会向
+`/navigation/goal_pose` 发布目标并在网页上绘制 `/navigation/planned_path`。该功能不
+会自动启用路径跟随，默认也不会向 `/cmd_vel` 发送导航速度。
 
 ## 参数
 

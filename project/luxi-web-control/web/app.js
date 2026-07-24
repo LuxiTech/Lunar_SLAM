@@ -28,6 +28,13 @@ const rgbPreviewHint = $("#rgbPreviewHint");
 const cloudPreview = $("#cloudPreview");
 const cloudPreviewState = $("#cloudPreviewState");
 const cloudPreviewHint = $("#cloudPreviewHint");
+const navigationState = $("#navigationState");
+const navigationDetail = $("#navigationDetail");
+const navigationMapSelect = $("#navigationMapSelect");
+const navigationLoadButton = $("#navigationLoadButton");
+const navigationStopButton = $("#navigationStopButton");
+const voxelMapCanvas = $("#voxelMapCanvas");
+const voxelMapHint = $("#voxelMapHint");
 
 const held = new Set();
 let estopActive = false;
@@ -40,6 +47,10 @@ let joystickY = 0;
 let rgbRefreshPending = false;
 let rgbObjectUrl = null;
 let cloudRefreshPending = false;
+let navigationMapsRefreshPending = false;
+let voxelRefreshPending = false;
+let voxelViewport = null;
+let selectedGoal = null;
 
 const keyActions = {
   KeyW: "forward",
@@ -306,6 +317,198 @@ const mappingStateNames = {
   failed: "启动失败",
 };
 
+const navigationStateNames = {
+  disabled: "不可用",
+  stopped: "未加载",
+  running: "定位/规划中",
+  failed: "启动失败",
+};
+
+function updateNavigation(navigation) {
+  if (!navigation) return;
+  const name = navigationStateNames[navigation.state] || navigation.state;
+  navigationState.textContent = name;
+  navigationState.className = `preview-state ${navigation.state === "running" ? "live" : ""}`;
+  navigationLoadButton.disabled = !navigation.enabled || !navigationMapSelect.value;
+  navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
+  if (navigation.last_error) {
+    navigationDetail.textContent = navigation.last_error;
+  } else if (navigation.state === "running") {
+    navigationDetail.textContent = `正在使用 ${navigation.map_id || "所选地图"} 进行定位；点击地图发送目标点。`;
+  } else if (!navigation.enabled) {
+    navigationDetail.textContent = "当前节点未启用地图定位与规划控制。";
+  } else {
+    navigationDetail.textContent = "选择同时包含 .db 和 .bt 的地图后加载。";
+  }
+}
+
+function updateNavigationMaps(maps) {
+  const previous = navigationMapSelect.value;
+  navigationMapSelect.replaceChildren();
+  for (const item of maps) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.disabled = !item.loadable;
+    option.textContent = item.loadable ? `${item.id}（数据库 + 体素地图）` : `${item.id}（缺少 ${item.database_path ? ".bt" : ".db"}）`;
+    navigationMapSelect.append(option);
+  }
+  if (!maps.length) {
+    const option = document.createElement("option");
+    option.textContent = "未发现可用地图";
+    option.value = "";
+    navigationMapSelect.append(option);
+  }
+  if (Array.from(navigationMapSelect.options).some((option) => option.value === previous)) {
+    navigationMapSelect.value = previous;
+  } else {
+    const firstLoadable = maps.find((item) => item.loadable);
+    navigationMapSelect.value = firstLoadable ? firstLoadable.id : "";
+  }
+}
+
+async function refreshNavigationMaps() {
+  if (navigationMapsRefreshPending) return;
+  navigationMapsRefreshPending = true;
+  try {
+    const response = await fetch("/api/navigation/maps", {cache: "no-store"});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    updateNavigationMaps(Array.isArray(result.maps) ? result.maps : []);
+    updateNavigation(result.navigation);
+  } catch (_error) {
+    navigationDetail.textContent = "无法读取地图目录。";
+  } finally {
+    navigationMapsRefreshPending = false;
+  }
+}
+
+function canvasMetrics(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width));
+  const height = Math.max(1, Math.round(rect.height));
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  if (canvas.width !== width * ratio || canvas.height !== height * ratio) {
+    canvas.width = width * ratio;
+    canvas.height = height * ratio;
+  }
+  const context = canvas.getContext("2d");
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return {context, width, height, rect};
+}
+
+function drawVoxelMap(voxels, path) {
+  const {context, width, height} = canvasMetrics(voxelMapCanvas);
+  context.fillStyle = "#080d13";
+  context.fillRect(0, 0, width, height);
+  const points = Array.isArray(voxels.points) ? voxels.points : [];
+  const pathPoints = Array.isArray(path.points) ? path.points : [];
+  const all = points.concat(pathPoints, selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : []);
+  if (!all.length) {
+    voxelViewport = null;
+    return;
+  }
+  const xs = all.map((point) => point[0]);
+  const ys = all.map((point) => point[1]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = Math.max(0.5, maxX - minX);
+  const spanY = Math.max(0.5, maxY - minY);
+  const scale = Math.min((width - 36) / spanX, (height - 36) / spanY);
+  voxelViewport = {minX, maxX, minY, maxY, scale, width, height};
+  const toCanvas = (point) => [
+    width * 0.5 + (point[0] - (minX + maxX) * 0.5) * scale,
+    height * 0.5 - (point[1] - (minY + maxY) * 0.5) * scale,
+  ];
+  context.fillStyle = "rgba(101, 227, 181, .62)";
+  for (const point of points) {
+    const [x, y] = toCanvas(point);
+    context.fillRect(x - 1, y - 1, 2, 2);
+  }
+  if (pathPoints.length) {
+    context.strokeStyle = "#ffd166";
+    context.lineWidth = 2.5;
+    context.beginPath();
+    pathPoints.forEach((point, index) => {
+      const [x, y] = toCanvas(point);
+      if (index) context.lineTo(x, y);
+      else context.moveTo(x, y);
+    });
+    context.stroke();
+  }
+  if (selectedGoal) {
+    const [x, y] = toCanvas([selectedGoal.x, selectedGoal.y]);
+    context.strokeStyle = "#ff7580";
+    context.lineWidth = 2;
+    context.beginPath();
+    context.arc(x, y, 6, 0, Math.PI * 2);
+    context.stroke();
+  }
+}
+
+async function refreshVoxelMap() {
+  if (voxelRefreshPending) return;
+  voxelRefreshPending = true;
+  try {
+    const [voxelResponse, pathResponse] = await Promise.all([
+      fetch("/api/navigation/voxels", {cache: "no-store"}),
+      fetch("/api/navigation/path", {cache: "no-store"}),
+    ]);
+    if (!voxelResponse.ok || !pathResponse.ok) throw new Error("preview unavailable");
+    const voxels = (await voxelResponse.json()).voxels || {};
+    const path = (await pathResponse.json()).path || {};
+    drawVoxelMap(voxels, path);
+    voxelMapHint.classList.toggle("hidden", !(voxels.points || []).length);
+  } catch (_error) {
+    voxelMapHint.classList.remove("hidden");
+  } finally {
+    voxelRefreshPending = false;
+  }
+}
+
+async function loadNavigationMap() {
+  const mapId = navigationMapSelect.value;
+  if (!mapId) return;
+  navigationLoadButton.disabled = true;
+  try {
+    const result = await api("/api/navigation/load_map", {map_id: mapId});
+    selectedGoal = null;
+    updateNavigation(result.navigation);
+    showToast(`${mapId} 正在加载，请等待定位和体素地图就绪`);
+  } catch (error) {
+    showToast(`地图加载失败：${error.message}`);
+  }
+}
+
+async function stopNavigation() {
+  try {
+    const result = await api("/api/navigation/stop");
+    updateNavigation(result.navigation);
+    showToast("地图定位与规划已停止");
+  } catch (error) {
+    showToast(`停止失败：${error.message}`);
+  }
+}
+
+navigationLoadButton.addEventListener("click", loadNavigationMap);
+navigationStopButton.addEventListener("click", stopNavigation);
+navigationMapSelect.addEventListener("change", () => updateNavigation({enabled: true, state: "stopped"}));
+voxelMapCanvas.addEventListener("click", async (event) => {
+  if (!voxelViewport) return;
+  const rect = voxelMapCanvas.getBoundingClientRect();
+  const x = voxelViewport.minX + (event.clientX - rect.left - (voxelViewport.width - (voxelViewport.maxX - voxelViewport.minX) * voxelViewport.scale) * 0.5) / voxelViewport.scale;
+  const y = voxelViewport.maxY - (event.clientY - rect.top - (voxelViewport.height - (voxelViewport.maxY - voxelViewport.minY) * voxelViewport.scale) * 0.5) / voxelViewport.scale;
+  selectedGoal = {x, y};
+  try {
+    await api("/api/navigation/goal", {x, y, z: 0});
+    showToast(`目标点已发送：${x.toFixed(2)}, ${y.toFixed(2)}`);
+    refreshVoxelMap();
+  } catch (error) {
+    showToast(`规划请求失败：${error.message}`);
+  }
+});
+
 function updateMapping(mapping) {
   if (!mapping) return;
   const mappingStateName = mappingStateNames[mapping.state] || mapping.state;
@@ -458,6 +661,7 @@ async function refreshStatus() {
     state.textContent = stateNames[data.state] || data.state;
     setEstopUi(Boolean(data.estop_active));
     updateMapping(data.mapping);
+    updateNavigation(data.navigation);
     updatePreviewStatus(data.preview);
 
     const linearLimit = Number(data.limits.linear_x);
@@ -483,7 +687,12 @@ setInterval(sendCommand, 100);
 setInterval(refreshStatus, 1000);
 setInterval(refreshRgbPreview, 500);
 setInterval(refreshCloudPreview, 1200);
-window.addEventListener("resize", refreshCloudPreview);
+setInterval(refreshNavigationMaps, 2500);
+setInterval(refreshVoxelMap, 1000);
+window.addEventListener("resize", () => {
+  refreshCloudPreview();
+  refreshVoxelMap();
+});
 window.addEventListener("blur", () => stop({keepalive: true}));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stop({keepalive: true});
@@ -497,3 +706,5 @@ updateSpeeds();
 refreshStatus();
 refreshRgbPreview();
 refreshCloudPreview();
+refreshNavigationMaps();
+refreshVoxelMap();

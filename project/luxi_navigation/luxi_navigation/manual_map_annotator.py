@@ -248,7 +248,7 @@ class ManualMapAnnotator(Node):
         self.declare_parameter("map_id", "")
         self.declare_parameter(
             "output_path",
-            "/home/lunar/project/lunar_slam/maps/semantic_obstacles.yaml",
+            "/home/lunar/project/lunar_slam/maps/occupancy_maps/semantic_obstacles.yaml",
         )
         self.declare_parameter("map_topic", "/rtabmap/map")
         self.declare_parameter("clicked_point_topic", "/clicked_point")

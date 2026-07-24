@@ -23,10 +23,12 @@ from pathlib import Path
 
 from sensor_msgs.msg import PointCloud2, PointField
 
+from luxi_web_control.web_control_node import discover_navigation_maps
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import MappingController
 from luxi_web_control.web_control_node import is_managed_web_control_command
 from luxi_web_control.web_control_node import make_access_urls
+from luxi_web_control.web_control_node import parse_navigation_goal
 from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
 
 
@@ -132,6 +134,48 @@ def test_sparse_cloud_extracts_finite_xyzrgb_points():
         (1.0, 2.0, 3.0, 17, 34, 51),
         (-1.0, 0.5, 0.25, 17, 34, 51),
     ]
+
+
+def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
+    (tmp_path / "rtab_maps").mkdir()
+    (tmp_path / "octo_maps" / "map011_octomap").mkdir(parents=True)
+    (tmp_path / "rtab_maps" / "map011.db").write_bytes(b"database")
+    (tmp_path / "rtab_maps" / "map012.db").write_bytes(b"database")
+    (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").write_bytes(b"octomap")
+
+    assert discover_navigation_maps(tmp_path) == [
+        {
+            "id": "map011",
+            "database_path": str((tmp_path / "rtab_maps" / "map011.db").resolve()),
+            "octomap_path": str(
+                (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").resolve()
+            ),
+            "loadable": True,
+        },
+        {
+            "id": "map012",
+            "database_path": str((tmp_path / "rtab_maps" / "map012.db").resolve()),
+            "octomap_path": None,
+            "loadable": False,
+        },
+    ]
+
+
+@pytest.mark.parametrize("payload", [
+    {"x": 0.1, "y": -0.2},
+    {"x": 0, "y": 0, "z": 0.3},
+])
+def test_navigation_goal_accepts_finite_coordinates(payload):
+    assert parse_navigation_goal(payload) == (
+        float(payload["x"]), float(payload["y"]), float(payload.get("z", 0.0)))
+
+
+@pytest.mark.parametrize("payload", [
+    {"x": True, "y": 0}, {"x": math.nan, "y": 0}, {"x": 0, "y": "bad"},
+])
+def test_navigation_goal_rejects_invalid_coordinates(payload):
+    with pytest.raises(ValueError):
+        parse_navigation_goal(payload)
 
 
 @pytest.mark.parametrize("value", ["fast", True, None, math.inf, math.nan])

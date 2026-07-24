@@ -26,6 +26,19 @@ web_control:
     # D435i driver uses Cyclone DDS; /cmd_vel stays on Fast DDS in the web node.
     mapping_rmw_implementation: rmw_cyclonedds_cpp
 
+    # Map pairs are discovered as rtab_maps/mapNNN.db and
+    # octo_maps/mapNNN_octomap/mapNNN.bt. Loading only starts localization
+    # and global planning; it never enables the path follower by itself.
+    enable_navigation_control: true
+    navigation_launch_package: luxi_voxel_navigation
+    navigation_launch_file: saved_map_navigation.launch.py
+    navigation_rmw_implementation: rmw_cyclonedds_cpp
+    maps_root: /home/lunar/project/lunar_slam/maps
+    navigation_goal_topic: /navigation/goal_pose
+    navigation_marker_topic: /navigation/occupied_voxels
+    navigation_path_topic: /navigation/planned_path
+    max_voxel_points: 12000
+
     # Read-only RGB and sparse RTAB-Map cloud previews for the web page.
     enable_preview: true
     rgb_preview_topic: /camera/camera/color/image_raw/compressed

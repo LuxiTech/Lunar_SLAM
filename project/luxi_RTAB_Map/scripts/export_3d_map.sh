@@ -2,7 +2,8 @@
 
 set -eo pipefail
 
-maps_directory="/home/lunar/project/lunar_slam/maps"
+maps_directory="/home/lunar/project/lunar_slam/maps/rtab_maps"
+octo_maps_directory="/home/lunar/project/lunar_slam/maps/octo_maps"
 
 if [[ $# -ge 1 ]]; then
   database_path="$1"
@@ -18,7 +19,7 @@ if [[ $# -ge 2 ]]; then
   output_directory="$2"
 else
   database_name="$(basename "${database_path:-map}")"
-  output_directory="${maps_directory}/${database_name%.db}_export"
+  output_directory="${octo_maps_directory}/${database_name%.db}_octomap"
 fi
 
 if pgrep -f "/rtabmap_slam/lib/rtabmap_slam/rtabmap" >/dev/null; then
@@ -27,7 +28,7 @@ if pgrep -f "/rtabmap_slam/lib/rtabmap_slam/rtabmap" >/dev/null; then
 fi
 
 if [[ ! -f "${database_path}" ]]; then
-  echo "No saved map database found. Specify maps/mapNNN.db explicitly." >&2
+  echo "No saved map database found. Specify maps/rtab_maps/mapNNN.db explicitly." >&2
   exit 3
 fi
 

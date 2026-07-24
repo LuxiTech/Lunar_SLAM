@@ -43,7 +43,7 @@ TEST_PROCESS_MARKERS = (
     "__node:=base_to_d435i_tf",
 )
 
-MAPS_DIRECTORY = "/home/lunar/project/lunar_slam/maps"
+MAPS_DIRECTORY = "/home/lunar/project/lunar_slam/maps/rtab_maps"
 
 
 def _prepare_database_path(context: object) -> list[LogInfo]:
@@ -224,7 +224,7 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments={
             "stereo": "false",
             "depth": "false",
-            "localization": "false",
+            "localization": LaunchConfiguration("localization"),
             "rtabmap_viz": LaunchConfiguration("rtabmap_viz"),
             "rviz": "false",
             "frame_id": LaunchConfiguration("base_frame"),
@@ -312,9 +312,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("rviz", default_value="true"),
             DeclareLaunchArgument("rtabmap_viz", default_value="false"),
             DeclareLaunchArgument(
+                "localization",
+                default_value="false",
+                description="Use an existing RTAB-Map database for localization without extending it.",
+            ),
+            DeclareLaunchArgument(
                 "database_path",
                 default_value="",
-                description="Existing database to continue; empty creates the next maps/mapNNN.db.",
+                description="Existing database to continue; empty creates the next rtab_maps/mapNNN.db.",
             ),
             DeclareLaunchArgument("base_frame", default_value="base_link"),
             DeclareLaunchArgument("camera_frame", default_value="camera_link"),

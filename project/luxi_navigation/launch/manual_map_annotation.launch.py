@@ -30,7 +30,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "output_path",
                 default_value=(
-                    "/home/lunar/project/lunar_slam/maps/semantic_obstacles.yaml"
+                    "/home/lunar/project/lunar_slam/maps/occupancy_maps/semantic_obstacles.yaml"
                 ),
             ),
             DeclareLaunchArgument("map_transient_local", default_value="false"),

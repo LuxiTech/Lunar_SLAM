@@ -34,16 +34,73 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Path as NavigationPath
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
+from visualization_msgs.msg import Marker
 
 
 MAX_REQUEST_BYTES = 16 * 1024
 SIOCGIFADDR = 0x8915
+MAP_IDENTIFIER = re.compile(r"^map\d+$")
+
+
+def discover_navigation_maps(maps_root: Path) -> list:
+    """Return saved RTAB-Map/OctoMap pairs grouped by their mapNNN identifier."""
+    rtab_directory = maps_root / "rtab_maps"
+    octo_directory = maps_root / "octo_maps"
+    databases = {
+        candidate.stem: candidate.resolve()
+        for candidate in rtab_directory.glob("map*.db")
+        if MAP_IDENTIFIER.fullmatch(candidate.stem)
+    }
+    octomaps: Dict[str, Path] = {}
+    for candidate in octo_directory.rglob("*.bt"):
+        map_id = candidate.stem if MAP_IDENTIFIER.fullmatch(candidate.stem) else ""
+        if not map_id:
+            for parent in candidate.parents:
+                if parent == octo_directory.parent:
+                    break
+                if MAP_IDENTIFIER.fullmatch(parent.name):
+                    map_id = parent.name
+                    break
+                matched = re.match(r"^(map\d+)_octomap$", parent.name)
+                if matched:
+                    map_id = matched.group(1)
+                    break
+        if map_id:
+            previous = octomaps.get(map_id)
+            if previous is None or candidate.stat().st_mtime > previous.stat().st_mtime:
+                octomaps[map_id] = candidate.resolve()
+    maps = []
+    for map_id in sorted(set(databases) | set(octomaps), key=lambda value: int(value[3:])):
+        database = databases.get(map_id)
+        octomap = octomaps.get(map_id)
+        maps.append({
+            "id": map_id,
+            "database_path": str(database) if database else None,
+            "octomap_path": str(octomap) if octomap else None,
+            "loadable": database is not None and octomap is not None,
+        })
+    return maps
+
+
+def parse_navigation_goal(payload: Dict[str, Any]) -> Tuple[float, float, float]:
+    """Validate a map-frame browser goal without accepting NaN or booleans."""
+    values = []
+    for name in ("x", "y", "z"):
+        raw_value = payload.get(name, 0.0)
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise ValueError(f"{name} must be a number")
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+        values.append(value)
+    return values[0], values[1], values[2]
 
 
 def discover_lan_ipv4_addresses() -> list:
@@ -476,6 +533,181 @@ class MappingController:
         }
 
 
+class NavigationController:
+    """Own selected-map localization and static OctoMap planning processes."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        package: str,
+        launch_file: str,
+        rmw_implementation: str,
+        d435_setup: Path,
+        workspace_setup: Path,
+        octomap_library_path: Path,
+        log_path: Path,
+    ) -> None:
+        self.enabled = enabled
+        self.package = package
+        self.launch_file = launch_file
+        self.rmw_implementation = rmw_implementation
+        self.d435_setup = d435_setup
+        self.workspace_setup = workspace_setup
+        self.octomap_library_path = octomap_library_path
+        self.log_path = log_path
+        self._lock = threading.Lock()
+        self._process: Optional[subprocess.Popen] = None
+        self._started_at: Optional[float] = None
+        self._last_exit_code: Optional[int] = None
+        self._last_error = ""
+        self._stop_requested = False
+        self._map_id = ""
+
+    def _command(self, database_path: Path, octomap_path: Path) -> list:
+        source_commands = [
+            f"source {shlex.quote(str(self.d435_setup))}",
+            f"source {shlex.quote(str(self.workspace_setup))}",
+            "export ROS_LOCALHOST_ONLY=0",
+            "export RMW_IMPLEMENTATION=" + shlex.quote(self.rmw_implementation),
+            "export LD_LIBRARY_PATH=" + shlex.quote(str(self.octomap_library_path))
+            + ':${LD_LIBRARY_PATH:-}',
+        ]
+        launch_command = shlex.join([
+            "ros2", "launch", self.package, self.launch_file,
+            f"database_path:={database_path}",
+            f"octomap_path:={octomap_path}",
+            "cmd_vel_topic:=/navigation/cmd_vel",
+        ])
+        script = "set -e; " + "; ".join(source_commands)
+        return ["/bin/bash", "-c", script + f"; exec {launch_command}"]
+
+    def start(
+        self,
+        map_id: str,
+        database_path: Path,
+        octomap_path: Path,
+    ) -> Tuple[bool, str]:
+        with self._lock:
+            if not self.enabled:
+                return False, "navigation control is disabled"
+            if self._process is not None and self._process.poll() is None:
+                return False, "selected-map navigation is already running"
+            missing = [
+                path for path in (
+                    self.d435_setup,
+                    self.workspace_setup,
+                    database_path,
+                    octomap_path,
+                )
+                if not path.is_file()
+            ]
+            if missing:
+                return False, (
+                    "navigation prerequisite is missing: "
+                    + ", ".join(str(path) for path in missing)
+                )
+            try:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(
+                        f"\n===== Navigation {map_id} started by "
+                        "luxi_web_control =====\n"
+                    )
+                    self._process = subprocess.Popen(
+                        self._command(database_path, octomap_path),
+                        stdout=log_file, stderr=subprocess.STDOUT,
+                        start_new_session=True, env=os.environ.copy())
+            except OSError as exc:
+                self._process = None
+                self._last_error = str(exc)
+                return False, f"unable to start navigation: {exc}"
+            self._started_at = time.monotonic()
+            self._last_exit_code = None
+            self._last_error = ""
+            self._stop_requested = False
+            self._map_id = map_id
+            return True, f"navigation map {map_id} is starting"
+
+    def stop(self) -> Tuple[bool, str]:
+        with self._lock:
+            process = self._process
+            if process is None or process.poll() is not None:
+                self._update_exit_state_locked()
+                return True, "selected-map navigation is already stopped"
+            self._stop_requested = True
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                self._update_exit_state_locked()
+                return True, "selected-map navigation is already stopped"
+        try:
+            process.wait(timeout=8.0)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2.0)
+        with self._lock:
+            self._update_exit_state_locked()
+        return True, "selected-map navigation stopped"
+
+    def _update_exit_state_locked(self) -> None:
+        if self._process is None:
+            return
+        exit_code = self._process.poll()
+        if exit_code is None:
+            return
+        self._last_exit_code = exit_code
+        if exit_code != 0 and not self._stop_requested:
+            self._last_error = self._latest_log_error()
+        self._stop_requested = False
+        self._process = None
+
+    def _latest_log_error(self) -> str:
+        try:
+            with self.log_path.open("rb") as log_file:
+                log_file.seek(0, os.SEEK_END)
+                log_file.seek(max(0, log_file.tell() - 8192))
+                lines = log_file.read().decode("utf-8", errors="replace").splitlines()
+        except OSError:
+            return "navigation exited; navigation log is unavailable"
+        for line in reversed(lines):
+            if "[ERROR]" in line or "Caught exception" in line:
+                return line.strip()
+        return "navigation exited; inspect the navigation log"
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            self._update_exit_state_locked()
+            running = self._process is not None
+            snapshot = {
+                "pid": self._process.pid if self._process else None,
+                "uptime_seconds": (
+                    None if not running or self._started_at is None
+                    else round(time.monotonic() - self._started_at, 1)
+                ),
+                "last_exit_code": self._last_exit_code,
+                "last_error": self._last_error,
+                "map_id": self._map_id or None,
+            }
+        if not self.enabled:
+            state = "disabled"
+        elif running:
+            state = "running"
+        elif snapshot["last_exit_code"] not in (None, 0) and snapshot["last_error"]:
+            state = "failed"
+        else:
+            state = "stopped"
+        return {
+            "enabled": self.enabled,
+            "state": state,
+            "log_path": str(self.log_path),
+            **snapshot,
+        }
+
+
 class ControlHTTPServer(ThreadingHTTPServer):
     """Threaded HTTP server carrying a reference to its ROS node."""
 
@@ -567,6 +799,25 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 HTTPStatus.OK,
                 {"ok": True, "cloud": self.server.control_node.cloud_preview()},
+            )
+            return
+        if path == "/api/navigation/maps":
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "maps": self.server.control_node.navigation_maps(),
+                 "navigation": self.server.control_node.navigation_status()},
+            )
+            return
+        if path == "/api/navigation/voxels":
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "voxels": self.server.control_node.voxel_preview()},
+            )
+            return
+        if path == "/api/navigation/path":
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "path": self.server.control_node.path_preview()},
             )
             return
 
@@ -677,6 +928,44 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/api/navigation/load_map":
+            map_id = payload.get("map_id")
+            if not isinstance(map_id, str):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "map_id must be a string")
+                return
+            loaded, message = node.load_navigation_map(map_id)
+            if not loaded:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "ok": True, "message": message,
+                "navigation": node.navigation_status(),
+            })
+            return
+        if path == "/api/navigation/stop":
+            stopped, message = node.stop_navigation()
+            if not stopped:
+                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, message)
+                return
+            self._send_json(HTTPStatus.OK, {
+                "ok": True, "message": message,
+                "navigation": node.navigation_status(),
+            })
+            return
+        if path == "/api/navigation/goal":
+            try:
+                x, y, z = parse_navigation_goal(payload)
+                accepted, message = node.set_navigation_goal(x, y, z)
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "ok": True, "message": message, "goal": {"x": x, "y": y, "z": z},
+            })
+            return
         self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
 
 
@@ -709,6 +998,18 @@ class WebControlNode(Node):
         self.declare_parameter("mapping_d435_setup", "")
         self.declare_parameter("mapping_workspace_setup", "")
         self.declare_parameter("mapping_log_path", "")
+        self.declare_parameter("enable_navigation_control", True)
+        self.declare_parameter("navigation_launch_package", "luxi_voxel_navigation")
+        self.declare_parameter("navigation_launch_file", "saved_map_navigation.launch.py")
+        self.declare_parameter("navigation_rmw_implementation", "rmw_cyclonedds_cpp")
+        self.declare_parameter("navigation_d435_setup", "")
+        self.declare_parameter("navigation_workspace_setup", "")
+        self.declare_parameter("navigation_log_path", "")
+        self.declare_parameter("maps_root", "")
+        self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
+        self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
+        self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
+        self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("enable_preview", True)
         self.declare_parameter(
             "rgb_preview_topic",
@@ -766,6 +1067,45 @@ class WebControlNode(Node):
                 or workspace_root / "log/luxi_web_control_rtabmap.log"
             ).resolve(),
         )
+        navigation_d435_setup = str(self.get_parameter("navigation_d435_setup").value)
+        navigation_workspace_setup = str(
+            self.get_parameter("navigation_workspace_setup").value
+        )
+        navigation_log_path = str(self.get_parameter("navigation_log_path").value)
+        maps_root = str(self.get_parameter("maps_root").value)
+        self.maps_root = Path(maps_root or workspace_root / "maps").resolve()
+        self.navigation_goal_topic = str(
+            self.get_parameter("navigation_goal_topic").value
+        )
+        self.navigation_marker_topic = str(
+            self.get_parameter("navigation_marker_topic").value
+        )
+        self.navigation_path_topic = str(
+            self.get_parameter("navigation_path_topic").value
+        )
+        self.max_voxel_points = int(self.get_parameter("max_voxel_points").value)
+        self.navigation = NavigationController(
+            enabled=bool(self.get_parameter("enable_navigation_control").value),
+            package=str(self.get_parameter("navigation_launch_package").value),
+            launch_file=str(self.get_parameter("navigation_launch_file").value),
+            rmw_implementation=str(
+                self.get_parameter("navigation_rmw_implementation").value
+            ),
+            d435_setup=Path(
+                navigation_d435_setup
+                or workspace_root / "device/D435i/ros2_ws/install/setup.bash"
+            ).resolve(),
+            workspace_setup=Path(
+                navigation_workspace_setup or workspace_root / "install/setup.bash"
+            ).resolve(),
+            octomap_library_path=(
+                workspace_root / "3parts/octomap/install/lib"
+            ).resolve(),
+            log_path=Path(
+                navigation_log_path
+                or workspace_root / "log/luxi_web_control_navigation.log"
+            ).resolve(),
+        )
         self.preview_enabled = bool(self.get_parameter("enable_preview").value)
         self.rgb_preview_topic = str(
             self.get_parameter("rgb_preview_topic").value
@@ -798,6 +1138,14 @@ class WebControlNode(Node):
         self._cloud_points = []
         self._cloud_frame_id = ""
         self._cloud_received_at: Optional[float] = None
+        self._navigation_lock = threading.Lock()
+        self._voxel_points = []
+        self._voxel_frame_id = "map"
+        self._voxel_resolution = 0.0
+        self._voxel_received_at: Optional[float] = None
+        self._planned_path_points = []
+        self._path_frame_id = "map"
+        self._path_received_at: Optional[float] = None
 
         qos = QoSProfile(
             depth=10,
@@ -805,6 +1153,26 @@ class WebControlNode(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         self.publisher = self.create_publisher(Twist, self.cmd_vel_topic, qos)
+        self.navigation_goal_publisher = self.create_publisher(
+            PoseStamped, self.navigation_goal_topic, qos
+        )
+        navigation_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.navigation_marker_subscription = self.create_subscription(
+            Marker,
+            self.navigation_marker_topic,
+            self._on_navigation_marker,
+            navigation_qos,
+        )
+        self.navigation_path_subscription = self.create_subscription(
+            NavigationPath,
+            self.navigation_path_topic,
+            self._on_navigation_path,
+            navigation_qos,
+        )
         if self.preview_enabled:
             image_qos = QoSProfile(
                 depth=1,
@@ -868,6 +1236,8 @@ class WebControlNode(Node):
             raise ValueError("command_timeout must be greater than zero")
         if not 100 <= self.max_cloud_points <= 20000:
             raise ValueError("max_cloud_points must be between 100 and 20000")
+        if not 100 <= self.max_voxel_points <= 50000:
+            raise ValueError("max_voxel_points must be between 100 and 50000")
         if not self.cmd_vel_topic:
             raise ValueError("cmd_vel_topic must not be empty")
         invalid_limits = any(
@@ -920,12 +1290,50 @@ class WebControlNode(Node):
             self._cloud_frame_id = message.header.frame_id
             self._cloud_received_at = time.monotonic()
 
+    def _on_navigation_marker(self, message: Marker) -> None:
+        """Cache a bounded occupied-voxel marker for the browser top-down view."""
+        if message.type != Marker.CUBE_LIST:
+            return
+        points = message.points
+        stride = max(1, (len(points) + self.max_voxel_points - 1) // self.max_voxel_points)
+        cached = [
+            (round(point.x, 3), round(point.y, 3), round(point.z, 3))
+            for point in points[::stride]
+            if all(math.isfinite(value) for value in (point.x, point.y, point.z))
+        ]
+        with self._navigation_lock:
+            self._voxel_points = cached
+            self._voxel_frame_id = message.header.frame_id or "map"
+            self._voxel_resolution = float(message.scale.x)
+            self._voxel_received_at = time.monotonic()
+
+    def _on_navigation_path(self, message: NavigationPath) -> None:
+        """Cache the latest global path; the planner publishes it transiently."""
+        points = [
+            (round(pose.pose.position.x, 3), round(pose.pose.position.y, 3),
+             round(pose.pose.position.z, 3))
+            for pose in message.poses
+            if all(math.isfinite(value) for value in (
+                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z))
+        ]
+        with self._navigation_lock:
+            self._planned_path_points = points
+            self._path_frame_id = message.header.frame_id or "map"
+            self._path_received_at = time.monotonic()
+
     def _clear_cloud_preview(self) -> None:
         """Discard map data which belongs to a previous mapping session."""
         with self._preview_lock:
             self._cloud_points = []
             self._cloud_frame_id = ""
             self._cloud_received_at = None
+
+    def _clear_navigation_preview(self) -> None:
+        with self._navigation_lock:
+            self._voxel_points = []
+            self._voxel_received_at = None
+            self._planned_path_points = []
+            self._path_received_at = None
 
     def rgb_preview(self) -> Tuple[Optional[bytes], str]:
         """Return the latest compressed RGB frame and its MIME type."""
@@ -938,6 +1346,29 @@ class WebControlNode(Node):
             preview = self._cloud_preview_summary_locked()
             preview["points"] = list(self._cloud_points)
             return preview
+
+    def voxel_preview(self) -> Dict[str, Any]:
+        """Return occupied voxels in the selected static map for Canvas rendering."""
+        with self._navigation_lock:
+            return {
+                "frame_id": self._voxel_frame_id,
+                "resolution": self._voxel_resolution,
+                "point_count": len(self._voxel_points),
+                "age_seconds": None if self._voxel_received_at is None
+                else round(time.monotonic() - self._voxel_received_at, 2),
+                "points": list(self._voxel_points),
+            }
+
+    def path_preview(self) -> Dict[str, Any]:
+        """Return the latest A* global path for Canvas rendering."""
+        with self._navigation_lock:
+            return {
+                "frame_id": self._path_frame_id,
+                "point_count": len(self._planned_path_points),
+                "age_seconds": None if self._path_received_at is None
+                else round(time.monotonic() - self._path_received_at, 2),
+                "points": list(self._planned_path_points),
+            }
 
     def preview_status(self) -> Dict[str, Any]:
         """Return lightweight preview availability without cloud point data."""
@@ -1014,6 +1445,57 @@ class WebControlNode(Node):
         """Return the state of the mapping process owned by this node."""
         return self.mapping.status()
 
+    def navigation_maps(self) -> list:
+        """Discover selectable pairs without exposing arbitrary filesystem paths."""
+        return discover_navigation_maps(self.maps_root)
+
+    def load_navigation_map(self, map_id: str) -> Tuple[bool, str]:
+        """Start localization and static planning only for a discovered map pair."""
+        record = next(
+            (item for item in self.navigation_maps() if item["id"] == map_id),
+            None,
+        )
+        if record is None:
+            return False, f"map {map_id} does not exist under {self.maps_root}"
+        if not record["loadable"]:
+            return False, f"map {map_id} needs both .db and .bt files"
+        self.navigation.stop()
+        self._clear_navigation_preview()
+        return self.navigation.start(
+            map_id,
+            Path(record["database_path"]),
+            Path(record["octomap_path"]),
+        )
+
+    def stop_navigation(self) -> Tuple[bool, str]:
+        """Stop selected-map localization/planning and clear its old preview."""
+        stopped, message = self.navigation.stop()
+        if stopped:
+            self._clear_navigation_preview()
+        return stopped, message
+
+    def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
+        """Publish a map-frame goal after a selected map launch is running."""
+        navigation = self.navigation.status()
+        if navigation["state"] != "running":
+            return False, "load a map and wait for navigation to start first"
+        goal = PoseStamped()
+        goal.header.stamp = self.get_clock().now().to_msg()
+        with self._navigation_lock:
+            goal.header.frame_id = self._voxel_frame_id or "map"
+            self._planned_path_points = []
+            self._path_received_at = None
+        goal.pose.position.x = x
+        goal.pose.position.y = y
+        goal.pose.position.z = z
+        goal.pose.orientation.w = 1.0
+        self.navigation_goal_publisher.publish(goal)
+        return True, "goal sent to voxel A* planner"
+
+    def navigation_status(self) -> Dict[str, Any]:
+        """Return selected-map navigation state without large preview payloads."""
+        return self.navigation.status()
+
     def status(self) -> Dict[str, Any]:
         """Return a thread-safe, JSON-ready controller status snapshot."""
         now = time.monotonic()
@@ -1052,6 +1534,7 @@ class WebControlNode(Node):
             "limits": self.limits.as_dict(),
             "subscriber_count": self.publisher.get_subscription_count(),
             "mapping": self.mapping_status(),
+            "navigation": self.navigation_status(),
             "preview": self.preview_status(),
         }
 
@@ -1062,6 +1545,7 @@ class WebControlNode(Node):
         self._closed = True
         try:
             self.stop_mapping()
+            self.stop_navigation()
             if rclpy.ok():
                 for _ in range(3):
                     self.stop_motion()

@@ -141,6 +141,30 @@
         </div>
       </article>
     </section>
+
+    <section class="panel navigation-panel" aria-label="体素地图与全局路径规划">
+      <div class="panel-title">
+        <div>
+          <p class="eyebrow">VOXEL NAVIGATION</p>
+          <h2>已建地图定位与全局路径</h2>
+        </div>
+        <span id="navigationState" class="preview-state">未加载</span>
+      </div>
+      <p id="navigationDetail" class="navigation-detail">选择同时包含 RTAB-Map 数据库和 OctoMap 的地图。</p>
+      <div class="navigation-actions">
+        <label>
+          <span>地图</span>
+          <select id="navigationMapSelect" aria-label="选择已建地图"></select>
+        </label>
+        <button id="navigationLoadButton" class="mapping-start">加载地图</button>
+        <button id="navigationStopButton" class="mapping-stop" disabled>停止定位</button>
+      </div>
+      <div class="voxel-frame">
+        <canvas id="voxelMapCanvas" aria-label="体素地图和全局路径，点击设置目标点"></canvas>
+        <span id="voxelMapHint" class="preview-overlay">加载地图后显示体素地图；点击空闲位置规划全局路径</span>
+      </div>
+      <p class="navigation-note">青色为占据体素，黄色为 A* 全局路径。点击地图只发送目标点，不会自动驱动车辆。</p>
+    </section>
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" defer></script>

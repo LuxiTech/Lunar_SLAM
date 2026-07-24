@@ -3,7 +3,7 @@
 # Open an RTAB-Map database without requiring users to manually type mapNNN.
 set -euo pipefail
 
-maps_directory="/home/lunar/project/lunar_slam/maps"
+maps_directory="/home/lunar/project/lunar_slam/maps/rtab_maps"
 
 if [[ "${1:-}" == "--print-path" ]]; then
   print_path_only=true
