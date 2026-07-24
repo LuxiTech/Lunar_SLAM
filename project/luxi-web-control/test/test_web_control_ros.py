@@ -49,8 +49,16 @@ def _wait_for(predicate, timeout=2.5):
     return False
 
 
-def test_http_command_watchdog_and_estop_reach_ros():
+def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
     source_web = Path(__file__).parents[1] / "web"
+    static_cloud = tmp_path / "map011_cloud.ply"
+    static_cloud.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 2\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "end_header\n0 1 2 3 4 5\n6 7 8 9 10 11\n",
+        encoding="ascii",
+    )
     rclpy.init()
     node = WebControlNode(parameter_overrides=[
         Parameter("http_port", value=0),
@@ -89,6 +97,17 @@ def test_http_command_watchdog_and_estop_reach_ros():
             preview = json.load(response)["cloud"]
             assert preview["point_count"] == 0
             assert preview["points"] == []
+
+        assert node._load_navigation_cloud("map011", str(static_cloud)) == ""
+        with urlopen(base_url + "/api/navigation/cloud", timeout=2.0) as response:
+            assert response.status == 200
+            saved_cloud = json.load(response)["cloud"]
+            assert saved_cloud == {
+                "map_id": "map011",
+                "point_count": 2,
+                "error": None,
+                "points": [[0.0, 1.0, 2.0, 3, 4, 5], [6.0, 7.0, 8.0, 9, 10, 11]],
+            }
         try:
             urlopen(base_url + "/api/preview/rgb", timeout=2.0)
             assert False, "an RGB endpoint without camera input must return 404"

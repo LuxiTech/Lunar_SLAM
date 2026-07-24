@@ -33,8 +33,11 @@ const navigationDetail = $("#navigationDetail");
 const navigationMapSelect = $("#navigationMapSelect");
 const navigationLoadButton = $("#navigationLoadButton");
 const navigationStopButton = $("#navigationStopButton");
+const navigationGoalButton = $("#navigationGoalButton");
 const voxelMapCanvas = $("#voxelMapCanvas");
 const voxelMapHint = $("#voxelMapHint");
+const navigationShowCloud = $("#navigationShowCloud");
+const navigationShowVoxels = $("#navigationShowVoxels");
 
 const held = new Set();
 let estopActive = false;
@@ -49,8 +52,17 @@ let rgbObjectUrl = null;
 let cloudRefreshPending = false;
 let navigationMapsRefreshPending = false;
 let voxelRefreshPending = false;
+let navigationCloudRefreshPending = false;
 let voxelViewport = null;
 let selectedGoal = null;
+let navigationCloud = {};
+let navigationVoxels = {};
+let navigationPath = {};
+let navigationView = null;
+let navigationDrag = null;
+let navigationPinch = null;
+const navigationPointers = new Map();
+let navigationGoalMode = false;
 
 const keyActions = {
   KeyW: "forward",
@@ -329,14 +341,20 @@ function updateNavigation(navigation) {
   const name = navigationStateNames[navigation.state] || navigation.state;
   navigationState.textContent = name;
   navigationState.className = `preview-state ${navigation.state === "running" ? "live" : ""}`;
-  navigationLoadButton.disabled = !navigation.enabled || !navigationMapSelect.value;
+  navigationLoadButton.disabled = !navigationMapSelect.value;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
+  navigationGoalButton.disabled = !navigation.localization_ready;
   if (navigation.last_error) {
     navigationDetail.textContent = navigation.last_error;
   } else if (navigation.state === "running") {
-    navigationDetail.textContent = `正在使用 ${navigation.map_id || "所选地图"} 进行定位；点击地图发送目标点。`;
+    navigationDetail.textContent = navigation.localization_ready
+      ? `已完成 ${navigation.map_id || "所选地图"} 定位；可选择目标点。`
+      : `正在使用 ${navigation.map_id || "所选地图"} 定位；完成前不能发送目标点。`;
+    if (navigation.map_id && navigationCloud.map_id !== navigation.map_id) {
+      refreshNavigationCloud();
+    }
   } else if (!navigation.enabled) {
-    navigationDetail.textContent = "当前节点未启用地图定位与规划控制。";
+    navigationDetail.textContent = "定位与规划未启用；仍可加载并查看保存的两种地图图层。";
   } else {
     navigationDetail.textContent = "选择同时包含 .db 和 .bt 的地图后加载。";
   }
@@ -349,7 +367,9 @@ function updateNavigationMaps(maps) {
     const option = document.createElement("option");
     option.value = item.id;
     option.disabled = !item.loadable;
-    option.textContent = item.loadable ? `${item.id}（数据库 + 体素地图）` : `${item.id}（缺少 ${item.database_path ? ".bt" : ".db"}）`;
+    option.textContent = item.loadable
+      ? `${item.id}${item.cloud_path ? "（彩色点云 + 体素地图）" : "（体素地图；未导出彩色点云）"}`
+      : `${item.id}（缺少 ${item.database_path ? ".bt" : ".db"}）`;
     navigationMapSelect.append(option);
   }
   if (!maps.length) {
@@ -396,35 +416,80 @@ function canvasMetrics(canvas) {
   return {context, width, height, rect};
 }
 
-function drawVoxelMap(voxels, path) {
+function drawNavigationMap(voxels, path, cloud) {
   const {context, width, height} = canvasMetrics(voxelMapCanvas);
   context.fillStyle = "#080d13";
   context.fillRect(0, 0, width, height);
   const points = Array.isArray(voxels.points) ? voxels.points : [];
   const pathPoints = Array.isArray(path.points) ? path.points : [];
-  const all = points.concat(pathPoints, selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : []);
+  const cloudPoints = Array.isArray(cloud.points) ? cloud.points : [];
+  const all = cloudPoints.concat(points, pathPoints, selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : []);
   if (!all.length) {
     voxelViewport = null;
     return;
   }
   const xs = all.map((point) => point[0]);
   const ys = all.map((point) => point[1]);
+  const zs = all.map((point) => point[2] || 0);
   const minX = Math.min(...xs);
   const maxX = Math.max(...xs);
   const minY = Math.min(...ys);
   const maxY = Math.max(...ys);
+  const minZ = Math.min(...zs);
+  const maxZ = Math.max(...zs);
   const spanX = Math.max(0.5, maxX - minX);
   const spanY = Math.max(0.5, maxY - minY);
-  const scale = Math.min((width - 36) / spanX, (height - 36) / spanY);
-  voxelViewport = {minX, maxX, minY, maxY, scale, width, height};
-  const toCanvas = (point) => [
-    width * 0.5 + (point[0] - (minX + maxX) * 0.5) * scale,
-    height * 0.5 - (point[1] - (minY + maxY) * 0.5) * scale,
-  ];
-  context.fillStyle = "rgba(101, 227, 181, .62)";
-  for (const point of points) {
-    const [x, y] = toCanvas(point);
-    context.fillRect(x - 1, y - 1, 2, 2);
+  const spanZ = Math.max(0.5, maxZ - minZ);
+  const span = Math.max(spanX, spanY, spanZ);
+  if (!navigationView) {
+    navigationView = {yaw: -0.75, pitch: 0.62, zoom: 1.0};
+  }
+  const scale = Math.min((width - 44) / span, (height - 44) / span) * navigationView.zoom;
+  const centerX = (minX + maxX) * 0.5;
+  const centerY = (minY + maxY) * 0.5;
+  const centerZ = (minZ + maxZ) * 0.5;
+  const cosYaw = Math.cos(navigationView.yaw);
+  const sinYaw = Math.sin(navigationView.yaw);
+  const cosPitch = Math.cos(navigationView.pitch);
+  const sinPitch = Math.sin(navigationView.pitch);
+  voxelViewport = {
+    minX, maxX, minY, maxY, minZ, maxZ, centerX, centerY, centerZ,
+    scale, width, height, cosYaw, sinYaw, cosPitch, sinPitch,
+  };
+  const toCanvas = (point) => {
+    const dx = point[0] - centerX;
+    const dy = point[1] - centerY;
+    const dz = (point[2] || 0) - centerZ;
+    const horizontal = cosYaw * dx - sinYaw * dy;
+    const depth = sinYaw * dx + cosYaw * dy;
+    const vertical = cosPitch * dz - sinPitch * depth;
+    return [width * 0.5 + horizontal * scale, height * 0.5 - vertical * scale, depth];
+  };
+  context.strokeStyle = "rgba(132, 151, 180, .24)";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(18, height - 18);
+  context.lineTo(48, height - 18);
+  context.moveTo(18, height - 18);
+  context.lineTo(18, height - 48);
+  context.stroke();
+  if (navigationShowCloud.checked) {
+    for (const point of cloudPoints) {
+      const [x, y] = toCanvas(point);
+      const red = Math.max(0, Math.min(255, Number(point[3]) || 0));
+      const green = Math.max(0, Math.min(255, Number(point[4]) || 0));
+      const blue = Math.max(0, Math.min(255, Number(point[5]) || 0));
+      context.fillStyle = `rgba(${red}, ${green}, ${blue}, .72)`;
+      context.fillRect(x - 1, y - 1, 2, 2);
+    }
+  }
+  if (navigationShowVoxels.checked) {
+    context.fillStyle = "rgba(101, 227, 181, .54)";
+    for (const point of points) {
+      const [x, y] = toCanvas(point);
+      const voxelSize = Math.max(1, Math.min(14, (Number(point[3]) || voxels.resolution || 0.1) * scale));
+      context.fillRect(x - voxelSize * 0.5, y - voxelSize * 0.5, voxelSize, voxelSize);
+    }
   }
   if (pathPoints.length) {
     context.strokeStyle = "#ffd166";
@@ -456,10 +521,13 @@ async function refreshVoxelMap() {
       fetch("/api/navigation/path", {cache: "no-store"}),
     ]);
     if (!voxelResponse.ok || !pathResponse.ok) throw new Error("preview unavailable");
-    const voxels = (await voxelResponse.json()).voxels || {};
-    const path = (await pathResponse.json()).path || {};
-    drawVoxelMap(voxels, path);
-    voxelMapHint.classList.toggle("hidden", !(voxels.points || []).length);
+    navigationVoxels = (await voxelResponse.json()).voxels || {};
+    navigationPath = (await pathResponse.json()).path || {};
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+    voxelMapHint.classList.toggle(
+      "hidden",
+      Boolean((navigationVoxels.points || []).length || (navigationCloud.points || []).length),
+    );
   } catch (_error) {
     voxelMapHint.classList.remove("hidden");
   } finally {
@@ -467,15 +535,41 @@ async function refreshVoxelMap() {
   }
 }
 
+async function refreshNavigationCloud() {
+  if (navigationCloudRefreshPending) return;
+  navigationCloudRefreshPending = true;
+  try {
+    const response = await fetch("/api/navigation/cloud", {cache: "no-store"});
+    if (!response.ok) throw new Error("cloud unavailable");
+    navigationCloud = (await response.json()).cloud || {};
+  } catch (_error) {
+    navigationCloud = {};
+  } finally {
+    navigationCloudRefreshPending = false;
+  }
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+  voxelMapHint.classList.toggle(
+    "hidden",
+    Boolean((navigationVoxels.points || []).length || (navigationCloud.points || []).length),
+  );
+}
+
 async function loadNavigationMap() {
   const mapId = navigationMapSelect.value;
   if (!mapId) return;
   navigationLoadButton.disabled = true;
+  selectedGoal = null;
+  navigationCloud = {};
+  navigationVoxels = {};
+  navigationPath = {};
+  navigationView = null;
+  setNavigationGoalMode(false);
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   try {
     const result = await api("/api/navigation/load_map", {map_id: mapId});
-    selectedGoal = null;
     updateNavigation(result.navigation);
-    showToast(`${mapId} 正在加载，请等待定位和体素地图就绪`);
+    await refreshNavigationCloud();
+    showToast(`${mapId} 已加载彩色点云；请等待定位和体素地图就绪`);
   } catch (error) {
     showToast(`地图加载失败：${error.message}`);
   }
@@ -484,8 +578,9 @@ async function loadNavigationMap() {
 async function stopNavigation() {
   try {
     const result = await api("/api/navigation/stop");
+    setNavigationGoalMode(false);
     updateNavigation(result.navigation);
-    showToast("地图定位与规划已停止");
+    showToast("地图定位与规划已停止；当前地图仍保留显示");
   } catch (error) {
     showToast(`停止失败：${error.message}`);
   }
@@ -493,21 +588,132 @@ async function stopNavigation() {
 
 navigationLoadButton.addEventListener("click", loadNavigationMap);
 navigationStopButton.addEventListener("click", stopNavigation);
-navigationMapSelect.addEventListener("change", () => updateNavigation({enabled: true, state: "stopped"}));
-voxelMapCanvas.addEventListener("click", async (event) => {
+navigationMapSelect.addEventListener("change", () => {
+  selectedGoal = null;
+  navigationCloud = {};
+  navigationVoxels = {};
+  navigationPath = {};
+  navigationView = null;
+  setNavigationGoalMode(false);
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+  updateNavigation({enabled: true, state: "stopped"});
+});
+navigationShowCloud.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowVoxels.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+function setNavigationGoalMode(enabled) {
+  navigationGoalMode = enabled;
+  navigationGoalButton.classList.toggle("active", enabled);
+  navigationGoalButton.textContent = enabled ? "请点击地图目标" : "选择目标点";
+  voxelMapCanvas.classList.toggle("selecting-goal", enabled);
+}
+
+navigationGoalButton.addEventListener("click", () => {
+  if (navigationGoalButton.disabled) return;
+  setNavigationGoalMode(!navigationGoalMode);
+  if (navigationGoalMode) showToast("请在地图中点击目标点；可先退出选点模式调整视角");
+});
+
+async function selectNavigationGoal(event) {
   if (!voxelViewport) return;
   const rect = voxelMapCanvas.getBoundingClientRect();
-  const x = voxelViewport.minX + (event.clientX - rect.left - (voxelViewport.width - (voxelViewport.maxX - voxelViewport.minX) * voxelViewport.scale) * 0.5) / voxelViewport.scale;
-  const y = voxelViewport.maxY - (event.clientY - rect.top - (voxelViewport.height - (voxelViewport.maxY - voxelViewport.minY) * voxelViewport.scale) * 0.5) / voxelViewport.scale;
+  const horizontal = (event.clientX - rect.left - voxelViewport.width * 0.5) / voxelViewport.scale;
+  const vertical = (voxelViewport.height * 0.5 - (event.clientY - rect.top)) / voxelViewport.scale;
+  const depth = (
+    voxelViewport.cosPitch * -voxelViewport.centerZ - vertical
+  ) / voxelViewport.sinPitch;
+  const x = voxelViewport.centerX + voxelViewport.cosYaw * horizontal + voxelViewport.sinYaw * depth;
+  const y = voxelViewport.centerY - voxelViewport.sinYaw * horizontal + voxelViewport.cosYaw * depth;
   selectedGoal = {x, y};
   try {
     await api("/api/navigation/goal", {x, y, z: 0});
+    setNavigationGoalMode(false);
     showToast(`目标点已发送：${x.toFixed(2)}, ${y.toFixed(2)}`);
     refreshVoxelMap();
   } catch (error) {
     showToast(`规划请求失败：${error.message}`);
   }
+}
+
+voxelMapCanvas.addEventListener("pointerdown", (event) => {
+  if (navigationGoalMode) {
+    selectNavigationGoal(event);
+    return;
+  }
+  if (!voxelViewport) return;
+  navigationPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+  voxelMapCanvas.setPointerCapture?.(event.pointerId);
+  if (navigationPointers.size === 2) {
+    const [first, second] = Array.from(navigationPointers.values());
+    navigationDrag = null;
+    navigationPinch = {
+      distance: Math.hypot(first.x - second.x, first.y - second.y),
+      zoom: navigationView.zoom,
+    };
+    voxelMapCanvas.classList.add("dragging");
+    return;
+  }
+  if (navigationPointers.size !== 1) return;
+  navigationDrag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    yaw: navigationView.yaw,
+    pitch: navigationView.pitch,
+  };
+  voxelMapCanvas.classList.add("dragging");
 });
+voxelMapCanvas.addEventListener("pointermove", (event) => {
+  const pointer = navigationPointers.get(event.pointerId);
+  if (!pointer) return;
+  pointer.x = event.clientX;
+  pointer.y = event.clientY;
+  if (navigationPointers.size === 2 && navigationPinch) {
+    const [first, second] = Array.from(navigationPointers.values());
+    const distance = Math.hypot(first.x - second.x, first.y - second.y);
+    if (navigationPinch.distance > 0) {
+      navigationView.zoom = Math.max(
+        0.3, Math.min(5.0, navigationPinch.zoom * distance / navigationPinch.distance),
+      );
+      drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+    }
+    return;
+  }
+  if (!navigationDrag || navigationDrag.pointerId !== event.pointerId) return;
+  navigationView.yaw = navigationDrag.yaw - (event.clientX - navigationDrag.x) * 0.012;
+  navigationView.pitch = Math.max(
+    0.16, Math.min(1.4, navigationDrag.pitch + (event.clientY - navigationDrag.y) * 0.012),
+  );
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+});
+function endNavigationDrag(event) {
+  if (!navigationPointers.has(event.pointerId)) return;
+  if (voxelMapCanvas.hasPointerCapture?.(event.pointerId)) {
+    voxelMapCanvas.releasePointerCapture(event.pointerId);
+  }
+  navigationPointers.delete(event.pointerId);
+  navigationPinch = null;
+  if (navigationPointers.size === 1) {
+    const [pointerId, pointer] = navigationPointers.entries().next().value;
+    navigationDrag = {
+      pointerId,
+      x: pointer.x,
+      y: pointer.y,
+      yaw: navigationView.yaw,
+      pitch: navigationView.pitch,
+    };
+  } else {
+    navigationDrag = null;
+    voxelMapCanvas.classList.remove("dragging");
+  }
+}
+voxelMapCanvas.addEventListener("pointerup", endNavigationDrag);
+voxelMapCanvas.addEventListener("pointercancel", endNavigationDrag);
+voxelMapCanvas.addEventListener("wheel", (event) => {
+  if (!navigationView) return;
+  event.preventDefault();
+  navigationView.zoom = Math.max(0.3, Math.min(5.0, navigationView.zoom * Math.exp(-event.deltaY * 0.001)));
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+}, {passive: false});
 
 function updateMapping(mapping) {
   if (!mapping) return;

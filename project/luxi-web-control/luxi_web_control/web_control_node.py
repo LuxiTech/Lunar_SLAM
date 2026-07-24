@@ -34,7 +34,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Path as NavigationPath
 import rclpy
 from rclpy.node import Node
@@ -47,6 +47,28 @@ from visualization_msgs.msg import Marker
 MAX_REQUEST_BYTES = 16 * 1024
 SIOCGIFADDR = 0x8915
 MAP_IDENTIFIER = re.compile(r"^map\d+$")
+PLY_SCALAR_FORMATS = {
+    "char": "b", "int8": "b", "uchar": "B", "uint8": "B",
+    "short": "h", "int16": "h", "ushort": "H", "uint16": "H",
+    "int": "i", "int32": "i", "uint": "I", "uint32": "I",
+    "float": "f", "float32": "f", "double": "d", "float64": "d",
+}
+
+
+def _map_id_from_export_path(candidate: Path, octo_directory: Path) -> str:
+    """Infer a mapNNN identifier from a file or one of its export folders."""
+    map_id = candidate.stem if MAP_IDENTIFIER.fullmatch(candidate.stem) else ""
+    if map_id:
+        return map_id
+    for parent in candidate.parents:
+        if parent == octo_directory.parent:
+            break
+        if MAP_IDENTIFIER.fullmatch(parent.name):
+            return parent.name
+        matched = re.match(r"^(map\d+)_octomap$", parent.name)
+        if matched:
+            return matched.group(1)
+    return ""
 
 
 def discover_navigation_maps(maps_root: Path) -> list:
@@ -60,33 +82,136 @@ def discover_navigation_maps(maps_root: Path) -> list:
     }
     octomaps: Dict[str, Path] = {}
     for candidate in octo_directory.rglob("*.bt"):
-        map_id = candidate.stem if MAP_IDENTIFIER.fullmatch(candidate.stem) else ""
-        if not map_id:
-            for parent in candidate.parents:
-                if parent == octo_directory.parent:
-                    break
-                if MAP_IDENTIFIER.fullmatch(parent.name):
-                    map_id = parent.name
-                    break
-                matched = re.match(r"^(map\d+)_octomap$", parent.name)
-                if matched:
-                    map_id = matched.group(1)
-                    break
+        map_id = _map_id_from_export_path(candidate, octo_directory)
         if map_id:
             previous = octomaps.get(map_id)
             if previous is None or candidate.stat().st_mtime > previous.stat().st_mtime:
                 octomaps[map_id] = candidate.resolve()
+    clouds: Dict[str, Path] = {}
+    for candidate in octo_directory.rglob("*_cloud.ply"):
+        map_id = _map_id_from_export_path(candidate, octo_directory)
+        if map_id:
+            previous = clouds.get(map_id)
+            if previous is None or candidate.stat().st_mtime > previous.stat().st_mtime:
+                clouds[map_id] = candidate.resolve()
     maps = []
     for map_id in sorted(set(databases) | set(octomaps), key=lambda value: int(value[3:])):
         database = databases.get(map_id)
         octomap = octomaps.get(map_id)
+        cloud = clouds.get(map_id)
         maps.append({
             "id": map_id,
             "database_path": str(database) if database else None,
             "octomap_path": str(octomap) if octomap else None,
+            "cloud_path": str(cloud) if cloud else None,
             "loadable": database is not None and octomap is not None,
         })
     return maps
+
+
+def extract_colored_ply_points(path: Path, max_points: int) -> list:
+    """Read a bounded XYZRGB sample from a standard RTAB-Map/PCL PLY export."""
+    with path.open("rb") as stream:
+        if stream.readline().strip() != b"ply":
+            raise ValueError("not a PLY file")
+        file_format = None
+        vertex_count = None
+        properties = []
+        in_vertex_element = False
+        while True:
+            raw_line = stream.readline()
+            if not raw_line:
+                raise ValueError("incomplete PLY header")
+            words = raw_line.decode("ascii").strip().split()
+            if words == ["end_header"]:
+                break
+            if words[:1] == ["format"] and len(words) >= 2:
+                file_format = words[1]
+            elif words[:2] == ["element", "vertex"] and len(words) == 3:
+                vertex_count = int(words[2])
+                in_vertex_element = True
+            elif words[:1] == ["element"]:
+                in_vertex_element = False
+            elif in_vertex_element and words[:1] == ["property"]:
+                if len(words) != 3 or words[1] == "list" or words[1] not in PLY_SCALAR_FORMATS:
+                    raise ValueError("unsupported PLY vertex property")
+                properties.append((words[2], words[1]))
+        if file_format not in {"ascii", "binary_little_endian"}:
+            raise ValueError("unsupported PLY format")
+        if vertex_count is None:
+            raise ValueError("PLY has no vertex element")
+        names = [name for name, _ in properties]
+        if not {"x", "y", "z"}.issubset(names):
+            raise ValueError("PLY vertices need x, y and z")
+        stride = max(1, (vertex_count + max_points - 1) // max_points)
+        unpack = None
+        record_size = 0
+        if file_format == "binary_little_endian":
+            format_string = "<" + "".join(PLY_SCALAR_FORMATS[kind] for _, kind in properties)
+            unpack = struct.Struct(format_string).unpack
+            record_size = struct.calcsize(format_string)
+        points = []
+        for index in range(vertex_count):
+            if file_format == "ascii":
+                values = stream.readline().decode("ascii").split()
+                vertex = dict(zip(names, values))
+            else:
+                data = stream.read(record_size)
+                if len(data) != record_size:
+                    raise ValueError("truncated PLY vertex data")
+                vertex = dict(zip(names, unpack(data)))
+            if index % stride:
+                continue
+            try:
+                x, y, z = (float(vertex[axis]) for axis in ("x", "y", "z"))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid PLY vertex") from exc
+            if not all(math.isfinite(value) for value in (x, y, z)):
+                continue
+            colors = [max(0, min(255, round(float(vertex.get(channel, 255)))))
+                      for channel in ("red", "green", "blue")]
+            points.append((round(x, 3), round(y, 3), round(z, 3), *colors))
+    return points
+
+
+def parse_octomap_point_output(output: str) -> Tuple[float, list]:
+    """Parse bounded occupied voxel rows emitted by octomap_to_points."""
+    lines = output.splitlines()
+    if not lines:
+        raise ValueError("OctoMap converter returned no data")
+    header = lines[0].split()
+    if len(header) != 2 or header[0] != "resolution":
+        raise ValueError("invalid OctoMap converter header")
+    try:
+        resolution = float(header[1])
+    except ValueError as exc:
+        raise ValueError("invalid OctoMap resolution") from exc
+    if not math.isfinite(resolution) or resolution <= 0.0:
+        raise ValueError("invalid OctoMap resolution")
+    points = []
+    for line in lines[1:]:
+        values = line.split()
+        if len(values) != 4:
+            raise ValueError("invalid OctoMap voxel row")
+        try:
+            x, y, z, size = (float(value) for value in values)
+        except ValueError as exc:
+            raise ValueError("invalid OctoMap voxel row") from exc
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            continue
+        if not math.isfinite(size) or size <= 0.0:
+            continue
+        points.append((round(x, 3), round(y, 3), round(z, 3), round(size, 3)))
+    return round(resolution, 4), points
+
+
+def localization_covariance_ready(covariance: list, maximum: float) -> bool:
+    """Return whether RTAB-Map has supplied a finite, confident map pose."""
+    if len(covariance) < 36 or not math.isfinite(maximum) or maximum <= 0.0:
+        return False
+    values = (covariance[0], covariance[7], covariance[35])
+    return all(math.isfinite(value) and 0.0 <= value <= maximum
+               for value in values)
 
 
 def parse_navigation_goal(payload: Dict[str, Any]) -> Tuple[float, float, float]:
@@ -814,6 +939,12 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 {"ok": True, "voxels": self.server.control_node.voxel_preview()},
             )
             return
+        if path == "/api/navigation/cloud":
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "cloud": self.server.control_node.navigation_cloud_preview()},
+            )
+            return
         if path == "/api/navigation/path":
             self._send_json(
                 HTTPStatus.OK,
@@ -1009,6 +1140,11 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
+        self.declare_parameter(
+            "navigation_localization_pose_topic", "/rtabmap/localization_pose"
+        )
+        self.declare_parameter("navigation_localization_max_variance", 100.0)
+        self.declare_parameter("navigation_localization_timeout", 3.0)
         self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("enable_preview", True)
         self.declare_parameter(
@@ -1074,6 +1210,10 @@ class WebControlNode(Node):
         navigation_log_path = str(self.get_parameter("navigation_log_path").value)
         maps_root = str(self.get_parameter("maps_root").value)
         self.maps_root = Path(maps_root or workspace_root / "maps").resolve()
+        self.octomap_points_executable = (
+            workspace_root / "install/luxi_voxel_navigation/lib/"
+            "luxi_voxel_navigation/octomap_to_points"
+        ).resolve()
         self.navigation_goal_topic = str(
             self.get_parameter("navigation_goal_topic").value
         )
@@ -1082,6 +1222,15 @@ class WebControlNode(Node):
         )
         self.navigation_path_topic = str(
             self.get_parameter("navigation_path_topic").value
+        )
+        self.navigation_localization_pose_topic = str(
+            self.get_parameter("navigation_localization_pose_topic").value
+        )
+        self.navigation_localization_max_variance = float(
+            self.get_parameter("navigation_localization_max_variance").value
+        )
+        self.navigation_localization_timeout = float(
+            self.get_parameter("navigation_localization_timeout").value
         )
         self.max_voxel_points = int(self.get_parameter("max_voxel_points").value)
         self.navigation = NavigationController(
@@ -1143,6 +1292,14 @@ class WebControlNode(Node):
         self._voxel_frame_id = "map"
         self._voxel_resolution = 0.0
         self._voxel_received_at: Optional[float] = None
+        self._navigation_voxel_map_id: Optional[str] = None
+        self._navigation_voxel_error = ""
+        self._localization_ready = False
+        self._localization_variance: Optional[float] = None
+        self._localization_received_at: Optional[float] = None
+        self._navigation_cloud_points = []
+        self._navigation_cloud_map_id: Optional[str] = None
+        self._navigation_cloud_error = ""
         self._planned_path_points = []
         self._path_frame_id = "map"
         self._path_received_at: Optional[float] = None
@@ -1172,6 +1329,17 @@ class WebControlNode(Node):
             self.navigation_path_topic,
             self._on_navigation_path,
             navigation_qos,
+        )
+        localization_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.navigation_localization_subscription = self.create_subscription(
+            PoseWithCovarianceStamped,
+            self.navigation_localization_pose_topic,
+            self._on_navigation_localization_pose,
+            localization_qos,
         )
         if self.preview_enabled:
             image_qos = QoSProfile(
@@ -1238,6 +1406,10 @@ class WebControlNode(Node):
             raise ValueError("max_cloud_points must be between 100 and 20000")
         if not 100 <= self.max_voxel_points <= 50000:
             raise ValueError("max_voxel_points must be between 100 and 50000")
+        if self.navigation_localization_max_variance <= 0.0:
+            raise ValueError("navigation_localization_max_variance must be positive")
+        if self.navigation_localization_timeout <= 0.0:
+            raise ValueError("navigation_localization_timeout must be positive")
         if not self.cmd_vel_topic:
             raise ValueError("cmd_vel_topic must not be empty")
         invalid_limits = any(
@@ -1321,6 +1493,23 @@ class WebControlNode(Node):
             self._path_frame_id = message.header.frame_id or "map"
             self._path_received_at = time.monotonic()
 
+    def _on_navigation_localization_pose(
+        self, message: PoseWithCovarianceStamped
+    ) -> None:
+        covariance = list(message.pose.covariance)
+        values = (
+            (covariance[0], covariance[7], covariance[35])
+            if len(covariance) >= 36 else ()
+        )
+        with self._navigation_lock:
+            self._localization_ready = localization_covariance_ready(
+                covariance, self.navigation_localization_max_variance)
+            self._localization_variance = (
+                max(values) if values and all(math.isfinite(value) for value in values)
+                else None
+            )
+            self._localization_received_at = time.monotonic()
+
     def _clear_cloud_preview(self) -> None:
         """Discard map data which belongs to a previous mapping session."""
         with self._preview_lock:
@@ -1332,6 +1521,14 @@ class WebControlNode(Node):
         with self._navigation_lock:
             self._voxel_points = []
             self._voxel_received_at = None
+            self._navigation_voxel_map_id = None
+            self._navigation_voxel_error = ""
+            self._localization_ready = False
+            self._localization_variance = None
+            self._localization_received_at = None
+            self._navigation_cloud_points = []
+            self._navigation_cloud_map_id = None
+            self._navigation_cloud_error = ""
             self._planned_path_points = []
             self._path_received_at = None
 
@@ -1351,13 +1548,82 @@ class WebControlNode(Node):
         """Return occupied voxels in the selected static map for Canvas rendering."""
         with self._navigation_lock:
             return {
+                "map_id": self._navigation_voxel_map_id,
                 "frame_id": self._voxel_frame_id,
                 "resolution": self._voxel_resolution,
                 "point_count": len(self._voxel_points),
+                "error": self._navigation_voxel_error or None,
                 "age_seconds": None if self._voxel_received_at is None
                 else round(time.monotonic() - self._voxel_received_at, 2),
                 "points": list(self._voxel_points),
             }
+
+    def _load_navigation_voxels(self, map_id: str, octomap_path: str) -> str:
+        """Load saved occupied voxels immediately, without waiting for ROS launch."""
+        command = [
+            str(self.octomap_points_executable), str(octomap_path),
+            str(self.max_voxel_points),
+        ]
+        environment = os.environ.copy()
+        library_path = str(self.navigation.octomap_library_path)
+        environment["LD_LIBRARY_PATH"] = (
+            library_path + ":" + environment.get("LD_LIBRARY_PATH", "")
+        )
+        try:
+            result = subprocess.run(
+                command, check=True, capture_output=True, text=True,
+                timeout=12.0, env=environment,
+            )
+            resolution, points = parse_octomap_point_output(result.stdout)
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError,
+                ValueError) as exc:
+            error = str(exc)
+            with self._navigation_lock:
+                self._voxel_points = []
+                self._navigation_voxel_map_id = map_id
+                self._navigation_voxel_error = error
+                self._voxel_received_at = None
+            return error
+        with self._navigation_lock:
+            self._voxel_points = points
+            self._voxel_frame_id = "map"
+            self._voxel_resolution = resolution
+            self._voxel_received_at = time.monotonic()
+            self._navigation_voxel_map_id = map_id
+            self._navigation_voxel_error = ""
+        return ""
+
+    def navigation_cloud_preview(self) -> Dict[str, Any]:
+        """Return the selected saved map's bounded RGB point cloud."""
+        with self._navigation_lock:
+            return {
+                "map_id": self._navigation_cloud_map_id,
+                "point_count": len(self._navigation_cloud_points),
+                "error": self._navigation_cloud_error or None,
+                "points": list(self._navigation_cloud_points),
+            }
+
+    def _load_navigation_cloud(self, map_id: str, cloud_path: Optional[str]) -> str:
+        if not cloud_path:
+            with self._navigation_lock:
+                self._navigation_cloud_points = []
+                self._navigation_cloud_map_id = map_id
+                self._navigation_cloud_error = "no exported colored PLY is available"
+            return self._navigation_cloud_error
+        try:
+            points = extract_colored_ply_points(
+                Path(cloud_path), self.max_cloud_points)
+        except (OSError, UnicodeDecodeError, ValueError, struct.error) as exc:
+            with self._navigation_lock:
+                self._navigation_cloud_points = []
+                self._navigation_cloud_map_id = map_id
+                self._navigation_cloud_error = str(exc)
+            return self._navigation_cloud_error
+        with self._navigation_lock:
+            self._navigation_cloud_points = points
+            self._navigation_cloud_map_id = map_id
+            self._navigation_cloud_error = ""
+        return ""
 
     def path_preview(self) -> Dict[str, Any]:
         """Return the latest A* global path for Canvas rendering."""
@@ -1450,7 +1716,7 @@ class WebControlNode(Node):
         return discover_navigation_maps(self.maps_root)
 
     def load_navigation_map(self, map_id: str) -> Tuple[bool, str]:
-        """Start localization and static planning only for a discovered map pair."""
+        """Load static layers, then start localization/planning when available."""
         record = next(
             (item for item in self.navigation_maps() if item["id"] == map_id),
             None,
@@ -1461,24 +1727,36 @@ class WebControlNode(Node):
             return False, f"map {map_id} needs both .db and .bt files"
         self.navigation.stop()
         self._clear_navigation_preview()
-        return self.navigation.start(
+        cloud_error = self._load_navigation_cloud(map_id, record.get("cloud_path"))
+        voxel_error = self._load_navigation_voxels(map_id, record["octomap_path"])
+        started, message = self.navigation.start(
             map_id,
             Path(record["database_path"]),
             Path(record["octomap_path"]),
         )
+        preview_errors = []
+        for label, error in (("colored cloud", cloud_error),
+                             ("OctoMap voxels", voxel_error)):
+            if error:
+                preview_errors.append(label + ": " + error)
+        if not started:
+            return True, "map layers loaded; navigation unavailable: " + message + (
+                "; " + "; ".join(preview_errors) if preview_errors else "")
+        return True, message + (
+            "; " + "; ".join(preview_errors) if preview_errors else "")
 
     def stop_navigation(self) -> Tuple[bool, str]:
-        """Stop selected-map localization/planning and clear its old preview."""
+        """Stop localization/planning while retaining the currently loaded map."""
         stopped, message = self.navigation.stop()
-        if stopped:
-            self._clear_navigation_preview()
         return stopped, message
 
     def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
-        """Publish a map-frame goal after a selected map launch is running."""
-        navigation = self.navigation.status()
+        """Publish a map-frame goal only after RTAB-Map localization is ready."""
+        navigation = self.navigation_status()
         if navigation["state"] != "running":
             return False, "load a map and wait for navigation to start first"
+        if not navigation["localization_ready"]:
+            return False, "wait for RTAB-Map localization before selecting a goal"
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         with self._navigation_lock:
@@ -1494,7 +1772,17 @@ class WebControlNode(Node):
 
     def navigation_status(self) -> Dict[str, Any]:
         """Return selected-map navigation state without large preview payloads."""
-        return self.navigation.status()
+        status = self.navigation.status()
+        with self._navigation_lock:
+            age = None if self._localization_received_at is None else round(
+                time.monotonic() - self._localization_received_at, 2)
+            ready = self._localization_ready and age is not None and (
+                age <= self.navigation_localization_timeout)
+            status["localization_ready"] = (
+                status["state"] == "running" and ready)
+            status["localization_variance"] = self._localization_variance
+            status["localization_age_seconds"] = age
+        return status
 
     def status(self) -> Dict[str, Any]:
         """Return a thread-safe, JSON-ready controller status snapshot."""

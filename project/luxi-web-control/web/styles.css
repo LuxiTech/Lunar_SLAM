@@ -102,14 +102,22 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .navigation-detail, .navigation-note { color: var(--muted); font-size: .73rem; line-height: 1.5; }
 .navigation-detail { margin: 12px 0; }
 .navigation-note { margin: 10px 0 0; }
-.navigation-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: end; }
+.navigation-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: end; }
 .navigation-actions label { display: grid; gap: 5px; color: var(--muted); font-size: .68rem; }
 .navigation-actions select, .navigation-actions button { min-height: 38px; border: 1px solid var(--border); border-radius: 9px; font-size: .74rem; }
 .navigation-actions select { width: 100%; padding: 0 9px; background: #0d121a; color: var(--text); }
 .navigation-actions button { padding: 0 12px; cursor: pointer; font-weight: 800; }
 .navigation-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.goal-select { background: #182a40; color: var(--text); }
+.goal-select.active { background: #b55465; border-color: #ff9ba6; color: #fff; }
+.navigation-layers { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 11px; color: var(--muted); font-size: .7rem; }
+.navigation-layers > span { font-weight: 800; color: var(--text); }
+.navigation-layers label { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
+.navigation-layers input { accent-color: var(--accent); }
 .voxel-frame { position: relative; min-height: 380px; margin-top: 15px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: #080d13; }
-.voxel-frame canvas { display: block; width: 100%; height: 380px; cursor: crosshair; }
+.voxel-frame canvas { display: block; width: 100%; height: 380px; cursor: grab; touch-action: none; }
+.voxel-frame canvas.dragging { cursor: grabbing; }
+.voxel-frame canvas.selecting-goal { cursor: crosshair; }
 
 .panel {
   border: 1px solid var(--border);

@@ -44,6 +44,10 @@ ament_target_dependencies(octomap_file_loader_node
   geometry_msgs octomap_msgs rclcpp std_msgs visualization_msgs)
 target_link_libraries(octomap_file_loader_node octomap::octomap)
 
+add_executable(octomap_to_points src/octomap_to_points.cpp)
+target_compile_features(octomap_to_points PUBLIC cxx_std_17)
+target_link_libraries(octomap_to_points octomap::octomap)
+
 add_executable(octomap_astar_planner_node src/octomap_astar_planner_node.cpp)
 target_compile_features(octomap_astar_planner_node PUBLIC cxx_std_17)
 target_include_directories(octomap_astar_planner_node PRIVATE include)
@@ -60,6 +64,7 @@ install(TARGETS
   cloud_to_octomap_node
   ply_to_octomap
   octomap_file_loader_node
+  octomap_to_points
   octomap_astar_planner_node
   path_follower_node
   DESTINATION lib/${PROJECT_NAME}

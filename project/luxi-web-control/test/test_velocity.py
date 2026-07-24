@@ -24,10 +24,13 @@ from pathlib import Path
 from sensor_msgs.msg import PointCloud2, PointField
 
 from luxi_web_control.web_control_node import discover_navigation_maps
+from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import MappingController
 from luxi_web_control.web_control_node import is_managed_web_control_command
+from luxi_web_control.web_control_node import localization_covariance_ready
 from luxi_web_control.web_control_node import make_access_urls
+from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
 from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
 
@@ -142,6 +145,14 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
     (tmp_path / "rtab_maps" / "map011.db").write_bytes(b"database")
     (tmp_path / "rtab_maps" / "map012.db").write_bytes(b"database")
     (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").write_bytes(b"octomap")
+    cloud_path = tmp_path / "octo_maps" / "map011_octomap" / "map011_cloud.ply"
+    cloud_path.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 2\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "end_header\n0 0 0 255 0 1\n1.25 -2.5 3 4 5 6\n",
+        encoding="ascii",
+    )
 
     assert discover_navigation_maps(tmp_path) == [
         {
@@ -150,15 +161,53 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
             "octomap_path": str(
                 (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").resolve()
             ),
+            "cloud_path": str(cloud_path.resolve()),
             "loadable": True,
         },
         {
             "id": "map012",
             "database_path": str((tmp_path / "rtab_maps" / "map012.db").resolve()),
             "octomap_path": None,
+            "cloud_path": None,
             "loadable": False,
         },
     ]
+
+
+def test_colored_ply_points_extracts_xyzrgb_from_ascii_export(tmp_path):
+    cloud_path = tmp_path / "map011_cloud.ply"
+    cloud_path.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 3\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "end_header\n0 1 2 1 2 3\n4.5678 5 6 254 253 252\n7 8 9 0 0 0\n",
+        encoding="ascii",
+    )
+
+    assert extract_colored_ply_points(cloud_path, 2) == [
+        (0.0, 1.0, 2.0, 1, 2, 3),
+        (7.0, 8.0, 9.0, 0, 0, 0),
+    ]
+
+
+def test_octomap_converter_output_keeps_occupied_voxel_size():
+    assert parse_octomap_point_output(
+        "resolution 0.1\n1.2345 -2 3 0.1\n0 0 0 0.2\n"
+    ) == (
+        0.1,
+        [(1.234, -2.0, 3.0, 0.1), (0.0, 0.0, 0.0, 0.2)],
+    )
+
+
+def test_localization_requires_confident_xyz_yaw_covariance():
+    covariance = [0.0] * 36
+    covariance[0] = 0.5
+    covariance[7] = 1.0
+    covariance[35] = 2.0
+    assert localization_covariance_ready(covariance, 10.0)
+
+    covariance[35] = 9999.0
+    assert not localization_covariance_ready(covariance, 10.0)
 
 
 @pytest.mark.parametrize("payload", [

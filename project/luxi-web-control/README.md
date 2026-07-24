@@ -152,9 +152,12 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py
 
 网页还会列出 `maps/rtab_maps/mapNNN.db` 与
 `maps/octo_maps/mapNNN_octomap/mapNNN.bt` 同时存在的地图。选择后会启动保存地图定位、
-静态 OctoMap 加载和 A* 规划；体素地图以俯视图显示，点击位置会向
-`/navigation/goal_pose` 发布目标并在网页上绘制 `/navigation/planned_path`。该功能不
-会自动启用路径跟随，默认也不会向 `/cmd_vel` 发送导航速度。
+静态 OctoMap 加载和 A* 规划；网页会直接读取保存的 `.bt`，因此定位进程尚未就绪时
+也能显示体素地图，并和 RTAB-Map 导出的彩色点云叠加。地图画布支持拖动旋转视角和
+滚轮缩放。RTAB-Map 完成定位并报告可信协方差后，“选择目标点”才会启用；再点击
+地图位置，网页才会向 `/navigation/goal_pose` 发布目标并绘制
+`/navigation/planned_path`。该功能不会自动启用路径跟随，默认也不会向 `/cmd_vel`
+发送导航速度。
 
 ## 参数
 
