@@ -23,7 +23,10 @@ rosbridge、前端框架或厂商 SDK。它还可管理本项目 RTAB-Map 建图
 ```bash
 cd /home/lunar/project/lunar_slam
 source /opt/ros/humble/setup.bash
-colcon build --packages-select luxi_adapter luxi_web_control luxi_rtab_map --symlink-install
+sudo apt-get install ros-humble-rtabmap-launch
+colcon build --packages-select \
+  luxi_adapter luxi_location luxi_rtab_map luxi_voxel_navigation luxi_web_control \
+  --symlink-install
 ```
 
 随后按下列顺序使用两个终端。网页遥控本身只需终端二；要使用网页 RGB 预览、建图或
@@ -86,7 +89,7 @@ hostname -I
 | RGB 预览 | 终端一的 `luxi_adapter` profile |
 | 开始建图、停止保存 | 终端一与终端二；由网页启动 RTAB-Map 算法 |
 | 加载已有地图、显示 OctoMap | 终端二；选择已保存的 `.db` 后网页会自动调用 `tools/export_rtabmap_octomap.sh` 生成彩色 PLY 与 `.bt`，再加载显示 |
-| 基于相机的地图定位、选择目标点 | 终端一、终端二与已保存地图 |
+| RTAB-Map 粗定位、ICP 精定位、选择目标点 | 终端一、终端二与已保存的 `.db`、彩色 PLY、`.bt` |
 
 关闭时先在网页点击“停止建图”（若正在建图），再在两个终端分别按 `Ctrl-C`；网页不
 会自动停止硬件 profile。
@@ -192,14 +195,24 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 
 网页只停止它自己启动的 RTAB-Map 进程，不会停止手工终端中已经运行的建图任务。
 
-网页还会列出 `maps/rtab_maps/mapNNN.db` 与
-`maps/octo_maps/mapNNN_octomap/mapNNN.bt` 同时存在的地图。选择后会启动保存地图定位、
-静态 OctoMap 加载和 A* 规划；网页会直接读取保存的 `.bt`，因此定位进程尚未就绪时
-也能显示体素地图，并和 RTAB-Map 导出的彩色点云叠加。地图画布支持拖动旋转视角和
-滚轮缩放。RTAB-Map 完成定位并报告可信协方差后，“选择目标点”才会启用；再点击
-地图位置，网页才会向 `/navigation/goal_pose` 发布目标并绘制
-`/navigation/planned_path`。该功能不会自动启用路径跟随，默认也不会向 `/cmd_vel`
-发送导航速度。
+网页还会列出 `maps/rtab_maps/mapNNN.db`。选择地图后，网页会自动调用
+`tools/export_rtabmap_octomap.sh` 补齐彩色 PLY 和 `.bt`，并立即加载显示；这一步不会
+启动相机定位。地图画布支持拖动旋转视角和滚轮缩放。
+
+要进行无需手工点击初始位姿的自动定位：
+
+1. 选择地图，等待彩色点云和 OctoMap 图层加载完成。
+2. 点击“自动定位”，缓慢移动或原地转动机器人，让相机看到建图时记录过的区域。
+3. RTAB-Map 用保存数据库中的视觉词袋和局部特征寻找全局候选，并只在协方差可信时
+   将 `/rtabmap/localization_pose` 交给后级。
+4. `luxi_location` 使用当前深度点云和保存的彩色 PLY 进行 Open3D ICP 精配准，结果
+   发布到 `/luxi_location/pose`。
+5. 页面显示“已定位”后，以紫色箭头显示机器人位置和朝向，同时显示 `x/y/yaw` 与
+   ICP fitness；“选择目标点”此时才会启用。
+
+因此粗定位失败时不会盲目启动 ICP，ICP 失败时也不会开放导航目标。点击“停止定位”
+会结束 RTAB-Map、ICP、OctoMap 和规划进程，但保留已加载的地图图层。该功能不会自动
+启用路径跟随，默认也不会向 `/cmd_vel` 发送导航速度。
 
 若只需浏览已保存的 OctoMap，可以不启动终端一；但要让 RTAB-Map 使用当前相机进行
 定位、获得可信位姿并启用“选择目标点”，仍必须启动硬件 profile。
@@ -226,6 +239,9 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `1800` | 单次浏览器点云预览的最大抽样点数 |
+| `navigation_localization_pose_topic` | `/rtabmap/localization_pose` | RTAB-Map 粗定位输入 |
+| `navigation_refined_pose_topic` | `/luxi_location/pose` | ICP 精定位结果 |
+| `navigation_refined_fitness_topic` | `/luxi_location/fitness` | ICP 匹配得分 |
 
 默认监听所有网卡且没有用户认证，适合受信任的机器人局域网。不要把 8080 端口直接
 暴露到互联网；需要跨公网使用时，应在前方增加带认证和 TLS 的网关。
@@ -238,6 +254,9 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 - `POST /api/estop`：`{"active": true}` 锁定，`false` 解除。
 - `POST /api/mapping/start`：启动受网页管理的 RTAB-Map 建图进程。
 - `POST /api/mapping/stop`：停止受网页管理的 RTAB-Map 建图进程并保存数据库。
+- `POST /api/navigation/load_map`：转换并加载地图显示图层，不启动定位。
+- `POST /api/navigation/localize`：以所选地图启动 RTAB-Map 粗定位和 ICP 精定位。
+- `POST /api/navigation/stop`：停止定位、规划相关进程。
 - `GET /api/preview/rgb`：最新压缩 RGB 图像，未收到相机数据时返回 404。
 - `GET /api/preview/cloud`：抽样后的 XYZRGB 点云 JSON，用于网页 Canvas 预览。
 

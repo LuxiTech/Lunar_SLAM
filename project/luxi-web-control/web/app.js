@@ -32,6 +32,7 @@ const navigationState = $("#navigationState");
 const navigationDetail = $("#navigationDetail");
 const navigationMapSelect = $("#navigationMapSelect");
 const navigationLoadButton = $("#navigationLoadButton");
+const navigationLocateButton = $("#navigationLocateButton");
 const navigationStopButton = $("#navigationStopButton");
 const navigationGoalButton = $("#navigationGoalButton");
 const voxelMapCanvas = $("#voxelMapCanvas");
@@ -39,6 +40,7 @@ const voxelMapHint = $("#voxelMapHint");
 const navigationShowCloud = $("#navigationShowCloud");
 const navigationShowVoxels = $("#navigationShowVoxels");
 const navigationShowMappingOrigin = $("#navigationShowMappingOrigin");
+const navigationShowRobot = $("#navigationShowRobot");
 
 const held = new Set();
 let estopActive = false;
@@ -53,6 +55,7 @@ let rgbObjectUrl = null;
 let cloudRefreshPending = false;
 let navigationMapsRefreshPending = false;
 let navigationLoadPending = false;
+let navigationLocatePending = false;
 let voxelRefreshPending = false;
 let navigationCloudRefreshPending = false;
 let voxelViewport = null;
@@ -66,6 +69,7 @@ let navigationPinch = null;
 const navigationPointers = new Map();
 let navigationGoalMode = false;
 let navigationMapRecords = new Map();
+let navigationPose = null;
 
 const keyActions = {
   KeyW: "forward",
@@ -347,22 +351,44 @@ function updateNavigation(navigation) {
   const selectedMap = navigationMapRecords.get(navigationMapSelect.value);
   navigationLoadButton.disabled = navigationLoadPending || !selectedMap?.convertible;
   navigationMapSelect.disabled = navigationLoadPending;
+  navigationLocateButton.disabled =
+    navigationLoadPending || navigationLocatePending ||
+    navigation.state === "running" ||
+    !selectedMap?.loadable || !selectedMap?.cloud_path ||
+    navigationCloud.map_id !== selectedMap?.id;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
   navigationGoalButton.disabled = !navigation.localization_ready;
+  navigationPose = navigation.pose || null;
   if (navigation.last_error) {
     navigationDetail.textContent = navigation.last_error;
   } else if (navigation.state === "running") {
-    navigationDetail.textContent = navigation.localization_ready
-      ? `已完成 ${navigation.map_id || "所选地图"} 定位；可选择目标点。`
-      : `正在使用 ${navigation.map_id || "所选地图"} 定位；完成前不能发送目标点。`;
+    const mapName = navigation.map_id || "所选地图";
+    const pose = navigation.pose;
+    const poseText = pose
+      ? ` x=${pose.x.toFixed(2)}m，y=${pose.y.toFixed(2)}m，yaw=${pose.yaw_degrees.toFixed(1)}°`
+      : "";
+    if (navigation.localization_stage === "localized") {
+      const fitness = navigation.localization_fitness == null
+        ? "" : `，fitness=${Number(navigation.localization_fitness).toFixed(3)}`;
+      navigationDetail.textContent =
+        `${mapName} 已完成 RTAB-Map 粗定位和 ICP 精定位：${poseText}${fitness}。`;
+    } else if (navigation.localization_stage === "refining") {
+      navigationDetail.textContent =
+        `${mapName} 已找到 RTAB-Map 全局候选，正在进行 ICP 精配准：${poseText}。`;
+    } else {
+      navigationDetail.textContent =
+        `正在 ${mapName} 中进行全局粗定位；请缓慢移动或转动机器人。`;
+    }
     if (navigation.map_id && navigationCloud.map_id !== navigation.map_id) {
       refreshNavigationCloud();
     }
   } else if (!navigation.enabled) {
     navigationDetail.textContent = "定位与规划未启用；仍可加载并查看保存的两种地图图层。";
   } else {
-    navigationDetail.textContent = "选择已保存地图；缺少显示图层时会自动转换并加载。";
+    navigationDetail.textContent =
+      "地图图层加载完成后，点击“自动定位”并缓慢移动或转动机器人。";
   }
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
 }
 
 function updateNavigationMaps(maps) {
@@ -438,6 +464,9 @@ function drawNavigationMap(voxels, path, cloud) {
     pathPoints,
     selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : [],
     mapHasGeometry && navigationShowMappingOrigin.checked ? [mappingOrigin] : [],
+    navigationPose && navigationShowRobot.checked
+      ? [[navigationPose.x, navigationPose.y, navigationPose.z || 0]]
+      : [],
   );
   if (!all.length) {
     voxelViewport = null;
@@ -549,6 +578,45 @@ function drawNavigationMap(voxels, path, cloud) {
     context.fillText(label, x + 16, y - 9);
     context.restore();
   }
+  if (navigationPose && navigationShowRobot.checked) {
+    const robot = [
+      navigationPose.x,
+      navigationPose.y,
+      navigationPose.z || 0,
+    ];
+    const heading = [
+      robot[0] + 0.38 * Math.cos(navigationPose.yaw),
+      robot[1] + 0.38 * Math.sin(navigationPose.yaw),
+      robot[2],
+    ];
+    const [x, y] = toCanvas(robot);
+    const [tipX, tipY] = toCanvas(heading);
+    const dx = tipX - x;
+    const dy = tipY - y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    const sideX = -dy / length;
+    const sideY = dx / length;
+    context.save();
+    context.strokeStyle = "#c792ff";
+    context.fillStyle = "#c792ff";
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(x, y, 6, 0, Math.PI * 2);
+    context.fill();
+    context.beginPath();
+    context.moveTo(x, y);
+    context.lineTo(tipX, tipY);
+    context.stroke();
+    context.beginPath();
+    context.moveTo(tipX, tipY);
+    context.lineTo(tipX - dx * 0.28 + sideX * 5, tipY - dy * 0.28 + sideY * 5);
+    context.lineTo(tipX - dx * 0.28 - sideX * 5, tipY - dy * 0.28 - sideY * 5);
+    context.closePath();
+    context.fill();
+    context.font = "600 12px system-ui, sans-serif";
+    context.fillText("机器人", x + 10, y - 10);
+    context.restore();
+  }
 }
 
 async function refreshVoxelMap() {
@@ -605,6 +673,7 @@ async function loadNavigationMap(automatic = false) {
   navigationVoxels = {};
   navigationPath = {};
   navigationView = null;
+  navigationPose = null;
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   if (!map.loadable) {
@@ -616,12 +685,29 @@ async function loadNavigationMap(automatic = false) {
     navigationResult = result.navigation || navigationResult;
     updateNavigation(navigationResult);
     await refreshNavigationCloud();
-    showToast(`${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；请等待定位和体素地图就绪`);
+    showToast(`${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；可点击“自动定位”`);
   } catch (error) {
     showToast(`${automatic ? "地图转换或加载" : "地图加载"}失败：${error.message}`);
   } finally {
     navigationLoadPending = false;
     updateNavigation(navigationResult);
+  }
+}
+
+async function startNavigationLocalization() {
+  const mapId = navigationMapSelect.value;
+  if (!mapId || navigationLocatePending) return;
+  navigationLocatePending = true;
+  navigationLocateButton.disabled = true;
+  navigationPose = null;
+  try {
+    const result = await api("/api/navigation/localize", {map_id: mapId});
+    updateNavigation(result.navigation);
+    showToast("自动定位已启动，请缓慢移动或转动机器人");
+  } catch (error) {
+    showToast(`自动定位启动失败：${error.message}`);
+  } finally {
+    navigationLocatePending = false;
   }
 }
 
@@ -637,6 +723,7 @@ async function stopNavigation() {
 }
 
 navigationLoadButton.addEventListener("click", loadNavigationMap);
+navigationLocateButton.addEventListener("click", startNavigationLocalization);
 navigationStopButton.addEventListener("click", stopNavigation);
 navigationMapSelect.addEventListener("change", () => {
   selectedGoal = null;
@@ -644,6 +731,7 @@ navigationMapSelect.addEventListener("change", () => {
   navigationVoxels = {};
   navigationPath = {};
   navigationView = null;
+  navigationPose = null;
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   updateNavigation({enabled: true, state: "stopped"});
@@ -652,6 +740,7 @@ navigationMapSelect.addEventListener("change", () => {
 navigationShowCloud.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowVoxels.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowMappingOrigin.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowRobot.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 function setNavigationGoalMode(enabled) {
   navigationGoalMode = enabled;
   navigationGoalButton.classList.toggle("active", enabled);

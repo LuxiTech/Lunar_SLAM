@@ -1,0 +1,33 @@
+luxi_icp_localization:
+  ros__parameters:
+    depth_topic: /sensors/rgbd/depth/image_raw
+    camera_info_topic: /sensors/rgbd/color/camera_info
+    initial_pose_topic: /initialpose
+    # Zero accepts manual initial poses without checking their covariance.
+    initial_pose_max_variance: 0.0
+    map_frame: map
+    base_frame: base_link
+
+    processing_period: 0.5
+    pixel_stride: 4
+    depth_scale: 0.001
+    minimum_depth: 0.25
+    maximum_depth: 4.0
+
+    map_voxel_size: 0.08
+    scan_voxel_size: 0.06
+    coarse_voxel_size: 0.16
+    coarse_max_correspondence_distance: 0.50
+    fine_max_correspondence_distance: 0.20
+    coarse_iterations: 30
+    fine_iterations: 30
+    minimum_scan_points: 150
+
+    minimum_fitness: 0.25
+    maximum_rmse: 0.15
+    maximum_translation_correction: 0.50
+    maximum_yaw_correction_deg: 20.0
+    initial_maximum_translation_correction: 1.50
+    initial_maximum_yaw_correction_deg: 45.0
+
+    publish_tf: true

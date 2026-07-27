@@ -43,6 +43,10 @@ web_control:
     navigation_path_topic: /navigation/planned_path
     # Goal selection is disabled until RTAB-Map publishes a confident pose.
     navigation_localization_pose_topic: /rtabmap/localization_pose
+    # RTAB-Map supplies the global candidate; luxi_location refines it with ICP.
+    navigation_refined_pose_topic: /luxi_location/pose
+    navigation_refined_fitness_topic: /luxi_location/fitness
+    navigation_refined_status_topic: /luxi_location/status
     navigation_localization_max_variance: 100.0
     navigation_localization_timeout: 3.0
     max_voxel_points: 12000
