@@ -16,14 +16,51 @@ rosbridge、前端框架或厂商 SDK。它还可管理本项目 RTAB-Map 建图
 
 软件急停不能代替实体急停。首次联调应架空驱动轮或在开阔区域使用低速参数。
 
-## 构建与启动（LeKiwi 小车）
+## 完整启动流程（D435i + LeKiwi + 网页）
 
-在工作区根目录执行：
+首次构建在工作区根目录执行一次：
 
 ```bash
 cd /home/lunar/project/lunar_slam
 source /opt/ros/humble/setup.bash
-colcon build --packages-select luxi_web_control luxi_rtab_map --symlink-install
+colcon build --packages-select luxi_adapter luxi_web_control luxi_rtab_map --symlink-install
+```
+
+随后按下列顺序使用两个终端。网页遥控本身只需终端二；要使用网页 RGB 预览、建图或
+基于相机的地图定位，必须先保持终端一的硬件 profile 运行。
+
+### 终端一：启动唯一硬件 profile
+
+当前默认 profile 是 D435i，选择、话题名和驱动工作区均由
+`luxi_adapter/config/sensor_bringup.yaml` 管理。不要再手工启动
+`lunar_realsense_bringup`，否则会与适配层重复占用同一相机。
+
+```bash
+cd /home/lunar/project/lunar_slam
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch luxi_adapter sensor_bringup.launch.py
+```
+
+第一次插入或热插拔 D435i 后，驱动可能需要数十秒重新枚举。保持此终端运行，确认已
+出现 `RealSense Node Is Up!`；网页建图会最多等待 60 秒，以等待统一传感器数据。
+
+可在另一个终端确认适配层已准备好：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 topic echo --once /sensors/rgbd/color/image_raw
+ros2 topic echo --once /sensors/rgbd/depth/image_raw
+ros2 topic echo --once /sensors/imu/data
+```
+
+### 终端二：启动网页与底盘控制
+
+```bash
+cd /home/lunar/project/lunar_slam
+source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 ros2 launch luxi_web_control lekiwi_web_control.launch.py \
@@ -40,6 +77,19 @@ hostname -I
 与自己同网段的地址，例如 `http://192.168.123.66:8080`。页面使用虚拟摇杆控制：
 上下对应前进/后退，左右对应左转/右转，松手自动回中停车；同时保留 W/A/S/D 和
 方向键，空格键触发急停。
+
+网页功能与前置条件：
+
+| 网页功能 | 需要先启动的内容 |
+|---|---|
+| 遥控、急停 | 终端二；底盘在线且订阅 `/cmd_vel` |
+| RGB 预览 | 终端一的 `luxi_adapter` profile |
+| 开始建图、停止保存 | 终端一与终端二；由网页启动 RTAB-Map 算法 |
+| 加载已有地图、显示 OctoMap | 终端二；所选 `.db` 与 `.bt` 地图文件存在 |
+| 基于相机的地图定位、选择目标点 | 终端一、终端二与已保存地图 |
+
+关闭时先在网页点击“停止建图”（若正在建图），再在两个终端分别按 `Ctrl-C`；网页不
+会自动停止硬件 profile。
 
 也可以直接运行节点并覆盖安全参数：
 
@@ -110,23 +160,15 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 
 ## 网页控制 RTAB-Map 建图
 
-网页中的“开始建图”只管理算法建图进程，**不会启动或关闭 D435i 相机驱动**。这是为了
-避免网页按钮重复占用相机设备。开始建图前，先在单独终端启动相机：
+网页中的“开始建图”只管理算法建图进程，**不会启动或关闭相机硬件**。因此必须先按
+“终端一”启动唯一选定的 `luxi_adapter` profile，再按“终端二”启动网页。D435i 的
+完整硬件启动命令为：
 
 ```bash
 cd /home/lunar/project/lunar_slam
 source /opt/ros/humble/setup.bash
-source device/D435i/ros2_ws/install/setup.bash
-ros2 launch lunar_realsense_bringup d435i.launch.py \
-  rviz:=false enable_imu:=true unite_imu_method:=2 enable_pointcloud:=false
-```
-
-然后启动网页控制（LeKiwi 小车使用专用 launch）：
-
-```bash
-source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch luxi_web_control lekiwi_web_control.launch.py
+ros2 launch luxi_adapter sensor_bringup.launch.py
 ```
 
 打开网页后按以下顺序操作：
@@ -138,15 +180,15 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py
 4. 点击“停止建图”。网页会向它启动的建图进程发送 `SIGINT`，RTAB-Map 正常关闭并
    保存数据库。
 
-网页下方会同时显示两块只读预览：D435i 当前 RGB 图像，以及来自
+网页下方会同时显示两块只读预览：当前硬件 profile 的 RGB 图像，以及来自
 `/rtabmap/cloud_map` 的稀疏彩色点云。RGB 在相机驱动运行后即可显示；点云需要建图
 成功启动并收到 RTAB-Map 地图数据后才会出现。点云为浏览器实时查看而抽样的最多
 1800 个点，并不是完整地图导出；其显示采用固定等轴视角，适合确认重建是否持续更新。
 
 每一次新建图默认写入 `/home/lunar/project/lunar_slam/maps/rtab_maps/mapNNN.db`。如果启动失败，
 网页会显示失败状态；详细日志位于
-`/home/lunar/project/lunar_slam/log/luxi_web_control_rtabmap.log`。常见原因是 D435i
-驱动尚未运行、没有相机 RGB-D 数据，或没有加载 D435i 工作区。
+`/home/lunar/project/lunar_slam/log/luxi_web_control_rtabmap.log`。常见原因是硬件
+profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 
 网页只停止它自己启动的 RTAB-Map 进程，不会停止手工终端中已经运行的建图任务。
 
@@ -158,6 +200,9 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py
 地图位置，网页才会向 `/navigation/goal_pose` 发布目标并绘制
 `/navigation/planned_path`。该功能不会自动启用路径跟随，默认也不会向 `/cmd_vel`
 发送导航速度。
+
+若只需浏览已保存的 OctoMap，可以不启动终端一；但要让 RTAB-Map 使用当前相机进行
+定位、获得可信位姿并启用“选择目标点”，仍必须启动硬件 profile。
 
 ## 参数
 
@@ -178,7 +223,7 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py
 | `mapping_launch_package` | `luxi_rtab_map` | 被网页管理的建图 ROS 包 |
 | `mapping_launch_file` | `rgbd_mapping.launch.py` | 被网页管理的建图 launch 文件 |
 | `enable_preview` | `true` | 是否订阅并提供 RGB、稀疏点云预览 |
-| `rgb_preview_topic` | `/camera/camera/color/image_raw/compressed` | D435i 压缩 RGB 话题 |
+| `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `1800` | 单次浏览器点云预览的最大抽样点数 |
 

@@ -3,7 +3,7 @@
 <package format="3">
   <name>luxi_rtab_map</name>
   <version>0.1.0</version>
-  <description>Project-owned D435i RGB-D RTAB-Map mapping pipeline and C++ API experiments.</description>
+  <description>Project-owned hardware-independent RGB-D RTAB-Map mapping pipeline and C++ API experiments.</description>
   <maintainer email="lunar@example.com">lunar</maintainer>
   <license>Apache-2.0</license>
 
@@ -17,11 +17,9 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>imu_filter_madgwick</exec_depend>
   <exec_depend>rtabmap_launch</exec_depend>
   <exec_depend>rtabmap_rviz_plugins</exec_depend>
   <exec_depend>rviz2</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

@@ -1,8 +1,7 @@
-"""Launch the project-owned RTAB-Map RGB-D mapping pipeline.
+"""Launch the hardware-independent RTAB-Map RGB-D mapping pipeline.
 
-The D435i driver is deliberately not launched here. Start
-``lunar_realsense_bringup`` first so that device/D435i remains the hardware
-data provider and this package remains the mapping algorithm owner.
+Hardware is provided exclusively by ``luxi_adapter``. This launch consumes its
+canonical RGB-D, filtered-IMU and TF interface without knowing a camera model.
 """
 
 import os
@@ -36,11 +35,9 @@ TEST_PROCESS_MARKERS = (
     "/rtabmap_launch/share/rtabmap_launch/launch/config/rgbd.rviz",
     "rgbd_mapping.rviz",
     "rtabmap_util/point_cloud_xyzrgb",
-    "imu_filter_madgwick_node",
     "/rtabmap_sync/rgbd_sync",
     "/rtabmap_odom/rgbd_odometry",
     "/rtabmap_slam/rtabmap",
-    "__node:=base_to_d435i_tf",
 )
 
 MAPS_DIRECTORY = "/home/lunar/project/lunar_slam/maps/rtab_maps"
@@ -78,48 +75,47 @@ def _wait_for_camera_inputs(context: object) -> list[LogInfo]:
         LaunchConfiguration("camera_info_topic").perform(context),
     )
     if LaunchConfiguration("use_imu").perform(context).lower() in {"1", "true", "yes", "on"}:
-        topics += (LaunchConfiguration("raw_imu_topic").perform(context),)
+        topics += (LaunchConfiguration("imu_topic").perform(context),)
     deadline = time.monotonic() + timeout
 
     for topic in topics:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            raise RuntimeError(
-                f"D435i input timeout after {timeout:.1f}s while waiting for {topic}. "
-                "Start lunar_realsense_bringup before the mapping launch."
-            )
-        try:
-            result = subprocess.run(
-                [
-                    "ros2",
-                    "topic",
-                    "echo",
-                    "--once",
-                    "--no-daemon",
-                    "--field",
-                    "header",
-                    "--qos-profile",
-                    "sensor_data",
-                    topic,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=remaining,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError(
-                f"No message received from {topic} within {timeout:.1f}s. "
-                "Check the D435i connection and driver process."
-            ) from error
+        # ``ros2 topic echo`` exits immediately while a topic has no known
+        # type. Retry until the shared deadline: a single call would make the
+        # advertised 15-second startup grace period ineffective after a USB
+        # reconnect or a slow camera driver startup.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise RuntimeError(
+                    f"No message received from {topic} within {timeout:.1f}s. "
+                    "Check the active luxi_adapter profile and hardware driver."
+                )
+            try:
+                result = subprocess.run(
+                    [
+                        "ros2",
+                        "topic",
+                        "echo",
+                        "--once",
+                        "--no-daemon",
+                        "--field",
+                        "header",
+                        "--qos-profile",
+                        "sensor_data",
+                        topic,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=min(2.0, remaining),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                result = None
+            if result is not None and result.returncode == 0:
+                break
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Unable to read D435i input topic {topic}. "
-                "Check the driver topics before starting mapping."
-            )
-
-    return [LogInfo(msg="D435i RGB-D input topics are ready.")]
+    return [LogInfo(msg="Canonical RGB-D input topics are ready.")]
 
 
 def _processes() -> dict[int, tuple[int, str]]:
@@ -201,24 +197,6 @@ def generate_launch_description() -> LaunchDescription:
         ]
     )
 
-    base_to_camera_tf = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="base_to_d435i_tf",
-        arguments=[
-            "--x", LaunchConfiguration("camera_x"),
-            "--y", LaunchConfiguration("camera_y"),
-            "--z", LaunchConfiguration("camera_z"),
-            "--roll", LaunchConfiguration("camera_roll"),
-            "--pitch", LaunchConfiguration("camera_pitch"),
-            "--yaw", LaunchConfiguration("camera_yaw"),
-            "--frame-id", LaunchConfiguration("base_frame"),
-            "--child-frame-id", LaunchConfiguration("camera_frame"),
-        ],
-        condition=IfCondition(LaunchConfiguration("publish_base_to_camera_tf")),
-        output="screen",
-    )
-
     rtabmap = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(rtabmap_launch),
         launch_arguments={
@@ -245,7 +223,7 @@ def generate_launch_description() -> LaunchDescription:
             "qos_camera_info": LaunchConfiguration("qos"),
             "wait_for_transform": LaunchConfiguration("wait_for_transform"),
             "wait_imu_to_init": LaunchConfiguration("use_imu"),
-            "imu_topic": LaunchConfiguration("filtered_imu_topic"),
+            "imu_topic": LaunchConfiguration("imu_topic"),
             "rtabmap_args": effective_rtabmap_args,
             "odom_args": LaunchConfiguration("odom_args"),
             "log_level": LaunchConfiguration("log_level"),
@@ -261,29 +239,9 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
     )
 
-    imu_filter = Node(
-        package="imu_filter_madgwick",
-        executable="imu_filter_madgwick_node",
-        name="d435i_imu_filter",
-        parameters=[
-            {
-                "use_mag": False,
-                "world_frame": "enu",
-                "publish_tf": False,
-                "gain": 0.03,
-            }
-        ],
-        remappings=[
-            ("imu/data_raw", LaunchConfiguration("raw_imu_topic")),
-            ("imu/data", LaunchConfiguration("filtered_imu_topic")),
-        ],
-        condition=IfCondition(LaunchConfiguration("use_imu")),
-        output="screen",
-    )
-
-    # Give the static TF publisher time to populate TF buffers before the first
-    # RGB-D frame is processed. Scope the upstream launch arguments so that its
-    # internal ``rviz=false`` does not overwrite this launch file's RViz option.
+    # The adapter owns sensor TF and is started before this algorithm launch.
+    # Scope upstream arguments so its internal ``rviz=false`` does not overwrite
+    # this launch file's RViz option.
     delayed_rtabmap = TimerAction(
         period=0.5,
         actions=[GroupAction(actions=[rtabmap], scoped=True)],
@@ -322,29 +280,24 @@ def generate_launch_description() -> LaunchDescription:
                 description="Existing database to continue; empty creates the next rtab_maps/mapNNN.db.",
             ),
             DeclareLaunchArgument("base_frame", default_value="base_link"),
-            DeclareLaunchArgument("camera_frame", default_value="camera_link"),
             DeclareLaunchArgument("map_frame", default_value="map"),
-            DeclareLaunchArgument("publish_base_to_camera_tf", default_value="true"),
-            DeclareLaunchArgument("camera_x", default_value="0.0"),
-            DeclareLaunchArgument("camera_y", default_value="0.0"),
-            DeclareLaunchArgument("camera_z", default_value="0.0"),
-            DeclareLaunchArgument("camera_roll", default_value="0.0"),
-            DeclareLaunchArgument("camera_pitch", default_value="0.0"),
-            DeclareLaunchArgument("camera_yaw", default_value="0.0"),
-            DeclareLaunchArgument("rgb_topic", default_value="/camera/camera/color/image_raw"),
+            DeclareLaunchArgument("rgb_topic", default_value="/sensors/rgbd/color/image_raw"),
             DeclareLaunchArgument(
                 "depth_topic",
-                default_value="/camera/camera/aligned_depth_to_color/image_raw",
+                default_value="/sensors/rgbd/depth/image_raw",
             ),
-            DeclareLaunchArgument("camera_info_topic", default_value="/camera/camera/color/camera_info"),
+            DeclareLaunchArgument("camera_info_topic", default_value="/sensors/rgbd/color/camera_info"),
             DeclareLaunchArgument("qos", default_value="2"),
             DeclareLaunchArgument("approx_sync_max_interval", default_value="0.05"),
             DeclareLaunchArgument("wait_for_transform", default_value="0.5"),
             DeclareLaunchArgument("use_imu", default_value="true"),
-            DeclareLaunchArgument("raw_imu_topic", default_value="/camera/camera/imu"),
-            DeclareLaunchArgument("filtered_imu_topic", default_value="/imu/data"),
+            DeclareLaunchArgument("imu_topic", default_value="/sensors/imu/data"),
             DeclareLaunchArgument("wait_for_camera", default_value="true"),
-            DeclareLaunchArgument("camera_wait_timeout", default_value="15.0"),
+            DeclareLaunchArgument(
+                "camera_wait_timeout",
+                default_value="60.0",
+                description="Maximum time to wait for canonical sensor messages after hardware startup or reconnect.",
+            ),
             DeclareLaunchArgument("new_map", default_value="false"),
             DeclareLaunchArgument("load_saved_map", default_value="true"),
             DeclareLaunchArgument(
@@ -383,8 +336,6 @@ def generate_launch_description() -> LaunchDescription:
             OpaqueFunction(function=_terminate_processes),
             OpaqueFunction(function=_prepare_database_path),
             OpaqueFunction(function=_wait_for_camera_inputs),
-            base_to_camera_tf,
-            imu_filter,
             delayed_rtabmap,
             delayed_rviz,
             publish_map,

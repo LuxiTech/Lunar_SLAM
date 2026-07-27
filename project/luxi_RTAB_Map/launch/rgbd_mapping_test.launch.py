@@ -11,14 +11,14 @@ def generate_launch_description():
             DeclareLaunchArgument("database_path", default_value="/tmp/luxi_rtab_map_test.db"),
             DeclareLaunchArgument("delete_db_on_start", default_value="true"),
             DeclareLaunchArgument("max_frames", default_value="0"),
-            DeclareLaunchArgument("rgb_topic", default_value="/camera/camera/color/image_raw"),
+            DeclareLaunchArgument("rgb_topic", default_value="/sensors/rgbd/color/image_raw"),
             DeclareLaunchArgument(
                 "depth_topic",
-                default_value="/camera/camera/aligned_depth_to_color/image_raw",
+                default_value="/sensors/rgbd/depth/image_raw",
             ),
             DeclareLaunchArgument(
                 "camera_info_topic",
-                default_value="/camera/camera/color/camera_info",
+                default_value="/sensors/rgbd/color/camera_info",
             ),
             Node(
                 package="luxi_rtab_map",

@@ -82,11 +82,11 @@ public:
   : Node("luxi_rtab_map_node")
   {
     mode_ = declare_parameter<std::string>("mode", "rgbd");
-    rgb_topic_ = declare_parameter<std::string>("rgb_topic", "/camera/camera/color/image_raw");
+    rgb_topic_ = declare_parameter<std::string>("rgb_topic", "/sensors/rgbd/color/image_raw");
     depth_topic_ = declare_parameter<std::string>(
-      "depth_topic", "/camera/camera/aligned_depth_to_color/image_raw");
+      "depth_topic", "/sensors/rgbd/depth/image_raw");
     camera_info_topic_ = declare_parameter<std::string>(
-      "camera_info_topic", "/camera/camera/color/camera_info");
+      "camera_info_topic", "/sensors/rgbd/color/camera_info");
     database_path_ = declare_parameter<std::string>(
       "database_path", "/tmp/luxi_rtab_map_test.db");
     delete_db_on_start_ = declare_parameter<bool>("delete_db_on_start", false);

@@ -1,14 +1,14 @@
 # 项目 RGB-D 建图节点
 
 `luxi_rtab_map` 是 `project` 目录下的建图功能包。它只负责算法节点，
-不包含 D435i 硬件驱动。
+不包含任何特定相机硬件驱动；所有硬件由 `luxi_adapter` 提供统一接口。
 
 ## 职责边界
 
 ```text
-device/D435i
-  lunar_realsense_bringup
-  -> RGB、对齐深度、CameraInfo、PointCloud2、TF
+project/luxi_adapter
+  selected hardware profile
+  -> RGB、对齐深度、CameraInfo、滤波 IMU、TF
 
 project/luxi_RTAB_Map
   rgbd_mapping.launch.py
@@ -57,15 +57,14 @@ kill -SIGTERM <PID>
 不要在旧相机驱动仍运行时再次启动相机，否则可能出现 `failed to set power state`
 或设备忙错误。正常建图时只需各启动一个相机进程和一个建图进程。
 
-### 终端一：启动相机
+### 终端一：启动选定硬件 profile
 
-执行后保持这个终端运行，看到 `RealSense Node Is Up!` 后再使用终端二：
+执行后保持这个终端运行，确认统一话题出现后再使用终端二：
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
-ros2 launch lunar_realsense_bringup d435i.launch.py \
-  rviz:=false enable_imu:=true unite_imu_method:=2 enable_pointcloud:=false
+source /home/lunar/project/lunar_slam/install/setup.bash
+ros2 launch luxi_adapter sensor_bringup.launch.py
 ```
 
 ### 终端二：启动建图和 RViz
@@ -76,7 +75,6 @@ export XAUTHORITY=/tmp/.docker.xauth
 export QT_X11_NO_MITSHM=1
 
 source /opt/ros/humble/setup.bash
-source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
 source /home/lunar/project/lunar_slam/install/setup.bash
 ros2 launch luxi_rtab_map rgbd_mapping.launch.py
 ```
@@ -191,9 +189,9 @@ ros2 launch lunar_realsense_bringup d435i.launch.py \
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
-ros2 topic hz /camera/camera/color/image_raw
-ros2 topic hz /camera/camera/aligned_depth_to_color/image_raw
-ros2 topic hz /camera/camera/imu
+ros2 topic hz /sensors/rgbd/color/image_raw
+ros2 topic hz /sensors/rgbd/depth/image_raw
+ros2 topic hz /sensors/imu/data_raw
 ```
 
 RGB 和对齐深度应接近 30 Hz，IMU 应持续输出。按 `Ctrl-C` 退出频率检查，不要停止
@@ -211,8 +209,8 @@ RSUSB 在用户态直接访问 USB，不依赖 Jetson 的 HID Sensor Hub 内核�
 中必须出现 Motion Module，并且下面两个检查都应有持续数据：
 
 ```bash
-ros2 topic hz /camera/camera/imu
-ros2 topic hz /imu/data
+ros2 topic hz /sensors/imu/data_raw
+ros2 topic hz /sensors/imu/data
 ```
 
 如果日志出现 `No HID info provided, IMU is disabled`，说明启动了系统 librealsense
@@ -237,8 +235,8 @@ ros2 launch luxi_rtab_map rgbd_mapping.launch.py
 正常情况下，Jetson 本地桌面会出现 RViz，ROS 图中至少包含：
 
 ```text
-/camera/camera
-/d435i_imu_filter
+/sensors/rgbd/color/image_raw
+/sensor_imu_filter
 /rtabmap/rgbd_sync
 /rtabmap/rgbd_odometry
 /rtabmap/rtabmap
@@ -277,7 +275,7 @@ ros2 launch luxi_rtab_map rgbd_mapping.launch.py new_map:=true
 不会在无数据状态下持续刷警告。可按需修改超时：
 
 ```bash
-ros2 launch luxi_rtab_map rgbd_mapping.launch.py camera_wait_timeout:=30.0
+ros2 launch luxi_rtab_map rgbd_mapping.launch.py camera_wait_timeout:=60.0
 ```
 
 ### RViz 窗口不出现时
@@ -327,7 +325,7 @@ rviz2 -d /home/lunar/project/lunar_slam/install/luxi_rtab_map/share/luxi_rtab_ma
   问题视角中，0.2 到 4 米的有效深度比例由约 39.9% 提高到 42.7%。没有启用补洞，
   因此相机移动时不会把上一帧的旧深度错误地保留到新画面。
 - D435i 陀螺仪和加速度计默认开启，使用 RealSense 的线性插值合成原始 IMU，
-  再由 Madgwick 滤波器发布带姿态的 `/imu/data`。RTAB-Map 启动前会等待 IMU，
+  再由 `luxi_adapter` 中的 Madgwick 滤波器发布带姿态的 `/sensors/imu/data`。RTAB-Map 启动前会等待 IMU，
   用重力方向约束滚转和俯仰，提升手持转动时的稳定性。Madgwick 增益设为 0.03，
   静止实测相邻 IMU 姿态抖动中位数由约 0.019° 降到 0.006°。
 - 关闭视觉里程计的自动重置和恒速运动猜测。短时匹配失败时保留原地图并暂停
@@ -456,7 +454,7 @@ Reliable 订阅，而里程计发布端为 Best Effort，导致一次误导性�
 轨迹时可手动启用，该插件最终配置已经使用 Best Effort QoS。视觉里程计丢失期间
 没有可信的新相机位姿，`CameraCoordinate` 会停止更新，不会伪造相机坐标。
 
-`RGBImage` 默认订阅 `/camera/camera/color/image_raw`，使用 Best Effort QoS，在同一
+`RGBImage` 默认订阅 `/sensors/rgbd/color/image_raw`，使用 Best Effort QoS，在同一
 个 RViz 窗口中创建 RGB 渲染区域。它只负责显示，不会再复制或转换图像，因此不会
 改变 RTAB-Map 的 RGB-D 同步和建图输入。可以拖动 RGB 区域边缘调整画面与三维地图
 的显示比例，也可在 `Displays -> RGBImage` 中临时关闭。
@@ -523,7 +521,7 @@ ros2 run luxi_rtab_map export_3d_map.sh \
 插值提示和首次生成全局点云的提示外，没有连续失跟或节点退出。
 
 ```bash
-ros2 topic hz /camera/camera/color/image_raw
+ros2 topic hz /sensors/rgbd/color/image_raw
 ros2 topic hz /rtabmap/odom
 ros2 topic echo --once /rtabmap/odom_info
 ros2 topic echo --once /rtabmap/map

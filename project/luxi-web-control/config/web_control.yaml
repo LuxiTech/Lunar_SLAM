@@ -46,6 +46,6 @@ web_control:
 
     # Read-only RGB and sparse RTAB-Map cloud previews for the web page.
     enable_preview: true
-    rgb_preview_topic: /camera/camera/color/image_raw/compressed
+    rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
     cloud_preview_topic: /rtabmap/cloud_map
     max_cloud_points: 1800

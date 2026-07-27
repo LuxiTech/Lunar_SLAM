@@ -4,7 +4,7 @@
 
 ## 运行前提
 
-`luxi_rtab_map_node` 不会自动启动 D435i 相机驱动。它只订阅相机已经发布出来的 RGB、对齐深度和 CameraInfo topic，然后调用 RTAB-Map C++ API 处理数据。
+`luxi_rtab_map_node` 不会自动启动硬件。它只订阅 `luxi_adapter` 已发布的统一 RGB、对齐深度和 CameraInfo topic，然后调用 RTAB-Map C++ API 处理数据。
 
 因此必须先启动相机驱动，否则节点会一直等待输入，看起来像“卡住”。
 
@@ -18,28 +18,28 @@ colcon build --symlink-install --packages-select luxi_rtab_map --cmake-args -DCM
 
 ## RGB-D 建图测试
 
-### 1. 启动 D435i 相机
+### 1. 启动选定硬件 profile
 
 打开第一个终端：
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
-ros2 launch lunar_realsense_bringup d435i.launch.py rviz:=false
+source /home/lunar/project/lunar_slam/install/setup.bash
+ros2 launch luxi_adapter sensor_bringup.launch.py
 ```
 
 确认以下 topic 存在：
 
 ```bash
-ros2 topic list | grep camera/camera
+ros2 topic list | grep /sensors/rgbd
 ```
 
 至少应看到：
 
 ```text
-/camera/camera/color/image_raw
-/camera/camera/aligned_depth_to_color/image_raw
-/camera/camera/color/camera_info
+/sensors/rgbd/color/image_raw
+/sensors/rgbd/depth/image_raw
+/sensors/rgbd/color/camera_info
 ```
 
 ### 2. 启动 C++ RGB-D 建图节点
@@ -63,9 +63,9 @@ ros2 launch luxi_rtab_map rgbd_mapping_test.launch.py mode:=rgbd max_frames:=30
 默认输入：
 
 ```text
-/camera/camera/color/image_raw
-/camera/camera/aligned_depth_to_color/image_raw
-/camera/camera/color/camera_info
+/sensors/rgbd/color/image_raw
+/sensors/rgbd/depth/image_raw
+/sensors/rgbd/color/camera_info
 ```
 
 默认数据库：

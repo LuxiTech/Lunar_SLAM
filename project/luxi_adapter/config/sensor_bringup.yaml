@@ -1,0 +1,45 @@
+luxi_adapter:
+  ros__parameters:
+    # Exactly one profile is selected by sensor_bringup.launch.py.
+    hardware_profile: d435i
+
+    # Vendor driver inputs for the selected D435i profile.
+    color_input_topic: /camera/camera/color/image_raw
+    depth_input_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_input_topic: /camera/camera/color/camera_info
+    imu_input_topic: /camera/camera/imu
+    compressed_color_input_topic: /camera/camera/color/image_raw/compressed
+
+    # Project-wide hardware-independent interface consumed by algorithms.
+    color_output_topic: /sensors/rgbd/color/image_raw
+    depth_output_topic: /sensors/rgbd/depth/image_raw
+    camera_info_output_topic: /sensors/rgbd/color/camera_info
+    imu_output_topic: /sensors/imu/data_raw
+    compressed_color_output_topic: /sensors/rgbd/color/image_raw/compressed
+    enable_imu: true
+
+    # Runtime configuration for the D435i profile.
+    d435i_setup: /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
+    rmw_implementation: rmw_cyclonedds_cpp
+    ros_domain_id: 0
+    d435i_color_profile: 640,480,30
+    d435i_depth_profile: 640,480,30
+    d435i_initial_reset: false
+    d435i_unite_imu_method: 2
+
+    # Mounting transform. Keep identity until physical extrinsics are measured.
+    base_frame: base_link
+    camera_frame: camera_link
+    camera_x: 0.0
+    camera_y: 0.0
+    camera_z: 0.0
+    camera_roll: 0.0
+    camera_pitch: 0.0
+    camera_yaw: 0.0
+
+sensor_imu_filter:
+  ros__parameters:
+    use_mag: false
+    world_frame: enu
+    publish_tf: false
+    gain: 0.03

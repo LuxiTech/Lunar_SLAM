@@ -1149,7 +1149,7 @@ class WebControlNode(Node):
         self.declare_parameter("enable_preview", True)
         self.declare_parameter(
             "rgb_preview_topic",
-            "/camera/camera/color/image_raw/compressed",
+            "/sensors/rgbd/color/image_raw/compressed",
         )
         self.declare_parameter("cloud_preview_topic", "/rtabmap/cloud_map")
         self.declare_parameter("max_cloud_points", 1800)
