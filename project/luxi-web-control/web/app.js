@@ -38,6 +38,7 @@ const voxelMapCanvas = $("#voxelMapCanvas");
 const voxelMapHint = $("#voxelMapHint");
 const navigationShowCloud = $("#navigationShowCloud");
 const navigationShowVoxels = $("#navigationShowVoxels");
+const navigationShowMappingOrigin = $("#navigationShowMappingOrigin");
 
 const held = new Set();
 let estopActive = false;
@@ -51,6 +52,7 @@ let rgbRefreshPending = false;
 let rgbObjectUrl = null;
 let cloudRefreshPending = false;
 let navigationMapsRefreshPending = false;
+let navigationLoadPending = false;
 let voxelRefreshPending = false;
 let navigationCloudRefreshPending = false;
 let voxelViewport = null;
@@ -63,6 +65,7 @@ let navigationDrag = null;
 let navigationPinch = null;
 const navigationPointers = new Map();
 let navigationGoalMode = false;
+let navigationMapRecords = new Map();
 
 const keyActions = {
   KeyW: "forward",
@@ -341,7 +344,9 @@ function updateNavigation(navigation) {
   const name = navigationStateNames[navigation.state] || navigation.state;
   navigationState.textContent = name;
   navigationState.className = `preview-state ${navigation.state === "running" ? "live" : ""}`;
-  navigationLoadButton.disabled = !navigationMapSelect.value;
+  const selectedMap = navigationMapRecords.get(navigationMapSelect.value);
+  navigationLoadButton.disabled = navigationLoadPending || !selectedMap?.convertible;
+  navigationMapSelect.disabled = navigationLoadPending;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
   navigationGoalButton.disabled = !navigation.localization_ready;
   if (navigation.last_error) {
@@ -356,20 +361,23 @@ function updateNavigation(navigation) {
   } else if (!navigation.enabled) {
     navigationDetail.textContent = "定位与规划未启用；仍可加载并查看保存的两种地图图层。";
   } else {
-    navigationDetail.textContent = "选择同时包含 .db 和 .bt 的地图后加载。";
+    navigationDetail.textContent = "选择已保存地图；缺少显示图层时会自动转换并加载。";
   }
 }
 
 function updateNavigationMaps(maps) {
   const previous = navigationMapSelect.value;
+  navigationMapRecords = new Map(maps.map((item) => [item.id, item]));
   navigationMapSelect.replaceChildren();
   for (const item of maps) {
     const option = document.createElement("option");
     option.value = item.id;
-    option.disabled = !item.loadable;
+    option.disabled = !item.convertible;
     option.textContent = item.loadable
       ? `${item.id}${item.cloud_path ? "（彩色点云 + 体素地图）" : "（体素地图；未导出彩色点云）"}`
-      : `${item.id}（缺少 ${item.database_path ? ".bt" : ".db"}）`;
+      : item.convertible
+        ? `${item.id}（选择后自动转换）`
+        : `${item.id}（缺少 .db，无法转换）`;
     navigationMapSelect.append(option);
   }
   if (!maps.length) {
@@ -381,8 +389,8 @@ function updateNavigationMaps(maps) {
   if (Array.from(navigationMapSelect.options).some((option) => option.value === previous)) {
     navigationMapSelect.value = previous;
   } else {
-    const firstLoadable = maps.find((item) => item.loadable);
-    navigationMapSelect.value = firstLoadable ? firstLoadable.id : "";
+    const firstConvertible = maps.find((item) => item.convertible);
+    navigationMapSelect.value = firstConvertible ? firstConvertible.id : "";
   }
 }
 
@@ -423,7 +431,14 @@ function drawNavigationMap(voxels, path, cloud) {
   const points = Array.isArray(voxels.points) ? voxels.points : [];
   const pathPoints = Array.isArray(path.points) ? path.points : [];
   const cloudPoints = Array.isArray(cloud.points) ? cloud.points : [];
-  const all = cloudPoints.concat(points, pathPoints, selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : []);
+  const mapHasGeometry = Boolean(cloudPoints.length || points.length || pathPoints.length);
+  const mappingOrigin = [0, 0, 0];
+  const all = cloudPoints.concat(
+    points,
+    pathPoints,
+    selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : [],
+    mapHasGeometry && navigationShowMappingOrigin.checked ? [mappingOrigin] : [],
+  );
   if (!all.length) {
     voxelViewport = null;
     return;
@@ -510,6 +525,30 @@ function drawNavigationMap(voxels, path, cloud) {
     context.arc(x, y, 6, 0, Math.PI * 2);
     context.stroke();
   }
+  if (mapHasGeometry && navigationShowMappingOrigin.checked) {
+    const [x, y] = toCanvas(mappingOrigin);
+    context.save();
+    context.strokeStyle = "#ff9f43";
+    context.fillStyle = "#ff9f43";
+    context.lineWidth = 2.5;
+    context.beginPath();
+    context.moveTo(x - 8, y);
+    context.lineTo(x + 8, y);
+    context.moveTo(x, y - 8);
+    context.lineTo(x, y + 8);
+    context.stroke();
+    context.beginPath();
+    context.arc(x, y, 4, 0, Math.PI * 2);
+    context.fill();
+    const label = "建图起点 (0.00, 0.00, 0.00)";
+    context.font = "600 12px system-ui, sans-serif";
+    const labelWidth = context.measureText(label).width;
+    context.fillStyle = "rgba(8, 13, 19, .84)";
+    context.fillRect(x + 11, y - 23, labelWidth + 10, 20);
+    context.fillStyle = "#ffe0b2";
+    context.fillText(label, x + 16, y - 9);
+    context.restore();
+  }
 }
 
 async function refreshVoxelMap() {
@@ -554,10 +593,13 @@ async function refreshNavigationCloud() {
   );
 }
 
-async function loadNavigationMap() {
+async function loadNavigationMap(automatic = false) {
   const mapId = navigationMapSelect.value;
-  if (!mapId) return;
-  navigationLoadButton.disabled = true;
+  const map = navigationMapRecords.get(mapId);
+  if (!map?.convertible || navigationLoadPending) return;
+  let navigationResult = {enabled: true, state: "stopped"};
+  navigationLoadPending = true;
+  updateNavigation(navigationResult);
   selectedGoal = null;
   navigationCloud = {};
   navigationVoxels = {};
@@ -565,13 +607,21 @@ async function loadNavigationMap() {
   navigationView = null;
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+  if (!map.loadable) {
+    navigationDetail.textContent = `${mapId} 正在转换为网页显示格式，请稍候…`;
+  }
   try {
     const result = await api("/api/navigation/load_map", {map_id: mapId});
-    updateNavigation(result.navigation);
+    updateNavigationMaps(Array.isArray(result.maps) ? result.maps : []);
+    navigationResult = result.navigation || navigationResult;
+    updateNavigation(navigationResult);
     await refreshNavigationCloud();
-    showToast(`${mapId} 已加载彩色点云；请等待定位和体素地图就绪`);
+    showToast(`${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；请等待定位和体素地图就绪`);
   } catch (error) {
-    showToast(`地图加载失败：${error.message}`);
+    showToast(`${automatic ? "地图转换或加载" : "地图加载"}失败：${error.message}`);
+  } finally {
+    navigationLoadPending = false;
+    updateNavigation(navigationResult);
   }
 }
 
@@ -597,9 +647,11 @@ navigationMapSelect.addEventListener("change", () => {
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   updateNavigation({enabled: true, state: "stopped"});
+  loadNavigationMap(true);
 });
 navigationShowCloud.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowVoxels.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowMappingOrigin.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 function setNavigationGoalMode(enabled) {
   navigationGoalMode = enabled;
   navigationGoalButton.classList.toggle("active", enabled);

@@ -104,6 +104,7 @@ def discover_navigation_maps(maps_root: Path) -> list:
             "database_path": str(database) if database else None,
             "octomap_path": str(octomap) if octomap else None,
             "cloud_path": str(cloud) if cloud else None,
+            "convertible": database is not None,
             "loadable": database is not None and octomap is not None,
         })
     return maps
@@ -1070,6 +1071,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(HTTPStatus.ACCEPTED, {
                 "ok": True, "message": message,
+                "maps": node.navigation_maps(),
                 "navigation": node.navigation_status(),
             })
             return
@@ -1137,6 +1139,7 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_workspace_setup", "")
         self.declare_parameter("navigation_log_path", "")
         self.declare_parameter("maps_root", "")
+        self.declare_parameter("map_conversion_timeout", 300.0)
         self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
@@ -1210,6 +1213,12 @@ class WebControlNode(Node):
         navigation_log_path = str(self.get_parameter("navigation_log_path").value)
         maps_root = str(self.get_parameter("maps_root").value)
         self.maps_root = Path(maps_root or workspace_root / "maps").resolve()
+        self.map_export_executable = (
+            workspace_root / "tools/export_rtabmap_octomap.sh"
+        ).resolve()
+        self.map_conversion_timeout = float(
+            self.get_parameter("map_conversion_timeout").value
+        )
         self.octomap_points_executable = (
             workspace_root / "install/luxi_voxel_navigation/lib/"
             "luxi_voxel_navigation/octomap_to_points"
@@ -1288,6 +1297,7 @@ class WebControlNode(Node):
         self._cloud_frame_id = ""
         self._cloud_received_at: Optional[float] = None
         self._navigation_lock = threading.Lock()
+        self._navigation_map_operation_lock = threading.Lock()
         self._voxel_points = []
         self._voxel_frame_id = "map"
         self._voxel_resolution = 0.0
@@ -1410,6 +1420,8 @@ class WebControlNode(Node):
             raise ValueError("navigation_localization_max_variance must be positive")
         if self.navigation_localization_timeout <= 0.0:
             raise ValueError("navigation_localization_timeout must be positive")
+        if self.map_conversion_timeout <= 0.0:
+            raise ValueError("map_conversion_timeout must be positive")
         if not self.cmd_vel_topic:
             raise ValueError("cmd_vel_topic must not be empty")
         invalid_limits = any(
@@ -1715,35 +1727,111 @@ class WebControlNode(Node):
         """Discover selectable pairs without exposing arbitrary filesystem paths."""
         return discover_navigation_maps(self.maps_root)
 
-    def load_navigation_map(self, map_id: str) -> Tuple[bool, str]:
-        """Load static layers, then start localization/planning when available."""
-        record = next(
+    def _convert_navigation_map(self, record: Dict[str, Any]) -> Tuple[bool, str]:
+        """Export a saved RTAB-Map database using the project's trusted tool."""
+        map_id = record["id"]
+        database_path = record.get("database_path")
+        if not database_path:
+            return False, f"map {map_id} has no RTAB-Map .db file to convert"
+        if not self.map_export_executable.is_file():
+            return False, f"map export tool is missing: {self.map_export_executable}"
+        if self.mapping_status()["state"] == "running":
+            return False, "stop mapping and save the database before converting it"
+
+        output_directory = (
+            self.maps_root / "octo_maps" / f"{map_id}_octomap"
+        ).resolve()
+        output_directory.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        library_path = str(self.navigation.octomap_library_path)
+        environment["LD_LIBRARY_PATH"] = (
+            library_path + ":" + environment.get("LD_LIBRARY_PATH", "")
+        )
+        try:
+            result = subprocess.run(
+                [
+                    str(self.map_export_executable),
+                    str(Path(database_path)),
+                    str(output_directory),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=True,
+                timeout=self.map_conversion_timeout,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"map {map_id} conversion exceeded "
+                f"{self.map_conversion_timeout:.0f} seconds"
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = getattr(exc, "stdout", "") or str(exc)
+            return False, f"map {map_id} conversion failed: {detail.strip()[-800:]}"
+
+        converted = next(
             (item for item in self.navigation_maps() if item["id"] == map_id),
             None,
         )
-        if record is None:
-            return False, f"map {map_id} does not exist under {self.maps_root}"
-        if not record["loadable"]:
-            return False, f"map {map_id} needs both .db and .bt files"
-        self.navigation.stop()
-        self._clear_navigation_preview()
-        cloud_error = self._load_navigation_cloud(map_id, record.get("cloud_path"))
-        voxel_error = self._load_navigation_voxels(map_id, record["octomap_path"])
-        started, message = self.navigation.start(
-            map_id,
-            Path(record["database_path"]),
-            Path(record["octomap_path"]),
-        )
-        preview_errors = []
-        for label, error in (("colored cloud", cloud_error),
-                             ("OctoMap voxels", voxel_error)):
-            if error:
-                preview_errors.append(label + ": " + error)
-        if not started:
-            return True, "map layers loaded; navigation unavailable: " + message + (
+        if not converted or not converted["loadable"] or not converted["cloud_path"]:
+            output = (result.stdout or "").strip()
+            return False, (
+                f"map {map_id} export did not produce both colored PLY and .bt files"
+                + (f": {output[-800:]}" if output else "")
+            )
+        return True, f"map {map_id} converted for browser display"
+
+    def load_navigation_map(self, map_id: str) -> Tuple[bool, str]:
+        """Convert a database when necessary, then load its browser map layers."""
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            return False, "map_id must use the mapNNN format"
+        if not self._navigation_map_operation_lock.acquire(blocking=False):
+            return False, "another map is already being converted or loaded"
+        try:
+            record = next(
+                (item for item in self.navigation_maps() if item["id"] == map_id),
+                None,
+            )
+            if record is None:
+                return False, f"map {map_id} does not exist under {self.maps_root}"
+            if not record["database_path"]:
+                return False, f"map {map_id} has no RTAB-Map .db file to convert"
+
+            # A localization launch also owns RTAB-Map processes. Stop it before
+            # calling the offline export tool, which correctly refuses live maps.
+            self.navigation.stop()
+            if not record["loadable"] or not record["cloud_path"]:
+                converted, message = self._convert_navigation_map(record)
+                if not converted:
+                    return False, message
+                record = next(
+                    (item for item in self.navigation_maps() if item["id"] == map_id),
+                    None,
+                )
+                if record is None or not record["loadable"]:
+                    return False, f"map {map_id} is still missing its exported .bt file"
+
+            self._clear_navigation_preview()
+            cloud_error = self._load_navigation_cloud(map_id, record.get("cloud_path"))
+            voxel_error = self._load_navigation_voxels(map_id, record["octomap_path"])
+            started, message = self.navigation.start(
+                map_id,
+                Path(record["database_path"]),
+                Path(record["octomap_path"]),
+            )
+            preview_errors = []
+            for label, error in (("colored cloud", cloud_error),
+                                 ("OctoMap voxels", voxel_error)):
+                if error:
+                    preview_errors.append(label + ": " + error)
+            if not started:
+                return True, "map layers loaded; navigation unavailable: " + message + (
+                    "; " + "; ".join(preview_errors) if preview_errors else "")
+            return True, message + (
                 "; " + "; ".join(preview_errors) if preview_errors else "")
-        return True, message + (
-            "; " + "; ".join(preview_errors) if preview_errors else "")
+        finally:
+            self._navigation_map_operation_lock.release()
 
     def stop_navigation(self) -> Tuple[bool, str]:
         """Stop localization/planning while retaining the currently loaded map."""

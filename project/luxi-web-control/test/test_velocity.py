@@ -162,6 +162,7 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
                 (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").resolve()
             ),
             "cloud_path": str(cloud_path.resolve()),
+            "convertible": True,
             "loadable": True,
         },
         {
@@ -169,6 +170,7 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
             "database_path": str((tmp_path / "rtab_maps" / "map012.db").resolve()),
             "octomap_path": None,
             "cloud_path": None,
+            "convertible": True,
             "loadable": False,
         },
     ]
