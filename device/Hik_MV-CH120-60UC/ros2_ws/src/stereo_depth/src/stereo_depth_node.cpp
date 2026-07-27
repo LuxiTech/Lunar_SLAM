@@ -3,6 +3,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <rtabmap_msgs/msg/rgbd_image.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
@@ -44,6 +45,14 @@ public:
         uniqueness_ratio_ = declare_parameter<int>("uniqueness_ratio", 15);
         speckle_size_ = declare_parameter<int>("speckle_size", 100);
         speckle_range_ = declare_parameter<int>("speckle_range", 4);
+        disp12_max_diff_ = declare_parameter<int>("disp12_max_diff", 1);
+        median_blur_size_ = declare_parameter<int>("median_blur_size", 5);
+        texture_filter_min_gradient_ = declare_parameter<double>(
+            "texture_filter_min_gradient", 4.0);
+        depth_neighbor_filter_min_count_ = declare_parameter<int>(
+            "depth_neighbor_filter_min_count", 3);
+        depth_neighbor_filter_max_delta_m_ = declare_parameter<double>(
+            "depth_neighbor_filter_max_delta_m", 0.08);
         rectify_images_ = declare_parameter<bool>("rectify_images", true);
         processing_scale_ = std::clamp(
             declare_parameter<double>("processing_scale", 0.5), 0.25, 1.0);
@@ -51,9 +60,17 @@ public:
             1, static_cast<int>(declare_parameter<int>("point_cloud_step", 4)));
         min_depth_m_ = declare_parameter<double>("min_depth_m", 0.2);
         max_depth_m_ = declare_parameter<double>("max_depth_m", 10.0);
+        depth_edge_filter_max_delta_m_ = declare_parameter<double>(
+            "depth_edge_filter_max_delta_m", 0.15);
 
         max_disparity_ = std::max(16, ((max_disparity_ + 15) / 16) * 16);
         block_size_ = std::max(3, block_size_ | 1);
+        if (median_blur_size_ < 3) {
+            median_blur_size_ = 0;
+        } else {
+            median_blur_size_ = std::min(9, median_blur_size_ | 1);
+        }
+        depth_neighbor_filter_min_count_ = std::clamp(depth_neighbor_filter_min_count_, 0, 8);
         stereo_ = cv::StereoSGBM::create(0, max_disparity_, block_size_);
         stereo_->setP1(8 * block_size_ * block_size_);
         stereo_->setP2(32 * block_size_ * block_size_);
@@ -61,7 +78,7 @@ public:
         stereo_->setUniquenessRatio(uniqueness_ratio_);
         stereo_->setSpeckleWindowSize(speckle_size_);
         stereo_->setSpeckleRange(speckle_range_);
-        stereo_->setDisp12MaxDiff(1);
+        stereo_->setDisp12MaxDiff(disp12_max_diff_);
         stereo_->setMode(cv::StereoSGBM::MODE_SGBM_3WAY);
 
         // Keep a few samples because left and right are independent DDS topics.
@@ -93,6 +110,18 @@ public:
         point_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/stereo/points", 10);
         left_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/left/image_rect", 10);
         right_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/right/image_rect", 10);
+        left_rect_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/left/image_rect_color", 10);
+        right_rect_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/right/image_rect_color", 10);
+        // These CameraInfo messages describe the rectified/scaled images above.
+        // They are required by standard stereo consumers such as RTAB-Map.
+        left_rect_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
+            "/stereo/left/camera_info", 10);
+        right_rect_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
+            "/stereo/right/camera_info", 10);
+        rgbd_pub_ = create_publisher<rtabmap_msgs::msg::RGBDImage>(
+            "/stereo/rgbd_image", 10);
 
         processing_running_.store(true);
         processing_thread_ = std::thread(&StereoDepthNode::processingLoop, this);
@@ -102,10 +131,14 @@ public:
         if (use_stereo_pair_) {
             RCLCPP_INFO(get_logger(), "Using packed stereo pair topic: %s", stereo_pair_topic.c_str());
         }
-        RCLCPP_INFO(get_logger(), "Stereo parameters: baseline=%s max_disparity=%d block_size=%d pre_filter_size=%d pre_filter_cap=%d uniqueness_ratio=%d speckle_size=%d speckle_range=%d",
+        RCLCPP_INFO(get_logger(), "Stereo parameters: baseline=%s max_disparity=%d block_size=%d pre_filter_size=%d pre_filter_cap=%d uniqueness_ratio=%d speckle_size=%d speckle_range=%d disp12_max_diff=%d",
                     baseline_m_ > 0.0 ? std::to_string(baseline_m_).c_str() : "auto-from-calibration",
                     max_disparity_, block_size_, pre_filter_size_, pre_filter_cap_,
-                    uniqueness_ratio_, speckle_size_, speckle_range_);
+                    uniqueness_ratio_, speckle_size_, speckle_range_, disp12_max_diff_);
+        RCLCPP_INFO(get_logger(), "Depth filters: median_blur=%d texture_min_gradient=%.2f edge_delta=%.3f neighbor_count=%d neighbor_delta=%.3f",
+                    median_blur_size_, texture_filter_min_gradient_,
+                    depth_edge_filter_max_delta_m_, depth_neighbor_filter_min_count_,
+                    depth_neighbor_filter_max_delta_m_);
         RCLCPP_INFO(get_logger(), "Performance parameters: processing_scale=%.2f point_cloud_step=%d SGBM_mode=3WAY",
                     processing_scale_, point_cloud_step_);
     }
@@ -258,6 +291,7 @@ private:
         try {
             const auto process_started = std::chrono::steady_clock::now();
             cv::Mat left_gray_raw, right_gray_raw;
+            cv::Mat left_color_raw, right_color_raw;
             cv::Size source_size;
             cv_bridge::CvImageConstPtr packed_cv;
             cv_bridge::CvImageConstPtr left_cv;
@@ -274,6 +308,8 @@ private:
                 const int single_width = packed.cols / 2;
                 left_gray_raw = packed(cv::Rect(0, 0, single_width, packed.rows));
                 right_gray_raw = packed(cv::Rect(single_width, 0, single_width, packed.rows));
+                cv::cvtColor(left_gray_raw, left_color_raw, cv::COLOR_GRAY2BGR);
+                cv::cvtColor(right_gray_raw, right_color_raw, cv::COLOR_GRAY2BGR);
                 source_size = left_gray_raw.size();
             } else {
                 left_cv = cv_bridge::toCvShare(left_image, "bgr8");
@@ -285,6 +321,8 @@ private:
                 }
                 cv::cvtColor(left_raw, left_gray_raw, cv::COLOR_BGR2GRAY);
                 cv::cvtColor(right_raw, right_gray_raw, cv::COLOR_BGR2GRAY);
+                left_color_raw = left_raw;
+                right_color_raw = right_raw;
                 source_size = left_raw.size();
             }
 
@@ -294,21 +332,30 @@ private:
             const double scale_x = static_cast<double>(processing_size.width) / source_size.width;
             const double scale_y = static_cast<double>(processing_size.height) / source_size.height;
 
-            cv::Mat left_gray, right_gray;
+            cv::Mat left_gray, right_gray, left_color, right_color;
             if (rectify_images_) {
                 ensureRectificationMaps(*left_info, *right_info, processing_size, scale_x, scale_y);
                 cv::remap(left_gray_raw, left_gray, left_map_x_, left_map_y_, cv::INTER_LINEAR);
                 cv::remap(right_gray_raw, right_gray, right_map_x_, right_map_y_, cv::INTER_LINEAR);
+                cv::remap(left_color_raw, left_color, left_map_x_, left_map_y_, cv::INTER_LINEAR);
+                cv::remap(right_color_raw, right_color, right_map_x_, right_map_y_, cv::INTER_LINEAR);
             } else if (processing_size != source_size) {
                 cv::resize(left_gray_raw, left_gray, processing_size, 0.0, 0.0, cv::INTER_AREA);
                 cv::resize(right_gray_raw, right_gray, processing_size, 0.0, 0.0, cv::INTER_AREA);
+                cv::resize(left_color_raw, left_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
+                cv::resize(right_color_raw, right_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
             } else {
                 left_gray = left_gray_raw;
                 right_gray = right_gray_raw;
+                left_color = left_color_raw;
+                right_color = right_color_raw;
             }
 
             cv::Mat disparity;
             stereo_->compute(left_gray, right_gray, disparity);
+            if (median_blur_size_ >= 3) {
+                cv::medianBlur(disparity, disparity, median_blur_size_);
+            }
 
             cv::Mat disparity_8u;
             cv::normalize(disparity, disparity_8u, 0, 255, cv::NORM_MINMAX, CV_8U);
@@ -335,14 +382,39 @@ private:
                 (depth >= static_cast<float>(min_depth_m_)) &
                 (depth <= static_cast<float>(max_depth_m_));
             depth.setTo(0.0f, ~valid_mask);
+            filterLowTextureDepth(depth, left_gray);
+            filterDepthEdges(depth);
+            filterDepthNeighborhood(depth);
 
             const auto frame_id = left_header.frame_id.empty()
                 ? std::string("left_camera_optical_frame") : left_header.frame_id;
 
-            auto left_rect_msg = cv_bridge::CvImage(left_header, "mono8", left_gray).toImageMsg();
-            auto right_rect_msg = cv_bridge::CvImage(right_header, "mono8", right_gray).toImageMsg();
+            // The packed stereo input carries only the left header. Restore the
+            // real right optical frame from CameraInfo before publishing, so TF
+            // based consumers can distinguish the two optical frames.
+            auto left_rect_header = left_header;
+            auto right_rect_header = right_header;
+            if (!left_info->header.frame_id.empty()) {
+                left_rect_header.frame_id = left_info->header.frame_id;
+            }
+            if (!right_info->header.frame_id.empty()) {
+                right_rect_header.frame_id = right_info->header.frame_id;
+            }
+            auto left_rect_msg = cv_bridge::CvImage(left_rect_header, "mono8", left_gray).toImageMsg();
+            auto right_rect_msg = cv_bridge::CvImage(right_rect_header, "mono8", right_gray).toImageMsg();
+            auto left_color_rect_msg = cv_bridge::CvImage(left_rect_header, "bgr8", left_color).toImageMsg();
+            auto right_color_rect_msg = cv_bridge::CvImage(right_rect_header, "bgr8", right_color).toImageMsg();
             left_rect_pub_->publish(*left_rect_msg);
             right_rect_pub_->publish(*right_rect_msg);
+            left_rect_color_pub_->publish(*left_color_rect_msg);
+            right_rect_color_pub_->publish(*right_color_rect_msg);
+
+            const auto left_rect_info = makeRectifiedCameraInfo(
+                *left_info, left_rect_header, processing_size, scale_x, scale_y);
+            const auto right_rect_info = makeRectifiedCameraInfo(
+                *right_info, right_rect_header, processing_size, scale_x, scale_y);
+            left_rect_info_pub_->publish(left_rect_info);
+            right_rect_info_pub_->publish(right_rect_info);
 
             auto disparity_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "mono8", disparity_8u).toImageMsg();
             disparity_msg->header.stamp = left_header.stamp;
@@ -354,7 +426,17 @@ private:
             depth_msg->header.frame_id = frame_id;
             depth_pub_->publish(*depth_msg);
 
-            publishPointCloud(depth, left_gray, fx, fy, cx, cy, left_header.stamp, frame_id);
+            // A single RGBDImage is atomically timestamped: it avoids a
+            // second message_filters synchronization stage in RTAB-Map.
+            rtabmap_msgs::msg::RGBDImage rgbd_msg;
+            rgbd_msg.header = left_rect_header;
+            rgbd_msg.rgb_camera_info = left_rect_info;
+            rgbd_msg.depth_camera_info = left_rect_info;
+            rgbd_msg.rgb = *left_color_rect_msg;
+            rgbd_msg.depth = *depth_msg;
+            rgbd_pub_->publish(rgbd_msg);
+
+            publishPointCloud(depth, left_color, fx, fy, cx, cy, left_header.stamp, frame_id);
 
             const int valid_pixels = static_cast<int>(cv::countNonZero(depth > 0));
             const double process_ms = std::chrono::duration<double, std::milli>(
@@ -398,6 +480,44 @@ private:
             p[8], p[9], p[10]);
     }
 
+    static sensor_msgs::msg::CameraInfo makeRectifiedCameraInfo(
+        const sensor_msgs::msg::CameraInfo &source,
+        const std_msgs::msg::Header &header,
+        const cv::Size &image_size,
+        double scale_x,
+        double scale_y)
+    {
+        sensor_msgs::msg::CameraInfo info = source;
+        info.header = header;
+        info.width = static_cast<uint32_t>(image_size.width);
+        info.height = static_cast<uint32_t>(image_size.height);
+
+        // A rectified image has no remaining lens distortion and identity R.
+        std::fill(info.d.begin(), info.d.end(), 0.0);
+        info.r = {1.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0,
+                  0.0, 0.0, 1.0};
+
+        // P describes the rectified full-resolution image. Scale it to match
+        // processing_scale, including P[3] for the right camera baseline.
+        info.p[0] *= scale_x;
+        info.p[1] *= scale_x;
+        info.p[2] *= scale_x;
+        info.p[3] *= scale_x;
+        info.p[4] *= scale_y;
+        info.p[5] *= scale_y;
+        info.p[6] *= scale_y;
+        info.p[7] *= scale_y;
+
+        info.k = {info.p[0], info.p[1], info.p[2],
+                  info.p[4], info.p[5], info.p[6],
+                  info.p[8], info.p[9], info.p[10]};
+        info.binning_x = 0;
+        info.binning_y = 0;
+        info.roi = sensor_msgs::msg::RegionOfInterest();
+        return info;
+    }
+
     void ensureRectificationMaps(
         const sensor_msgs::msg::CameraInfo &left_info,
         const sensor_msgs::msg::CameraInfo &right_info,
@@ -431,7 +551,7 @@ private:
     }
 
     void publishPointCloud(
-        const cv::Mat &depth, const cv::Mat &intensity_image,
+        const cv::Mat &depth, const cv::Mat &color_image,
         double fx, double fy, double cx, double cy,
         const builtin_interfaces::msg::Time &stamp, const std::string &frame_id)
     {
@@ -451,35 +571,125 @@ private:
         cloud.width = static_cast<uint32_t>(point_count);
         cloud.is_dense = true;
         sensor_msgs::PointCloud2Modifier modifier(cloud);
-        modifier.setPointCloud2Fields(
-            4,
-            "x", 1, sensor_msgs::msg::PointField::FLOAT32,
-            "y", 1, sensor_msgs::msg::PointField::FLOAT32,
-            "z", 1, sensor_msgs::msg::PointField::FLOAT32,
-            "intensity", 1, sensor_msgs::msg::PointField::FLOAT32);
+        modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
         modifier.resize(point_count);
 
         sensor_msgs::PointCloud2Iterator<float> out_x(cloud, "x");
         sensor_msgs::PointCloud2Iterator<float> out_y(cloud, "y");
         sensor_msgs::PointCloud2Iterator<float> out_z(cloud, "z");
-        sensor_msgs::PointCloud2Iterator<float> out_intensity(cloud, "intensity");
+        sensor_msgs::PointCloud2Iterator<uint8_t> out_r(cloud, "r");
+        sensor_msgs::PointCloud2Iterator<uint8_t> out_g(cloud, "g");
+        sensor_msgs::PointCloud2Iterator<uint8_t> out_b(cloud, "b");
         for (int y = 0; y < depth.rows; y += point_cloud_step_) {
             for (int x = 0; x < depth.cols; x += point_cloud_step_) {
                 const float z = depth.at<float>(y, x);
                 if (z <= 0.0f) {
                     continue;
                 }
+                const cv::Vec3b bgr = color_image.at<cv::Vec3b>(y, x);
                 *out_x = static_cast<float>((x - cx) * z / fx);
                 *out_y = static_cast<float>((y - cy) * z / fy);
                 *out_z = z;
-                *out_intensity = static_cast<float>(intensity_image.at<uint8_t>(y, x));
+                *out_r = bgr[2];
+                *out_g = bgr[1];
+                *out_b = bgr[0];
                 ++out_x;
                 ++out_y;
                 ++out_z;
-                ++out_intensity;
+                ++out_r;
+                ++out_g;
+                ++out_b;
             }
         }
         point_cloud_pub_->publish(cloud);
+    }
+
+    void filterDepthEdges(cv::Mat &depth) const
+    {
+        if (depth_edge_filter_max_delta_m_ <= 0.0 || depth.rows < 3 || depth.cols < 3) {
+            return;
+        }
+
+        cv::Mat filtered = depth.clone();
+        const float max_delta = static_cast<float>(depth_edge_filter_max_delta_m_);
+        for (int y = 1; y < depth.rows - 1; ++y) {
+            for (int x = 1; x < depth.cols - 1; ++x) {
+                const float center = depth.at<float>(y, x);
+                if (center <= 0.0f) {
+                    continue;
+                }
+
+                int large_jumps = 0;
+                const float neighbors[4] = {
+                    depth.at<float>(y - 1, x),
+                    depth.at<float>(y + 1, x),
+                    depth.at<float>(y, x - 1),
+                    depth.at<float>(y, x + 1)};
+                for (const float neighbor : neighbors) {
+                    if (neighbor > 0.0f && std::abs(center - neighbor) > max_delta) {
+                        ++large_jumps;
+                    }
+                }
+
+                if (large_jumps >= 2) {
+                    filtered.at<float>(y, x) = 0.0f;
+                }
+            }
+        }
+        depth = filtered;
+    }
+
+    void filterLowTextureDepth(cv::Mat &depth, const cv::Mat &left_gray) const
+    {
+        if (texture_filter_min_gradient_ <= 0.0 || depth.empty() || left_gray.empty()) {
+            return;
+        }
+
+        cv::Mat grad_x, grad_y, abs_grad_x, abs_grad_y, gradient;
+        cv::Sobel(left_gray, grad_x, CV_16S, 1, 0, 3);
+        cv::Sobel(left_gray, grad_y, CV_16S, 0, 1, 3);
+        cv::convertScaleAbs(grad_x, abs_grad_x);
+        cv::convertScaleAbs(grad_y, abs_grad_y);
+        cv::addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0.0, gradient);
+        depth.setTo(0.0f, gradient < texture_filter_min_gradient_);
+    }
+
+    void filterDepthNeighborhood(cv::Mat &depth) const
+    {
+        if (depth_neighbor_filter_min_count_ <= 0 ||
+            depth_neighbor_filter_max_delta_m_ <= 0.0 ||
+            depth.rows < 3 || depth.cols < 3) {
+            return;
+        }
+
+        cv::Mat filtered = depth.clone();
+        const float max_delta = static_cast<float>(depth_neighbor_filter_max_delta_m_);
+        for (int y = 1; y < depth.rows - 1; ++y) {
+            for (int x = 1; x < depth.cols - 1; ++x) {
+                const float center = depth.at<float>(y, x);
+                if (center <= 0.0f) {
+                    continue;
+                }
+
+                int supported_neighbors = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) {
+                            continue;
+                        }
+                        const float neighbor = depth.at<float>(y + dy, x + dx);
+                        if (neighbor > 0.0f && std::abs(center - neighbor) <= max_delta) {
+                            ++supported_neighbors;
+                        }
+                    }
+                }
+
+                if (supported_neighbors < depth_neighbor_filter_min_count_) {
+                    filtered.at<float>(y, x) = 0.0f;
+                }
+            }
+        }
+        depth = filtered;
     }
 
 private:
@@ -493,6 +703,11 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_rect_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_rect_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_rect_color_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_rect_color_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr left_rect_info_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr right_rect_info_pub_;
+    rclcpp::Publisher<rtabmap_msgs::msg::RGBDImage>::SharedPtr rgbd_pub_;
     std::atomic_bool processing_running_{false};
     std::thread processing_thread_;
     std::condition_variable work_condition_;
@@ -513,12 +728,18 @@ private:
     int uniqueness_ratio_{15};
     int speckle_size_{100};
     int speckle_range_{4};
+    int disp12_max_diff_{1};
+    int median_blur_size_{5};
+    double texture_filter_min_gradient_{4.0};
+    int depth_neighbor_filter_min_count_{3};
+    double depth_neighbor_filter_max_delta_m_{0.08};
     bool rectify_images_{true};
     bool use_stereo_pair_{false};
     double processing_scale_{0.5};
     int point_cloud_step_{4};
     double min_depth_m_{0.2};
     double max_depth_m_{10.0};
+    double depth_edge_filter_max_delta_m_{0.15};
     bool received_any_message_{false};
     rclcpp::Time last_left_image_stamp_{};
     rclcpp::Time last_right_image_stamp_{};

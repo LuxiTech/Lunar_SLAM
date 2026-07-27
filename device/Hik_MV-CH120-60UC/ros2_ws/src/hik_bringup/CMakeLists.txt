@@ -7,4 +7,10 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
 
+install(PROGRAMS
+  scripts/odom_tf_republisher.py
+  scripts/rtabmap_status.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

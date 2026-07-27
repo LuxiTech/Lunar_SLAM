@@ -13,6 +13,9 @@
 #include "hikrobot_camera_driver/CameraConfig.hpp"
 
 #include <ament_index_cpp/get_package_share_path.hpp>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
 
 class StereoCameraNode : public rclcpp::Node
 {
@@ -164,13 +167,19 @@ private:
 
         uint64_t right_ts;
 
+        int64_t left_host_ts;
+
+        int64_t right_host_ts;
+
 
 
         if(!camera_.grab(
             left,
             right,
             left_ts,
-            right_ts))
+            right_ts,
+            left_host_ts,
+            right_host_ts))
         {
 
             RCLCPP_WARN(
@@ -181,6 +190,13 @@ private:
             return;
         }
 
+        // Prefer the SDK host timestamp captured with the frame instead of
+        // stamping after Bayer conversion.  Keep one common stamp for the two
+        // externally-triggered images so downstream stereo nodes can still pair
+        // them exactly.
+        const auto stamp = makeCommonFrameStamp(left_host_ts, right_host_ts);
+
+        logTimestampDiagnostics(stamp, left_host_ts, right_host_ts, left_ts, right_ts);
 
 
         auto left_msg =
@@ -200,10 +216,6 @@ private:
             right
         )
         .toImageMsg();
-
-
-
-        const auto stamp = now();
 
         left_msg->header.stamp = stamp;
         left_msg->header.frame_id = "left_camera_optical_frame";
@@ -286,6 +298,81 @@ private:
             info.height,
             image_width,
             image_height);
+    }
+
+    rclcpp::Time makeCommonFrameStamp(int64_t left_host_ts, int64_t right_host_ts) const
+    {
+        const int64_t left_host_ns = normalizeSdkHostTimestampToNs(left_host_ts);
+        const int64_t right_host_ns = normalizeSdkHostTimestampToNs(right_host_ts);
+
+        if (isValidUnixTimestampNs(left_host_ns) && isValidUnixTimestampNs(right_host_ns)) {
+            return rclcpp::Time((left_host_ns + right_host_ns) / 2, get_clock()->get_clock_type());
+        }
+        if (isValidUnixTimestampNs(left_host_ns)) {
+            return rclcpp::Time(left_host_ns, get_clock()->get_clock_type());
+        }
+        if (isValidUnixTimestampNs(right_host_ns)) {
+            return rclcpp::Time(right_host_ns, get_clock()->get_clock_type());
+        }
+        return now();
+    }
+
+    static int64_t normalizeSdkHostTimestampToNs(int64_t host_ts)
+    {
+        if (host_ts <= 0) {
+            return 0;
+        }
+
+        // Different MVS/transport versions expose nHostTimeStamp in ns, us, or
+        // ms.  Normalize by magnitude so ROS stamps stay in Unix nanoseconds.
+        if (host_ts >= 1000000000000000000LL) {  // ns, e.g. 1784797053309000000
+            return host_ts;
+        }
+        if (host_ts >= 1000000000000000LL) {     // us, e.g. 1784797053309000
+            return host_ts * 1000LL;
+        }
+        if (host_ts >= 1000000000000LL) {        // ms, e.g. 1784797053309
+            return host_ts * 1000000LL;
+        }
+        return 0;
+    }
+
+    static bool isValidUnixTimestampNs(int64_t host_ts_ns)
+    {
+        // Accept a broad sane range and fall back to ROS now if unavailable.
+        constexpr int64_t min_reasonable_ns = 1000000000000000000LL;  // 2001-09-09
+        constexpr int64_t max_reasonable_ns = 4102444800000000000LL;  // 2100-01-01
+        return host_ts_ns >= min_reasonable_ns && host_ts_ns <= max_reasonable_ns;
+    }
+
+    void logTimestampDiagnostics(
+        const rclcpp::Time& stamp,
+        int64_t left_host_ts,
+        int64_t right_host_ts,
+        uint64_t left_dev_ts,
+        uint64_t right_dev_ts)
+    {
+        const auto ros_now = now();
+        const double stamp_latency_ms = (ros_now - stamp).seconds() * 1000.0;
+        const int64_t left_host_ns = normalizeSdkHostTimestampToNs(left_host_ts);
+        const int64_t right_host_ns = normalizeSdkHostTimestampToNs(right_host_ts);
+        const double host_delta_ms =
+            (isValidUnixTimestampNs(left_host_ns) && isValidUnixTimestampNs(right_host_ns))
+            ? std::abs(static_cast<double>(left_host_ns - right_host_ns)) / 1.0e6
+            : -1.0;
+
+        RCLCPP_INFO_THROTTLE(
+            get_logger(),
+            *get_clock(),
+            5000,
+            "camera timestamp: source=%s latency=%.2f ms left_host=%ld right_host=%ld host_delta=%.3f ms left_dev=%lu right_dev=%lu",
+            (host_delta_ms >= 0.0) ? "sdk_host_common" : "ros_now_fallback",
+            stamp_latency_ms,
+            static_cast<long>(left_host_ts),
+            static_cast<long>(right_host_ts),
+            host_delta_ms,
+            static_cast<unsigned long>(left_dev_ts),
+            static_cast<unsigned long>(right_dev_ts));
     }
 
 

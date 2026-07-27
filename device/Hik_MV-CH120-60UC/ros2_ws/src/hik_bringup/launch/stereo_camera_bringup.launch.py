@@ -2,7 +2,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetEnvironmentVariable,
+    UnsetEnvironmentVariable,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -23,6 +28,10 @@ def generate_launch_description():
     imu_params = LaunchConfiguration('imu_params')
 
     return LaunchDescription([
+        SetEnvironmentVariable('QT_QPA_PLATFORM', 'xcb'),
+        SetEnvironmentVariable('QT_X11_NO_MITSHM', '1'),
+        SetEnvironmentVariable('DISPLAY', os.environ.get('DISPLAY', ':0')),
+        UnsetEnvironmentVariable('WAYLAND_DISPLAY'),
         DeclareLaunchArgument(
             'camera_params',
             default_value=default_camera_params,

@@ -5,6 +5,9 @@ yesense_pub:
     baud_rate: 921600
     frame_id: imu_link
     driver_type: ros_serial
+    # H30 protocol data ID 0x51. Unit: microseconds; it resets to zero at
+    # each external SYNC pulse and is used to remove UART receive jitter.
+    use_sample_timestamp: true
     # Standard message for ROS 2 tools and later camera-IMU fusion.
     imu_topic_ros: /imu/data
     # WheelTec/Yesense extended message: temperature and sample fields.

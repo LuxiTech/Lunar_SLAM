@@ -24,6 +24,7 @@ struct StereoCameraConfig
     float gain{0.0F};
     std::string pixel_format{"BayerGB8"};
     bool swap_red_blue{true};
+    bool override_white_balance{false};
     bool auto_white_balance{true};
 };
 

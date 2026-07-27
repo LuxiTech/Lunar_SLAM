@@ -9,17 +9,17 @@
   serial="DB0431802" 
   />
 
-  <!-- trigger_source="Default" keeps the source saved in MVS. -->
+  <!-- Use the trigger selector, Line0 polarity, and source saved in MVS UserSet1. -->
   <acquisition 
   user_set="UserSet1" 
-  external_trigger="false" 
+  external_trigger="true" 
   trigger_source="Default" 
   frame_rate_hz="0.0" />
 
-  <!-- time_us is only applied when auto="false"; 10000 us = 10 ms. -->
+  <!-- Fixed exposure for consistent stereo brightness: 25000 us = 25 ms. -->
   <exposure 
   auto="false" 
-  time_us="30000"
+  time_us="25000"
   />
 
   <gain 
@@ -37,7 +37,8 @@
   decimation_horizontal="1" 
   decimation_vertical="1"
   swap_red_blue="true" 
-  auto_white_balance="true" 
+  override_white_balance="false"
+  auto_white_balance="false" 
   />
 
 </stereo_camera>

@@ -1,8 +1,10 @@
 #include "hikrobot_camera_driver/HikCamera.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
+#include <thread>
 #include <vector>
 
 namespace
@@ -209,6 +211,55 @@ void HikCamera::printCurrentSettings() const
               << std::endl;
 }
 
+void HikCamera::printLine0Diagnostics() const
+{
+    if (!opened_) {
+        return;
+    }
+
+    // Selecting a line only selects which line is inspected; it does not
+    // modify TriggerSource, LineMode, polarity, or any persisted UserSet.
+    const int selector_ret = MV_CC_SetEnumValueByString(handle_, "LineSelector", "Line0");
+    if (selector_ret != MV_OK) {
+        printSdkError("Set LineSelector Line0 (diagnostic)", selector_ret);
+        return;
+    }
+
+    bool inverted = false;
+    const int inverter_ret = MV_CC_GetBoolValue(handle_, "LineInverter", &inverted);
+    bool previous = false;
+    int status_ret = MV_CC_GetBoolValue(handle_, "LineStatus", &previous);
+    if (status_ret != MV_OK) {
+        printSdkError("Get LineStatus (diagnostic)", status_ret);
+        return;
+    }
+
+    int transitions = 0;
+    int high_samples = previous ? 1 : 0;
+    // At 10 Hz this 1.2 s / 2 ms sample window should observe many edges,
+    // while remaining passive with respect to camera acquisition.
+    constexpr int kSamples = 600;
+    for (int i = 1; i < kSamples; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        bool current = false;
+        status_ret = MV_CC_GetBoolValue(handle_, "LineStatus", &current);
+        if (status_ret != MV_OK) {
+            printSdkError("Get LineStatus (diagnostic)", status_ret);
+            return;
+        }
+        high_samples += current ? 1 : 0;
+        transitions += (current != previous) ? 1 : 0;
+        previous = current;
+    }
+
+    std::cout << "Line0 diagnostic [" << serial_ << "]: mode="
+              << getEnumSymbol(handle_, "LineMode")
+              << ", inverted=" << (inverter_ret == MV_OK ? (inverted ? "true" : "false") : "unsupported")
+              << ", transitions=" << transitions
+              << " in 1.2 s, high_samples=" << high_samples << "/" << kSamples
+              << std::endl;
+}
+
 
 bool HikCamera::start()
 {
@@ -381,7 +432,8 @@ bool HikCamera::setImageSampling(
 
 bool HikCamera::grab(
     cv::Mat& image,
-    uint64_t& timestamp
+    uint64_t& device_timestamp,
+    int64_t& host_timestamp
 )
 {
 
@@ -418,6 +470,7 @@ bool HikCamera::grab(
     const uint64_t captured_timestamp =
         (static_cast<uint64_t>(frame.stFrameInfo.nDevTimeStampHigh) << 32) |
         frame.stFrameInfo.nDevTimeStampLow;
+    const int64_t captured_host_timestamp = frame.stFrameInfo.nHostTimeStamp;
 
     // Do not keep an SDK buffer occupied while OpenCV performs Bayer conversion.
     // This matters for two cameras receiving the same hardware trigger.
@@ -430,7 +483,8 @@ bool HikCamera::grab(
         return false;
     }
 
-    timestamp = captured_timestamp;
+    device_timestamp = captured_timestamp;
+    host_timestamp = captured_host_timestamp;
     bool converted = false;
 
     if (pixel_type == PixelType_Gvsp_BGR8_Packed) {

@@ -30,7 +30,9 @@ public:
         cv::Mat& left,
         cv::Mat& right,
         uint64_t& left_ts,
-        uint64_t& right_ts
+        uint64_t& right_ts,
+        int64_t& left_host_ts,
+        int64_t& right_host_ts
     );
 
 

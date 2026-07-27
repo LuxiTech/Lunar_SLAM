@@ -80,6 +80,7 @@ bool loadStereoCameraConfig(const std::string& path, StereoCameraConfig& config,
     readAttribute(image, "decimation_horizontal", config.decimation_horizontal);
     readAttribute(image, "decimation_vertical", config.decimation_vertical);
     readAttribute(image, "swap_red_blue", config.swap_red_blue);
+    readAttribute(image, "override_white_balance", config.override_white_balance);
     readAttribute(image, "auto_white_balance", config.auto_white_balance);
     return true;
 }

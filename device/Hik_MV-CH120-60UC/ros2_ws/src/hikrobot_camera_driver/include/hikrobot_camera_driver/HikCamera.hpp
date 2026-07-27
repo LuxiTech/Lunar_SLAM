@@ -31,6 +31,10 @@ public:
 
     void printCurrentSettings() const;
 
+    // Read the physical Line0 input for a short interval.  This is intended
+    // for diagnosing hardware-trigger setups without changing trigger nodes.
+    void printLine0Diagnostics() const;
+
     bool setAcquisitionModeContinuous();
 
     bool setAcquisitionFrameRate(float frame_rate_hz);
@@ -71,7 +75,8 @@ public:
 
     bool grab(
         cv::Mat& image,
-        uint64_t& timestamp
+        uint64_t& device_timestamp,
+        int64_t& host_timestamp
     );
 
     // =====================
