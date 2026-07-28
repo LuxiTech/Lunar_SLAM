@@ -22,6 +22,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_ros REQUIRED)
 find_package(ament_cmake_auto REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core highgui)
 
 set(ROS2_DEPENDENCIES
   "rclcpp"
@@ -58,6 +59,8 @@ ament_auto_add_library(renderer
   src/time_slice_display.cpp
   src/sharp_display.cpp
   src/ros_compat.cpp)
+target_include_directories(renderer PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(renderer ${OpenCV_LIBS})
 
 rclcpp_components_register_nodes(renderer "event_camera_renderer::Renderer")
 

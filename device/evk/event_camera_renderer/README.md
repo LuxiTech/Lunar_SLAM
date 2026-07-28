@@ -1,6 +1,6 @@
 # event_camera_renderer
 
-`event_camera_renderer` 用于将 `event_camera_msgs` 中的事件流渲染成 ROS 图像消息，便于使用 `rqt_image_view` 或其他图像工具查看事件相机输出。
+`event_camera_renderer` 用于将 `event_camera_msgs` 中的事件流渲染成 ROS 图像消息，也支持不经过 ROS 大图像传输的进程内低延迟预览窗口。
 
 ![event_image](images/event_renderer.png)
 
@@ -15,6 +15,18 @@
 ## 使用方式
 
 假设事件相机驱动节点名为 `event_camera`：
+
+```bash
+ros2 launch event_camera_renderer renderer.launch.py \
+  camera:=event_camera \
+  fps:=60.0 \
+  show_window:=true \
+  preview_fps:=60.0
+```
+
+低延迟窗口直接使用渲染器生成的最新图像，不需要启动 `rqt_image_view`。终端每 5 秒输出一次实际窗口刷新率、刷新间隔、最大间隔和重复帧比例。
+
+需要检查 ROS 图像话题时，可以使用传统方式：
 
 ```bash
 ros2 launch event_camera_renderer renderer.launch.py camera:=event_camera
@@ -35,6 +47,9 @@ ros2 run rqt_image_view rqt_image_view
 
 - `fps`：输出图像频率，单位 Hz，默认 25。
 - `max_wait_frames`：等待事件到来的最大帧数，超过后发布空帧，默认 5。
+- `event_qos_depth`：事件订阅队列深度，默认 10；队列较短可避免预览旧事件。
+- `show_window`：是否启用进程内低延迟窗口，默认关闭。
+- `preview_fps`：进程内窗口刷新率，默认 30 Hz。
 - `display_type`：渲染方式，可选 `time_slice` 或 `sharp`。
   - `time_slice`：聚合相邻帧之间的所有事件。
   - `sharp`：自动控制事件数量，以获得更锐利的特征。

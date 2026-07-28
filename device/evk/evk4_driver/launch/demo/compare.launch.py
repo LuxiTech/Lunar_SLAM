@@ -47,6 +47,7 @@ def generate_launch_description():
                 {
                     "fps": ParameterValue(fps, value_type=float),
                     "display_type": "time_slice",
+                    "event_qos_depth": 4,
                 }
             ],
             remappings=[
@@ -64,6 +65,7 @@ def generate_launch_description():
                 {
                     "fps": ParameterValue(fps, value_type=float),
                     "display_type": "sharp",
+                    "event_qos_depth": 4,
                 }
             ],
             remappings=[

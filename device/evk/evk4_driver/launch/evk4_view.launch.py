@@ -23,6 +23,8 @@ def generate_launch_description():
     trail_filter_threshold = LaunchConfiguration("trail_filter_threshold")
     fps = LaunchConfiguration("fps")
     display_type = LaunchConfiguration("type")
+    show_window = LaunchConfiguration("show_window")
+    preview_fps = LaunchConfiguration("preview_fps")
 
     return LaunchDescription(
         [
@@ -91,6 +93,16 @@ def generate_launch_description():
                 default_value="time_slice",
                 description="事件渲染类型：time_slice 或 sharp。",
             ),
+            DeclareLaunchArgument(
+                "show_window",
+                default_value="false",
+                description="是否启用渲染器进程内低延迟窗口。",
+            ),
+            DeclareLaunchArgument(
+                "preview_fps",
+                default_value="30.0",
+                description="进程内预览窗口刷新率。",
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     [
@@ -118,6 +130,8 @@ def generate_launch_description():
                     "trail_filter_threshold": trail_filter_threshold,
                     "fps": fps,
                     "type": display_type,
+                    "show_window": show_window,
+                    "preview_fps": preview_fps,
                 }.items(),
             ),
         ]

@@ -15,6 +15,7 @@
 
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
+#include <thread>
 
 #include "event_camera_renderer/renderer.h"
 
@@ -22,8 +23,16 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<event_camera_renderer::Renderer>(rclcpp::NodeOptions());
-  // actually run the node
-  rclcpp::spin(node);  // should not return
-  rclcpp::shutdown();
+  if (node->previewRunsOnMainThread()) {
+    std::thread spinner([node]() { rclcpp::spin(node); });
+    node->runPreview();
+    if (rclcpp::ok()) {
+      rclcpp::shutdown();
+    }
+    spinner.join();
+  } else {
+    rclcpp::spin(node);
+    rclcpp::shutdown();
+  }
   return 0;
 }

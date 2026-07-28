@@ -18,14 +18,18 @@
 
 #include <event_camera_renderer/display.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <event_camera_msgs/msg/event_packet.hpp>
 #include <image_transport/image_transport.hpp>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <string>
+#include <thread>
 
 namespace event_camera_renderer
 {
@@ -35,6 +39,8 @@ public:
   using EventPacket = event_camera_msgs::msg::EventPacket;
   explicit Renderer(const rclcpp::NodeOptions & options);
   ~Renderer();
+  bool previewRunsOnMainThread() const { return previewRunsOnMainThread_; }
+  void runPreview();
 
 private:
   struct FrameTime
@@ -67,6 +73,9 @@ private:
   void publishFrame(const FrameTime & ft);
   void resetTime();
   void resetRendererState();
+  bool hasOutputInterest();
+  void queuePreviewImage(sensor_msgs::msg::Image::UniquePtr image);
+  void clearPreviewImage();
   // ------------------------  variables ------------------------------
   std::shared_ptr<Display> display_;
   rclcpp::TimerBase::SharedPtr frameTimer_;
@@ -80,9 +89,21 @@ private:
   std::deque<FrameTime> frames_;
   std::queue<EventPacket::ConstSharedPtr> events_;
   PeriodEstimator framePeriod_;
+  int eventQosDepth_{10};
   int eventQueueMemoryLimit_{0};
   size_t eventQueueMemory_{0};
   rclcpp::Duration maxDelay_{0, 0};  // maximum delay for events
+  bool showWindow_{false};
+  bool previewRunsOnMainThread_{false};
+  double previewFps_{30.0};
+  std::string previewWindowName_{"EVK4 Low-Latency Event View"};
+  std::atomic<bool> stopPreview_{false};
+  std::atomic<bool> previewActive_{false};
+  std::thread previewThread_;
+  std::mutex previewMutex_;
+  std::condition_variable previewCv_;
+  sensor_msgs::msg::Image::UniquePtr previewImage_;
+  uint64_t previewImageSequence_{0};
 };
 std::ostream & operator<<(std::ostream & os, const Renderer::FrameTime & ft);
 }  // namespace event_camera_renderer

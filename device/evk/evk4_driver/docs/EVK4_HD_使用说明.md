@@ -219,13 +219,40 @@ out        发送给 ROS 订阅者的消息数量
 
 ## 10. 可视化事件图像 demo
 
-启动相机和事件渲染器：
+推荐使用进程内低延迟预览。下面一个命令会同时启动相机、事件渲染器和图像窗口：
+
+```bash
+cd "/home/changxin/Ultimate SLAM"
+source setup_evk4_driver.bash
+ros2 launch evk4_driver evk4_image_view.launch.py serial:=00052316
+```
+
+该预览默认使用：
+
+- `60 Hz` 渲染和窗口刷新率。
+- `time_slice` 渲染模式。
+- `1,000,000 events/s` 的硬件 ERC 事件率上限。
+- 较短的 DDS 事件队列，并主动丢弃过期事件，避免显示窗口持续追赶旧画面。
+- 渲染结果直接交给同一进程中的窗口，只保留最新帧，不经过 ROS 大图像跨进程传输。
+
+运行时每 5 秒会输出一次窗口刷新诊断：
+
+```text
+preview: 60.00 Hz, new images 60.00 Hz, interval std 0.04 ms,
+max 16.80 ms, repeated 0.0% (0/300)
+```
+
+正常情况下刷新率和新图像率都应接近 60 Hz，`repeated` 接近 0%，最大间隔接近 16.7 ms。请在相机前移动手或物体，事件图像才会出现明显纹理；静止场景下事件相机输出接近黑色属于正常现象。
+
+不要同时运行 `ros2 topic hz /event_camera/image_raw` 或 `rqt_image_view` 来判断该窗口是否平滑。它们会订阅 1280×720 的 `bgr8` 原始图像，重新触发大量 DDS 图像复制和传输。需要检查算法图像订阅接口时可以短时间使用，但完成检查后应关闭。
+
+需要使用 `rqt_image_view` 检查其他图像话题时，可以分别启动渲染器和 rqt：
 
 ```bash
 ros2 launch evk4_driver evk4_view.launch.py serial:=00052316
 ```
 
-另开一个终端查看图像：
+另开一个终端：
 
 ```bash
 cd "/home/changxin/Ultimate SLAM"
@@ -233,19 +260,7 @@ source setup_evk4_driver.bash
 ros2 run rqt_image_view rqt_image_view
 ```
 
-在 `rqt_image_view` 中选择：
-
-```text
-/event_camera/image_raw
-```
-
-可用以下命令确认图像链路已工作：
-
-```bash
-ros2 topic hz /event_camera/image_raw
-```
-
-默认 `fps:=25.0` 时，输出频率应接近 25 Hz。请在相机前移动手或物体，事件图像才会出现明显纹理；静止场景下事件相机输出接近黑色属于正常现象。
+在 `rqt_image_view` 中选择 `/event_camera/image_raw`。事件率较高时，ROS 图像序列化、DDS 传输和 Qt 插件会造成明显抖动，连续预览应使用上面的 `evk4_image_view.launch.py`。
 
 也可以单独启动渲染器：
 

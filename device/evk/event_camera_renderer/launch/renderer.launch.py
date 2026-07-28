@@ -36,6 +36,10 @@ def launch_setup(context, *args, **kwargs):
                 'fps': LaunchConfig('fps'),
                 'display_type': LaunchConfig('type'),
                 'use_sim_time': LaunchConfig('use_sim_time'),
+                'event_qos_depth': LaunchConfig('event_qos_depth'),
+                'show_window': LaunchConfig('show_window'),
+                'preview_fps': LaunchConfig('preview_fps'),
+                'preview_in_main_thread': LaunchConfig('show_window'),
             }
         ],
         # Put input events and rendered images directly in the camera namespace.
@@ -52,6 +56,21 @@ def generate_launch_description():
             LaunchArg('camera', default_value=['event_camera'], description='camera name'),
             LaunchArg('fps', default_value='25.0', description='frame rate'),
             LaunchArg('use_sim_time', default_value='False', description='use_sim_time'),
+            LaunchArg(
+                'event_qos_depth',
+                default_value='10',
+                description='event subscription queue depth',
+            ),
+            LaunchArg(
+                'show_window',
+                default_value='false',
+                description='show the low-latency in-process preview window',
+            ),
+            LaunchArg(
+                'preview_fps',
+                default_value='30.0',
+                description='in-process preview refresh rate',
+            ),
             LaunchArg(
                 'type',
                 default_value='time_slice',

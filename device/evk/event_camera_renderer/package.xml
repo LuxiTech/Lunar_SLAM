@@ -18,6 +18,7 @@
   <depend>event_camera_msgs</depend>
   <depend>event_camera_codecs</depend>  
   <depend>image_transport</depend>
+  <depend>opencv</depend>
   <depend>sensor_msgs</depend>
   <depend>ros_environment</depend>
   
