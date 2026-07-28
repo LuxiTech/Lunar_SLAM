@@ -354,7 +354,7 @@ function updateNavigation(navigation) {
   navigationLocateButton.disabled =
     navigationLoadPending || navigationLocatePending ||
     navigation.state === "running" ||
-    !selectedMap?.loadable || !selectedMap?.cloud_path ||
+    !selectedMap?.localizable ||
     navigationCloud.map_id !== selectedMap?.id;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
   navigationGoalButton.disabled = !navigation.localization_ready;
@@ -371,10 +371,10 @@ function updateNavigation(navigation) {
       const fitness = navigation.localization_fitness == null
         ? "" : `，fitness=${Number(navigation.localization_fitness).toFixed(3)}`;
       navigationDetail.textContent =
-        `${mapName} 已完成 RTAB-Map 粗定位和 ICP 精定位：${poseText}${fitness}。`;
+        `${mapName} 已完成 HLoc 粗定位和 ICP 精定位：${poseText}${fitness}。`;
     } else if (navigation.localization_stage === "refining") {
       navigationDetail.textContent =
-        `${mapName} 已找到 RTAB-Map 全局候选，正在进行 ICP 精配准：${poseText}。`;
+        `${mapName} 已找到 HLoc 全局候选，正在进行 ICP 精配准：${poseText}。`;
     } else {
       navigationDetail.textContent =
         `正在 ${mapName} 中进行全局粗定位；请缓慢移动或转动机器人。`;
@@ -400,7 +400,7 @@ function updateNavigationMaps(maps) {
     option.value = item.id;
     option.disabled = !item.convertible;
     option.textContent = item.loadable
-      ? `${item.id}${item.cloud_path ? "（彩色点云 + 体素地图）" : "（体素地图；未导出彩色点云）"}`
+      ? `${item.id}${item.cloud_path ? "（彩色点云 + 体素地图" : "（体素地图；未导出彩色点云"}${item.localizable ? " + HLoc）" : "；未构建 HLoc）"}`
       : item.convertible
         ? `${item.id}（选择后自动转换）`
         : `${item.id}（缺少 .db，无法转换）`;
@@ -685,7 +685,11 @@ async function loadNavigationMap(automatic = false) {
     navigationResult = result.navigation || navigationResult;
     updateNavigation(navigationResult);
     await refreshNavigationCloud();
-    showToast(`${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；可点击“自动定位”`);
+    const loadedMap = navigationMapRecords.get(mapId);
+    showToast(
+      `${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；` +
+      (loadedMap?.localizable ? "可点击“自动定位”" : "尚未构建 HLoc 索引")
+    );
   } catch (error) {
     showToast(`${automatic ? "地图转换或加载" : "地图加载"}失败：${error.message}`);
   } finally {

@@ -1,0 +1,4 @@
+# Install from the Jetson AI Lab JP6 CUDA 12.6 wheel index on aarch64.
+# The general dependencies are supplied by 3parts/hloc_python.
+torch==2.8.0
+torchvision==0.23.0

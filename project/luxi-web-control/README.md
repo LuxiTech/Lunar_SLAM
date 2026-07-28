@@ -203,15 +203,16 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 
 1. 选择地图，等待彩色点云和 OctoMap 图层加载完成。
 2. 点击“自动定位”，缓慢移动或原地转动机器人，让相机看到建图时记录过的区域。
-3. RTAB-Map 用保存数据库中的视觉词袋和局部特征寻找全局候选，并只在协方差可信时
-   将 `/rtabmap/localization_pose` 交给后级。
+3. GPU HLoc 使用 NetVLAD 检索候选、SuperPoint + LightGlue 匹配，并通过
+   PnP/RANSAC 和当前深度验证后，将 `/luxi_hloc/coarse_pose` 交给后级。
 4. `luxi_location` 使用当前深度点云和保存的彩色 PLY 进行 Open3D ICP 精配准，结果
    发布到 `/luxi_location/pose`。
 5. 页面显示“已定位”后，以紫色箭头显示机器人位置和朝向，同时显示 `x/y/yaw` 与
    ICP fitness；“选择目标点”此时才会启用。
 
-因此粗定位失败时不会盲目启动 ICP，ICP 失败时也不会开放导航目标。点击“停止定位”
-会结束 RTAB-Map、ICP、OctoMap 和规划进程，但保留已加载的地图图层。该功能不会自动
+因此粗定位失败时不会盲目启动 ICP，ICP 失败时也不会开放导航目标。没有对应
+`maps/hloc_maps/mapNNN/metadata.yaml` 的地图只能显示，网页会禁用“自动定位”。
+点击“停止定位”会结束 HLoc、ICP、OctoMap 和规划进程，但保留已加载的地图图层。该功能不会自动
 启用路径跟随，默认也不会向 `/cmd_vel` 发送导航速度。
 
 若只需浏览已保存的 OctoMap，可以不启动终端一；但要让 RTAB-Map 使用当前相机进行
@@ -239,7 +240,7 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `1800` | 单次浏览器点云预览的最大抽样点数 |
-| `navigation_localization_pose_topic` | `/rtabmap/localization_pose` | RTAB-Map 粗定位输入 |
+| `navigation_localization_pose_topic` | `/luxi_hloc/coarse_pose` | HLoc 粗定位输入 |
 | `navigation_refined_pose_topic` | `/luxi_location/pose` | ICP 精定位结果 |
 | `navigation_refined_fitness_topic` | `/luxi_location/fitness` | ICP 匹配得分 |
 
@@ -255,7 +256,7 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 - `POST /api/mapping/start`：启动受网页管理的 RTAB-Map 建图进程。
 - `POST /api/mapping/stop`：停止受网页管理的 RTAB-Map 建图进程并保存数据库。
 - `POST /api/navigation/load_map`：转换并加载地图显示图层，不启动定位。
-- `POST /api/navigation/localize`：以所选地图启动 RTAB-Map 粗定位和 ICP 精定位。
+- `POST /api/navigation/localize`：以所选地图启动 GPU HLoc 粗定位和 ICP 精定位。
 - `POST /api/navigation/stop`：停止定位、规划相关进程。
 - `GET /api/preview/rgb`：最新压缩 RGB 图像，未收到相机数据时返回 404。
 - `GET /api/preview/cloud`：抽样后的 XYZRGB 点云 JSON，用于网页 Canvas 预览。

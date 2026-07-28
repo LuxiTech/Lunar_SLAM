@@ -73,9 +73,10 @@ def _map_id_from_export_path(candidate: Path, octo_directory: Path) -> str:
 
 
 def discover_navigation_maps(maps_root: Path) -> list:
-    """Return saved RTAB-Map/OctoMap pairs grouped by their mapNNN identifier."""
+    """Return saved map layers and optional HLoc indices grouped by mapNNN."""
     rtab_directory = maps_root / "rtab_maps"
     octo_directory = maps_root / "octo_maps"
+    hloc_directory = maps_root / "hloc_maps"
     databases = {
         candidate.stem: candidate.resolve()
         for candidate in rtab_directory.glob("map*.db")
@@ -100,13 +101,22 @@ def discover_navigation_maps(maps_root: Path) -> list:
         database = databases.get(map_id)
         octomap = octomaps.get(map_id)
         cloud = clouds.get(map_id)
+        hloc_map = (hloc_directory / map_id).resolve()
+        hloc_ready = (hloc_map / "metadata.yaml").is_file()
         maps.append({
             "id": map_id,
             "database_path": str(database) if database else None,
             "octomap_path": str(octomap) if octomap else None,
             "cloud_path": str(cloud) if cloud else None,
+            "hloc_map_directory": str(hloc_map) if hloc_ready else None,
             "convertible": database is not None,
             "loadable": database is not None and octomap is not None,
+            "localizable": (
+                database is not None
+                and octomap is not None
+                and cloud is not None
+                and hloc_ready
+            ),
         })
     return maps
 
@@ -208,7 +218,7 @@ def parse_octomap_point_output(output: str) -> Tuple[float, list]:
 
 
 def localization_covariance_ready(covariance: list, maximum: float) -> bool:
-    """Return whether RTAB-Map has supplied a finite, confident map pose."""
+    """Return whether the coarse localizer supplied a finite, confident pose."""
     if len(covariance) < 36 or not math.isfinite(maximum) or maximum <= 0.0:
         return False
     values = (covariance[0], covariance[7], covariance[35])
@@ -725,6 +735,7 @@ class NavigationController:
         database_path: Path,
         octomap_path: Path,
         cloud_path: Path,
+        hloc_map_directory: Path,
     ) -> list:
         source_commands = [
             f"source {shlex.quote(str(self.d435_setup))}",
@@ -739,6 +750,7 @@ class NavigationController:
             f"database_path:={database_path}",
             f"octomap_path:={octomap_path}",
             f"cloud_path:={cloud_path}",
+            f"hloc_map_directory:={hloc_map_directory}",
             "cmd_vel_topic:=/navigation/cmd_vel",
         ])
         script = "set -e; " + "; ".join(source_commands)
@@ -750,6 +762,7 @@ class NavigationController:
         database_path: Path,
         octomap_path: Path,
         cloud_path: Path,
+        hloc_map_directory: Path,
     ) -> Tuple[bool, str]:
         with self._lock:
             if not self.enabled:
@@ -763,6 +776,7 @@ class NavigationController:
                     database_path,
                     octomap_path,
                     cloud_path,
+                    hloc_map_directory / "metadata.yaml",
                 )
                 if not path.is_file()
             ]
@@ -779,7 +793,12 @@ class NavigationController:
                         "luxi_web_control =====\n"
                     )
                     self._process = subprocess.Popen(
-                        self._command(database_path, octomap_path, cloud_path),
+                        self._command(
+                            database_path,
+                            octomap_path,
+                            cloud_path,
+                            hloc_map_directory,
+                        ),
                         stdout=log_file, stderr=subprocess.STDOUT,
                         start_new_session=True, env=os.environ.copy())
             except OSError as exc:
@@ -1198,7 +1217,7 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
         self.declare_parameter(
-            "navigation_localization_pose_topic", "/rtabmap/localization_pose"
+            "navigation_localization_pose_topic", "/luxi_hloc/coarse_pose"
         )
         self.declare_parameter(
             "navigation_refined_pose_topic", "/luxi_location/pose"
@@ -1209,7 +1228,7 @@ class WebControlNode(Node):
         self.declare_parameter(
             "navigation_refined_status_topic", "/luxi_location/status"
         )
-        self.declare_parameter("navigation_localization_max_variance", 100.0)
+        self.declare_parameter("navigation_localization_max_variance", 0.5)
         self.declare_parameter("navigation_localization_timeout", 3.0)
         self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("enable_preview", True)
@@ -1948,7 +1967,7 @@ class WebControlNode(Node):
             self._navigation_map_operation_lock.release()
 
     def start_navigation_localization(self, map_id: str) -> Tuple[bool, str]:
-        """Start RTAB-Map coarse localization followed by ICP refinement."""
+        """Start HLoc coarse localization followed by ICP refinement."""
         if not MAP_IDENTIFIER.fullmatch(map_id):
             return False, "map_id must use the mapNNN format"
         record = next(
@@ -1957,9 +1976,16 @@ class WebControlNode(Node):
         )
         if record is None:
             return False, f"map {map_id} does not exist under {self.maps_root}"
-        required = ("database_path", "octomap_path", "cloud_path")
+        required = (
+            "database_path",
+            "octomap_path",
+            "cloud_path",
+            "hloc_map_directory",
+        )
         if any(not record.get(name) for name in required):
-            return False, f"map {map_id} must be converted and loaded first"
+            return False, (
+                f"map {map_id} needs display layers and a built HLoc index first"
+            )
         with self._navigation_lock:
             if (
                 self._navigation_cloud_map_id != map_id
@@ -1979,6 +2005,7 @@ class WebControlNode(Node):
             Path(record["database_path"]),
             Path(record["octomap_path"]),
             Path(record["cloud_path"]),
+            Path(record["hloc_map_directory"]),
         )
 
     def stop_navigation(self) -> Tuple[bool, str]:
@@ -1987,6 +2014,7 @@ class WebControlNode(Node):
         if stopped:
             with self._navigation_lock:
                 self._localization_ready = False
+                self._localization_variance = None
                 self._localization_received_at = None
                 self._coarse_localization_pose = None
                 self._refined_localization_pose = None
@@ -1996,12 +2024,12 @@ class WebControlNode(Node):
         return stopped, message
 
     def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
-        """Publish a map-frame goal only after RTAB-Map localization is ready."""
+        """Publish a map-frame goal only after HLoc and ICP localization is ready."""
         navigation = self.navigation_status()
         if navigation["state"] != "running":
             return False, "load a map and wait for navigation to start first"
         if not navigation["localization_ready"]:
-            return False, "wait for RTAB-Map localization before selecting a goal"
+            return False, "wait for HLoc and ICP localization before selecting a goal"
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         with self._navigation_lock:
@@ -2051,7 +2079,7 @@ class WebControlNode(Node):
                 status["localization_stage"] = "refining"
                 status["pose"] = {
                     **self._coarse_localization_pose,
-                    "source": "rtabmap",
+                    "source": "hloc",
                 }
             elif running:
                 status["localization_stage"] = "searching"

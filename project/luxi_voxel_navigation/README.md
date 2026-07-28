@@ -61,8 +61,11 @@ ros2 topic pub --once /navigation/stop std_msgs/msg/Bool '{data: true}'
 ```bash
 ros2 launch luxi_voxel_navigation saved_map_navigation.launch.py \
   database_path:=/home/lunar/project/lunar_slam/maps/rtab_maps/map011.db \
-  octomap_path:=/home/lunar/project/lunar_slam/maps/octo_maps/map011_octomap/map011.bt
+  octomap_path:=/home/lunar/project/lunar_slam/maps/octo_maps/map011_octomap/map011.bt \
+  cloud_path:=/home/lunar/project/lunar_slam/maps/octo_maps/map011_octomap/map011_cloud.ply \
+  hloc_map_directory:=/home/lunar/project/lunar_slam/maps/hloc_maps/map011
 ```
 
-它只做定位、加载 `.bt` 和发布 `/navigation/planned_path`；路径跟随仍需单独向
+它使用 GPU HLoc 进行全局粗定位、Open3D ICP 精配准，加载 `.bt` 并发布
+`/navigation/planned_path`；路径跟随仍需单独向
 `/navigation/start` 发送 `true`，默认不会控制底盘。

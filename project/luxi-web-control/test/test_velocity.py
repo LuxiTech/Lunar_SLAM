@@ -120,6 +120,9 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
     database = Path(tmp_path / "map.db")
     octomap = Path(tmp_path / "map.bt")
     cloud = Path(tmp_path / "map_cloud.ply")
+    hloc_map = Path(tmp_path / "hloc_map")
+    hloc_map.mkdir()
+    (hloc_map / "metadata.yaml").touch()
     for path in (setup, database, octomap):
         path.touch()
     controller = NavigationController(
@@ -134,14 +137,15 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
     )
 
     started, message = controller.start(
-        "map012", database, octomap, cloud
+        "map012", database, octomap, cloud, hloc_map
     )
     assert not started
     assert str(cloud) in message
 
     cloud.touch()
-    command = controller._command(database, octomap, cloud)
+    command = controller._command(database, octomap, cloud, hloc_map)
     assert f"cloud_path:={cloud}" in command[-1]
+    assert f"hloc_map_directory:={hloc_map}" in command[-1]
 
 
 def test_sparse_cloud_extracts_finite_xyzrgb_points():
@@ -176,6 +180,11 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
     (tmp_path / "octo_maps" / "map011_octomap").mkdir(parents=True)
     (tmp_path / "rtab_maps" / "map011.db").write_bytes(b"database")
     (tmp_path / "rtab_maps" / "map012.db").write_bytes(b"database")
+    (tmp_path / "hloc_maps" / "map011").mkdir(parents=True)
+    (tmp_path / "hloc_maps" / "map011" / "metadata.yaml").write_text(
+        "schema_version: 1\n",
+        encoding="utf-8",
+    )
     (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").write_bytes(b"octomap")
     cloud_path = tmp_path / "octo_maps" / "map011_octomap" / "map011_cloud.ply"
     cloud_path.write_text(
@@ -194,16 +203,22 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
                 (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").resolve()
             ),
             "cloud_path": str(cloud_path.resolve()),
+            "hloc_map_directory": str(
+                (tmp_path / "hloc_maps" / "map011").resolve()
+            ),
             "convertible": True,
             "loadable": True,
+            "localizable": True,
         },
         {
             "id": "map012",
             "database_path": str((tmp_path / "rtab_maps" / "map012.db").resolve()),
             "octomap_path": None,
             "cloud_path": None,
+            "hloc_map_directory": None,
             "convertible": True,
             "loadable": False,
+            "localizable": False,
         },
     ]
 
