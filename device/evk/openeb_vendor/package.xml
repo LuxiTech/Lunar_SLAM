@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<?xml-model
+  href="http://download.ros.org/schema/package_format2.xsd"
+  schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="2">
+  <name>openeb_vendor</name>
+  <version>1.0.0</version>
+  <description>
+    Wrapper around openeb
+  </description>
+
+  <maintainer email="bernd.pfrommer@gmail.com">Bernd Pfrommer</maintainer>
+
+  <license>Apache License 2.0</license>  <!-- this package and openeb are Apache 2.0 -->
+
+  <author email="bernd.pfrommer@gmail.com">Bernd Pfrommer</author>
+
+  <url type="website">https://github.com/prophesee-ai/openeb</url>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_vendor_package</buildtool_depend>
+
+  <!-- openeb dependencies -->
+  <buildtool_depend>wget</buildtool_depend>
+  <buildtool_depend>unzip</buildtool_depend>
+  <buildtool_depend>curl</buildtool_depend>
+  <buildtool_depend>git</buildtool_depend>
+  <buildtool_depend>cmake</buildtool_depend>
+  <buildtool_depend>hdf5-tools</buildtool_depend>
+  <buildtool_depend>pkg-config</buildtool_depend>
+  <depend>boost</depend>
+  <depend>ffmpeg</depend>
+  <depend>libusb-1.0</depend>
+  <depend>libusb-1.0-dev</depend>
+  <depend>libusb</depend>
+  <depend>libusb-dev</depend>
+  <depend>libhdf5-dev</depend>
+  <depend>libglew-dev</depend>
+  <depend>libglfw3-dev</depend>
+  <depend>libopencv-dev</depend>
+  <depend>libopenscenegraph</depend>
+  <depend>protobuf-dev</depend>
+  <test_depend>gtest</test_depend>
+  
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

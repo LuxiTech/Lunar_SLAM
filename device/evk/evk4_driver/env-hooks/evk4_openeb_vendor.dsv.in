@@ -1,0 +1,6 @@
+prepend-non-duplicate;AMENT_PREFIX_PATH;@EVK4_LOCAL_ROS@
+prepend-non-duplicate;CMAKE_PREFIX_PATH;@EVK4_LOCAL_ROS@
+prepend-non-duplicate;CMAKE_PREFIX_PATH;@EVK4_OPENEB_VENDOR@
+prepend-non-duplicate;PATH;@EVK4_OPENEB_VENDOR@/bin
+prepend-non-duplicate;LD_LIBRARY_PATH;@EVK4_OPENEB_VENDOR@/lib
+prepend-non-duplicate;MV_HAL_PLUGIN_PATH;@EVK4_OPENEB_VENDOR@/lib/metavision/hal/plugins

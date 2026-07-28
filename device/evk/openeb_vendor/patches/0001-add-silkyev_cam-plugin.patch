@@ -1,0 +1,582 @@
+diff --git a/hal/cpp/samples/metavision_platform_info/CMakeLists.txt b/hal/cpp/samples/metavision_platform_info/CMakeLists.txt
+index cf568af..78a4102 100644
+--- a/hal/cpp/samples/metavision_platform_info/CMakeLists.txt
++++ b/hal/cpp/samples/metavision_platform_info/CMakeLists.txt
+@@ -10,6 +10,10 @@
+ add_executable(metavision_platform_info metavision_platform_info.cpp)
+ target_link_libraries(metavision_platform_info PRIVATE MetavisionSDK::base metavision_hal metavision_hal_discovery Boost::program_options)
+ 
++# 2024-10-01 Edited by CenturyArks add for SilkyEvCam
++add_executable(silkyevcam_platform_info metavision_platform_info.cpp)
++target_link_libraries(silkyevcam_platform_info PRIVATE MetavisionSDK::base metavision_hal metavision_hal_discovery Boost::program_options)
++
+ install(TARGETS metavision_platform_info
+         RUNTIME DESTINATION bin
+         COMPONENT metavision-hal-bin
+diff --git a/hal/cpp/samples/metavision_platform_info/metavision_platform_info.cpp b/hal/cpp/samples/metavision_platform_info/metavision_platform_info.cpp
+index bf6b5ca..d72ecdc 100644
+--- a/hal/cpp/samples/metavision_platform_info/metavision_platform_info.cpp
++++ b/hal/cpp/samples/metavision_platform_info/metavision_platform_info.cpp
+@@ -315,7 +315,9 @@ void do_systems_diagnosis() {
+     if (do_usb_port_analysis) {
+         print_section("SYSTEM'S USB PORTS");
+ 
+-        std::vector<std::string> vendor_and_product_ids = {"04b4:00f4", "04b4:00f5", "03fd:5832"};
++        // 2023-10-06 Edited by CenturyArks add for SilkyEvCam
++        // std::vector<std::string> vendor_and_product_ids = {"04b4:00f4", "04b4:00f5", "03fd:5832"};
++        std::vector<std::string> vendor_and_product_ids = {"04b4:00f4", "04b4:00f5", "31f7:0002", "31f7:0003", "31f7:0004", "03fd:5832"};
+ 
+         bool usb2_found           = false;
+         int nr_usb_port_found     = 0;
+diff --git a/hal_psee_plugins/lib/CMakeLists.txt b/hal_psee_plugins/lib/CMakeLists.txt
+index f2c8035..e89f81e 100644
+--- a/hal_psee_plugins/lib/CMakeLists.txt
++++ b/hal_psee_plugins/lib/CMakeLists.txt
+@@ -38,27 +38,27 @@ target_include_directories(metavision_psee_hw_layer_obj
+         ${metavision_hal_psee_plugins_include_dir}
+ )
+ 
+-add_library(metavision_psee_hw_layer SHARED)
++add_library(metavision_silky_hw_layer SHARED)
+ 
+-target_sources(metavision_psee_hw_layer
++target_sources(metavision_silky_hw_layer
+     PRIVATE
+         $<TARGET_OBJECTS:metavision_psee_hw_layer_obj>
+ )
+ 
+-target_include_directories(metavision_psee_hw_layer
++target_include_directories(metavision_silky_hw_layer
+   PUBLIC
+      $<BUILD_INTERFACE:${metavision_psee_hw_layer_include_dir}>
+      $<INSTALL_INTERFACE:include>
+ )
+ 
+-target_link_libraries(metavision_psee_hw_layer
++target_link_libraries(metavision_silky_hw_layer
+     PRIVATE
+         metavision_psee_hw_layer_obj
+     PUBLIC
+         metavision_hal
+ )
+ 
+-install(TARGETS metavision_psee_hw_layer
++install(TARGETS metavision_silky_hw_layer
+     EXPORT MetavisionPSEEHWLayerTargets
+     RUNTIME
+         DESTINATION "${HAL_INSTALL_PLUGIN_RELATIVE_PATH}"
+@@ -71,17 +71,17 @@ install(TARGETS metavision_psee_hw_layer
+         COMPONENT metavision-hal-prophesee-hw-layer-lib
+ )
+ 
+-add_custom_command(TARGET metavision_psee_hw_layer POST_BUILD
++add_custom_command(TARGET metavision_silky_hw_layer POST_BUILD
+     COMMAND ${CMAKE_COMMAND} -E make_directory "${HAL_BUILD_PLUGIN_PATH}"
+-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:metavision_psee_hw_layer>" "${HAL_BUILD_PLUGIN_PATH}")
++    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:metavision_silky_hw_layer>" "${HAL_BUILD_PLUGIN_PATH}")
+ 
+ if(BUILD_INTERNAL_PLUGINS)
+-    add_custom_command(TARGET metavision_psee_hw_layer POST_BUILD
++    add_custom_command(TARGET metavision_silky_hw_layer POST_BUILD
+         COMMAND ${CMAKE_COMMAND} -E make_directory "${HAL_BUILD_PLUGIN_PATH}/universal_internal"
+-        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:metavision_psee_hw_layer>" "${HAL_BUILD_PLUGIN_PATH}/universal_internal")
+-    add_custom_command(TARGET metavision_psee_hw_layer POST_BUILD
++        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:metavision_silky_hw_layer>" "${HAL_BUILD_PLUGIN_PATH}/universal_internal")
++    add_custom_command(TARGET metavision_silky_hw_layer POST_BUILD
+         COMMAND ${CMAKE_COMMAND} -E make_directory "${HAL_BUILD_PLUGIN_PATH}/sensorlib"
+-        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:metavision_psee_hw_layer>" "${HAL_BUILD_PLUGIN_PATH}/sensorlib")
++        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:metavision_silky_hw_layer>" "${HAL_BUILD_PLUGIN_PATH}/sensorlib")
+ endif(BUILD_INTERNAL_PLUGINS)
+ 
+ # Install public headers
+@@ -92,9 +92,9 @@ install(DIRECTORY ${metavision_psee_hw_layer_include_dir}/metavision
+ 
+ set(METAVISION_PSEEHWLayer_EXPORT_FILE_NAME MetavisionPSEEHWLayerTargets.cmake)
+ set(metavision_psee_hw_layer_config_files_output_dir "${GENERATE_FILES_DIRECTORY}/share/cmake/MetavisionPSEEHWLayerCMakePackagesFilesDir")
+-add_library(Metavision::PSEEHWLayer ALIAS metavision_psee_hw_layer)
++add_library(Metavision::PSEEHWLayer ALIAS metavision_silky_hw_layer)
+ 
+-set_target_properties(metavision_psee_hw_layer
++set_target_properties(metavision_silky_hw_layer
+     PROPERTIES
+         EXPORT_NAME PSEEHWLayer
+ )
+@@ -144,7 +144,7 @@ foreach(lib_obj ${lib_obj_list})
+         PUBLIC
+             metavision_hal
+             libusb-1.0
+-            metavision_psee_hw_layer
++            metavision_silky_hw_layer
+     )
+     target_include_directories(${lib_obj}
+         PUBLIC
+@@ -170,12 +170,13 @@ endforeach()
+ 
+ # Custom target for all plugins (useful to use as a dependency)
+ add_custom_target(hal_plugins)
+-add_dependencies(hal_plugins metavision_psee_hw_layer)
++add_dependencies(hal_plugins metavision_silky_hw_layer)
+ 
+ set(hal_psee_plugins_target_file_list)
+ 
+ set(plugin_list
+-    hal_plugin_prophesee
++    # hal_plugin_prophesee
++    silky_common_plugin
+ )
+ 
+ if(BUILD_INTERNAL_PLUGINS)
+@@ -203,7 +204,7 @@ foreach(plugin ${plugin_list})
+ 
+     target_link_libraries(${plugin}
+         PRIVATE
+-            metavision_psee_hw_layer
++            metavision_silky_hw_layer
+             metavision_hal_psee_plugin_obj
+         PUBLIC
+             metavision_hal
+@@ -218,7 +219,7 @@ foreach(plugin ${plugin_list})
+         target_link_options(${plugin} PRIVATE "LINKER:-z,defs")
+     endif()
+ 
+-    # Have run-time linker look for metavision_psee_hw_layer library in plugin folder
++    # Have run-time linker look for metavision_silky_hw_layer library in plugin folder
+     get_target_property(plugin_rpath ${plugin} "INSTALL_RPATH")
+ 
+     if(APPLE)
+@@ -258,18 +259,19 @@ foreach(plugin ${plugin_list})
+ 
+ endforeach()
+ 
+-foreach(object ${lib_common_obj_list})
+-    # Linkage with generic hal plugin object
+-    target_sources(hal_plugin_prophesee
+-        PRIVATE
+-            $<TARGET_OBJECTS:${object}>
+-    )
++# 2024-10-01 Edited by CenturyArks for silky_common_plugin
++target_sources(silky_common_plugin
++    PRIVATE
++        $<TARGET_OBJECTS:metavision_hal_psee_plugin_obj>
++        $<TARGET_OBJECTS:metavision_psee_hw_layer_obj>
++)
++
++target_link_libraries(silky_common_plugin
++    PRIVATE
++        metavision_hal_psee_plugin_obj
++        metavision_psee_hw_layer_obj
++)
+ 
+-    target_link_libraries(hal_plugin_prophesee
+-        PRIVATE
+-            ${object}
+-    )
+-endforeach()
+ 
+ # Linkage with generic hal plugin object
+ if(BUILD_INTERNAL_PLUGINS)
+diff --git a/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/treuzell/tz_libusb_board_command.h b/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/treuzell/tz_libusb_board_command.h
+index 77db6d8..6d00a57 100644
+--- a/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/treuzell/tz_libusb_board_command.h
++++ b/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/treuzell/tz_libusb_board_command.h
+@@ -68,6 +68,9 @@ public:
+     // @brief Create a new DataTransfer object to stream the currently opened device
+     std::unique_ptr<DataTransfer::RawDataProducer> build_raw_data_producer(uint32_t raw_event_size_bytes) override;
+ 
++    // 2023-10-06 Edited by CenturyArks for pixel mask control
++    bool read_pixel_mask_data(int num, int* x, int* y);
++
+ private:
+     bool clear_endpoint();
+     bool reset_device();
+diff --git a/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/utils/psee_libusb.h b/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/utils/psee_libusb.h
+index d71b87e..5fe2df1 100644
+--- a/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/utils/psee_libusb.h
++++ b/hal_psee_plugins/psee_hw_layer_headers/include/metavision/psee_hw_layer/boards/utils/psee_libusb.h
+@@ -119,6 +119,9 @@ public:
+                                  user_data, timeout);
+     }
+ 
++    // 2023-10-06 Edited by CenturyArks for EEPROM Access
++    bool eeprom_read_4bytes(int blk_no, uint32_t* data);
++
+ private:
+     std::shared_ptr<LibUSBContext> libusb_ctx_;
+     libusb_device_handle *dev_handle_;
+diff --git a/hal_psee_plugins/resources/rules/ca_device.rules b/hal_psee_plugins/resources/rules/ca_device.rules
+new file mode 100644
+index 0000000..fb0cdcd
+--- /dev/null
++++ b/hal_psee_plugins/resources/rules/ca_device.rules
+@@ -0,0 +1 @@
++KERNEL=="*", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ACTION=="add", ATTR{idVendor}=="31f7", MODE="666", TAG="causb_dev"
+diff --git a/hal_psee_plugins/samples/metavision_imx636_facility_casting_sample/CMakeLists.txt b/hal_psee_plugins/samples/metavision_imx636_facility_casting_sample/CMakeLists.txt
+index 02f2db2..f7cadcd 100644
+--- a/hal_psee_plugins/samples/metavision_imx636_facility_casting_sample/CMakeLists.txt
++++ b/hal_psee_plugins/samples/metavision_imx636_facility_casting_sample/CMakeLists.txt
+@@ -12,7 +12,7 @@ target_link_libraries(metavision_imx636_facility_casting_sample
+     PRIVATE
+         metavision_hal
+         metavision_hal_discovery
+-        metavision_psee_hw_layer
++        metavision_silky_hw_layer
+         Boost::program_options
+ )
+ 
+diff --git a/hal_psee_plugins/src/boards/treuzell/tz_hw_identification.cpp b/hal_psee_plugins/src/boards/treuzell/tz_hw_identification.cpp
+index afc5e0b..9e4ad68 100644
+--- a/hal_psee_plugins/src/boards/treuzell/tz_hw_identification.cpp
++++ b/hal_psee_plugins/src/boards/treuzell/tz_hw_identification.cpp
+@@ -26,6 +26,15 @@
+ #include "metavision/psee_hw_layer/utils/psee_format.h"
+ #include "metavision/hal/utils/hal_log.h"
+ 
++// 2023-10-06 Edited by CenturyArks for system_info output
++#include <iomanip>
++#include <fstream>
++#include <iostream>
++#include <algorithm>
++
++// 2023-10-06 Edited by CenturyArks for system_info output(Gen31)
++#include "metavision/psee_hw_layer/devices/treuzell/tz_psee_fpga_device.h"
++
+ namespace Metavision {
+ 
+ TzHWIdentification::TzHWIdentification(const std::shared_ptr<I_PluginSoftwareInfo> &plugin_sw_info,
+@@ -71,22 +80,79 @@ std::string TzHWIdentification::get_integrator() const {
+ I_HW_Identification::SystemInfo TzHWIdentification::get_system_info() const {
+     auto infos = I_HW_Identification::get_system_info();
+ 
++// 2023-10-06 Edited by CenturyArks for SilkyEvCam's own output begin
+     long board_version  = icmd_->get_version();
+     std::string version = std::to_string((board_version >> 16) & 0xFF) + "." +
+                           std::to_string((board_version >> 8) & 0xFF) + "." +
+                           std::to_string((board_version >> 0) & 0xFF);
+-    infos.insert({icmd_->get_name() + " Release Version", version});
++//  infos.insert({icmd_->get_name() + " Release Version", version});
++
++    bool silkyevcam_flag = false;
++    // 2024-10-01 Edited for vanish SystemId's function
++    int silkyevcam_kind = 0;  // 1:VGA, 2:HD, 3:HD Lite
++    std::string name1 = icmd_->get_name();
++    if(name1.size() > 17) {
++        std::transform(name1.begin(), name1.end(), name1.begin(), tolower);
++        if(strcmp(name1.substr(0, 10).c_str(), "silkyevcam") == 0) {
++            silkyevcam_flag = true;
++            std::string name2 = name1.substr(11, 6);
++            if(strcmp(name2.c_str(), "gen3.1") == 0) {
++                silkyevcam_kind = 1;
++            } else if(strcmp(name2.c_str(), "hd v03") == 0) {
++                silkyevcam_kind = 2;
++            } else if(strcmp(name2.c_str(), "hd lit") == 0) {
++                silkyevcam_kind = 3;
++            }
++        }
++    }
++
++    if(! silkyevcam_flag) {
++        infos.insert({icmd_->get_name() + " Release Version", version});
++    } else {
++        // version >= 3 append "-C"
++        if(((board_version >> 16) & 0xFF) >= 3) {
++            version += "-C";
++        }
++        infos.insert({"FW Release Version ", version});
++    }
+ 
+     time_t build_date                    = icmd_->get_build_date();
+     const char *board_build_date_charptr = asctime(localtime(&build_date));
+     std::string board_build_date_str     = board_build_date_charptr == 0 ? "NA" : std::string(board_build_date_charptr);
+     board_build_date_str.pop_back();
+-    infos.insert({icmd_->get_name() + " Build Date", board_build_date_str});
+ 
+-    infos.insert({icmd_->get_name() + " Speed", std::to_string(icmd_->get_board_speed())});
++    if(! silkyevcam_flag) {
++        infos.insert({icmd_->get_name() + " Build Date", board_build_date_str});
++        infos.insert({icmd_->get_name() + " Speed", std::to_string(icmd_->get_board_speed())});
++    } else {
++        infos.insert({"FW Build Date ", board_build_date_str});
++        infos.insert({"FW Speed ", std::to_string(icmd_->get_board_speed())});
++    }
++
++    if(! silkyevcam_flag) {
++        for (auto dev : devices_)
++            dev->get_device_info(infos, "device");
++    }
++
++    // 2023-10-06 Append for Gen31 FPGA version
++    // 2024-10-01 Edited for vanish SystemId's function
++    if(silkyevcam_kind == 1) {
++        uint32_t v1 = 0;
++        for (auto dev : devices_) {
++            if(auto fpga_dev = dynamic_cast<TzPseeFpgaDevice *>(dev.get())) {
++                v1 = fpga_dev->get_system_version();
++                break;
++            }
++        }
++        if(v1 > 0) {
++            std::string fpga_version = std::to_string((v1 >> 16) & 0xFF) + "."
++                                     + std::to_string((v1 >> 8) & 0xFF) + "."
++                                     + std::to_string(v1 & 0xFF);
++            infos.insert({"System Version", fpga_version});
++        }
++    }
+ 
+-    for (auto dev : devices_)
+-        dev->get_device_info(infos, "device");
++// 2023-10-06 Edited by CenturyArks for SilkyEvCam's own output end
+ 
+     return infos;
+ }
+diff --git a/hal_psee_plugins/src/boards/treuzell/tz_libusb_board_command.cpp b/hal_psee_plugins/src/boards/treuzell/tz_libusb_board_command.cpp
+index 257cce5..0589fe1 100644
+--- a/hal_psee_plugins/src/boards/treuzell/tz_libusb_board_command.cpp
++++ b/hal_psee_plugins/src/boards/treuzell/tz_libusb_board_command.cpp
+@@ -30,6 +30,9 @@
+ #include "metavision/hal/utils/hal_exception.h"
+ #include "utils/psee_hal_plugin_error_code.h"
+ 
++// 2023-10-06 Edited by CenturyArks for for pixel_mask
++#include "devices/others/i2c_eeprom.h"
++
+ #ifdef USE_JAVA_BINDINGS
+ #include "is_usb_java.h"
+ #endif
+@@ -371,4 +374,21 @@ void TzLibUSBBoardCommand::select_early_quirks(libusb_device_descriptor &desc) {
+     }
+ }
+ 
++// 2023-10-06 Edited by CenturyArks for for pixel_mask
++bool TzLibUSBBoardCommand::read_pixel_mask_data(int num, int* x, int* y) {
++    uint32_t data;
++    int first_blk = 2;
++    bool ret = dev_->eeprom_read_4bytes(num + first_blk, &data);
++    if(ret) {
++        data ^= 0xffffffff;
++        if((data & 0x80000000) == 0x80000000) {
++            *x = data & 0x7ff;
++            *y = (data >> 16) & 0x7ff;
++        } else {
++            ret = false;
++        }
++    }
++    return ret;
++}
++
+ } // namespace Metavision
+diff --git a/hal_psee_plugins/src/boards/utils/psee_libusb.cpp b/hal_psee_plugins/src/boards/utils/psee_libusb.cpp
+index edcc012..ed9e7ed 100644
+--- a/hal_psee_plugins/src/boards/utils/psee_libusb.cpp
++++ b/hal_psee_plugins/src/boards/utils/psee_libusb.cpp
+@@ -9,6 +9,10 @@
+  * See the License for the specific language governing permissions and limitations under the License.                 *
+  **********************************************************************************************************************/
+ 
++// 2023-10-06 Edited by CenturyArks for EEPROM Access
++#include <vector>
++#include "devices/others/i2c_eeprom.h"
++
+ #include "metavision/hal/utils/hal_connection_exception.h"
+ #include "metavision/psee_hw_layer/boards/utils/psee_libusb.h"
+ 
+@@ -140,4 +144,35 @@ void LibUSBDevice::interrupt_transfer(unsigned char endpoint, unsigned char *dat
+     }
+ }
+ 
++// 2023-10-06 Edited by CenturyArks for EEPROM Access
++#define EEPROM_ADR 0x50
++/**
++ * @brief eeprom_read_4bytes
++ * eeprom read for 4 bytes / block
++ * major purpose: for pixel mask data read.
++ * @param blk_no  Block Number first pixel mask data is 2 (0x00000008 - 0x0000000b)
++ * @param data    read data
++ * @return true   read success
++ * @return false  read fail
++ */
++bool LibUSBDevice::eeprom_read_4bytes(int blk_no, uint32_t* data) {
++    std::vector<uint8_t> vread;
++    vread.resize(4);
++    vread.clear();
++    I2cEeprom eeprom_handler(EEPROM_ADR);
++    int ret = eeprom_handler.read(dev_handle_, (blk_no * 4), vread, 4);
++    if(ret == 0) {
++        uint32_t read_val = 0;
++        for (int i = 0; i < 4; i++) {
++            read_val = (read_val << 8) | (vread[3 - i] & 0xFF);
++        }
++        *data = read_val;
++    } else {
++        *data = 0xffffffff;
++        return false;
++    }
++    return true;
++}
++#undef EEPROM_ADR
++
+ } // namespace Metavision
+diff --git a/hal_psee_plugins/src/boards/v4l2/CMakeLists.txt b/hal_psee_plugins/src/boards/v4l2/CMakeLists.txt
+index 8e29b39..1f92a24 100644
+--- a/hal_psee_plugins/src/boards/v4l2/CMakeLists.txt
++++ b/hal_psee_plugins/src/boards/v4l2/CMakeLists.txt
+@@ -13,9 +13,9 @@ endif()
+ 
+ target_compile_definitions(metavision_hal_psee_plugin_obj PRIVATE HAS_V4L2)
+ 
+-target_sources(metavision_hal_psee_plugin_obj PRIVATE
+-    ${CMAKE_CURRENT_SOURCE_DIR}/v4l2_camera_discovery.cpp
+-)
++#target_sources(metavision_hal_psee_plugin_obj PRIVATE
++#    ${CMAKE_CURRENT_SOURCE_DIR}/v4l2_camera_discovery.cpp
++#)
+ 
+ target_sources(metavision_psee_hw_layer_obj PRIVATE
+     ${CMAKE_CURRENT_SOURCE_DIR}/v4l2_camera_discovery.cpp
+diff --git a/hal_psee_plugins/src/devices/imx636/imx636_tz_device.cpp b/hal_psee_plugins/src/devices/imx636/imx636_tz_device.cpp
+index f214d7c..ad8f317 100644
+--- a/hal_psee_plugins/src/devices/imx636/imx636_tz_device.cpp
++++ b/hal_psee_plugins/src/devices/imx636/imx636_tz_device.cpp
+@@ -53,6 +53,20 @@ TzImx636::TzImx636(std::shared_ptr<Metavision::TzLibUSBBoardCommand> cmd, uint32
+     iph_mirror_control(true);
+     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+     lifo_control(true, true, true);
++
++    // 2023-10-06 Edited by CenturyArks for for pixel_mask
++    Gen41DigitalEventMask dem(register_map, SENSOR_PREFIX + "ro/digital_mask_pixel_");
++    auto masks = dem.get_pixel_masks();
++    for(int reg_no=0; reg_no < 64; reg_no++) {
++        int x, y;
++        bool valid = cmd->read_pixel_mask_data(reg_no, &x, &y);
++        if(valid) {
++            MV_HAL_LOG_TRACE() << "Mask Pixel No." << reg_no << " (x, y) : (" << x << "," << y << ")";
++            masks[reg_no]->set_mask(x, y, true);
++        } else {
++            MV_HAL_LOG_TRACE() << "Mask Pixel No." << reg_no << "no setting";
++        }
++    }
+ }
+ 
+ std::shared_ptr<TzDevice> TzImx636::build(std::shared_ptr<Metavision::TzLibUSBBoardCommand> cmd, uint32_t dev_id,
+diff --git a/hal_psee_plugins/src/devices/imx646/imx646_tz_device.cpp b/hal_psee_plugins/src/devices/imx646/imx646_tz_device.cpp
+index 8d5c26b..e96005c 100644
+--- a/hal_psee_plugins/src/devices/imx646/imx646_tz_device.cpp
++++ b/hal_psee_plugins/src/devices/imx646/imx646_tz_device.cpp
+@@ -60,6 +60,20 @@ TzImx646::TzImx646(std::shared_ptr<TzLibUSBBoardCommand> cmd, uint32_t dev_id, s
+     iph_mirror_control(true);
+     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+     lifo_control(true, true, true);
++
++    // 2023-10-06 Edited by CenturyArks for for pixel_mask
++    Gen41DigitalEventMask dem(register_map, SENSOR_PREFIX + "ro/digital_mask_pixel_");
++    auto masks = dem.get_pixel_masks();
++    for(int reg_no=0; reg_no < 64; reg_no++) {
++        int x, y;
++        bool valid = cmd->read_pixel_mask_data(reg_no, &x, &y);
++        if(valid) {
++            MV_HAL_LOG_TRACE() << "Mask Pixel No." << reg_no << " (x, y) : (" << x << "," << y << ")";
++            masks[reg_no]->set_mask(x, y, true);
++        } else {
++            MV_HAL_LOG_TRACE() << "Mask Pixel No." << reg_no << "no setting";
++        }
++    }
+ }
+ 
+ std::shared_ptr<TzDevice> TzImx646::build(std::shared_ptr<TzLibUSBBoardCommand> cmd, uint32_t dev_id,
+diff --git a/hal_psee_plugins/src/devices/others/CMakeLists.txt b/hal_psee_plugins/src/devices/others/CMakeLists.txt
+index 51d788f..360567f 100644
+--- a/hal_psee_plugins/src/devices/others/CMakeLists.txt
++++ b/hal_psee_plugins/src/devices/others/CMakeLists.txt
+@@ -7,6 +7,8 @@
+ # on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and limitations under the License.
+ 
+-target_sources(metavision_hal_psee_plugin_obj PRIVATE
++# 2024-05-20 Edited by CenturyArks for SilkyEvCam
++# target_sources(metavision_hal_psee_plugin_obj PRIVATE
++target_sources(metavision_psee_hw_layer_obj PRIVATE
+     ${CMAKE_CURRENT_SOURCE_DIR}/i2c_eeprom.cpp
+ )
+diff --git a/hal_psee_plugins/src/plugin/CMakeLists.txt b/hal_psee_plugins/src/plugin/CMakeLists.txt
+index b1b5677..bf9e997 100644
+--- a/hal_psee_plugins/src/plugin/CMakeLists.txt
++++ b/hal_psee_plugins/src/plugin/CMakeLists.txt
+@@ -9,8 +9,7 @@
+ 
+ target_sources(metavision_psee_hw_layer_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/psee_plugin.cpp)
+ 
+-target_sources(hal_plugin_prophesee PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/psee_universal.cpp)
++# 2023-10-06 Edited by CenturyArks add for SilkyEvCam
++# target_sources(hal_plugin_prophesee PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/psee_universal.cpp)
++target_sources(silky_common_plugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/silky_common.cpp)
+ 
+-if(HAS_V4L2)
+-    target_compile_definitions(hal_plugin_prophesee PRIVATE HAS_V4L2)
+-endif(HAS_V4L2)
+diff --git a/hal_psee_plugins/src/plugin/silky_common.cpp b/hal_psee_plugins/src/plugin/silky_common.cpp
+new file mode 100644
+index 0000000..eae5ca2
+--- /dev/null
++++ b/hal_psee_plugins/src/plugin/silky_common.cpp
+@@ -0,0 +1,62 @@
++/**********************************************************************************************************************
++ * Copyright (c) Prophesee S.A.                                                                                       *
++ * Copyright (c) 2024 CenturyArks Co.,Ltd.                                                                            *
++ *                                                                                                                    *
++ * Licensed under the Apache License, Version 2.0 (the "License");                                                    *
++ * you may not use this file except in compliance with the License.                                                   *
++ * You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0                                 *
++ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed   *
++ * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.                      *
++ * See the License for the specific language governing permissions and limitations under the License.                 *
++ **********************************************************************************************************************/
++#include <functional>
++
++#include "metavision/hal/plugin/plugin.h"
++#include "metavision/hal/plugin/plugin_entrypoint.h"
++#include "plugin/psee_plugin.h"
++
++using namespace Metavision;
++
++struct PluginDiscovery {
++    static std::vector<std::function<void(Plugin &)>> plugin_discovery;
++    PluginDiscovery(std::function<void(Plugin &)> f) {
++        plugin_discovery.push_back(f);
++    }
++
++    static void discover(Plugin &plugin) {
++        for (const auto &f : plugin_discovery) {
++            f(plugin);
++        }
++    }
++};
++std::vector<std::function<void(Plugin &)>> PluginDiscovery::plugin_discovery;
++
++#if !defined(__ANDROID__) || defined(ANDROID_USES_LIBUSB)
++#include "boards/fx3/fx3_camera_discovery.h"
++#include "boards/treuzell/tz_camera_discovery.h"
++PluginDiscovery register_treuzell([](Plugin &plugin) {
++    auto tz_cam_discovery = std::make_unique<TzCameraDiscovery>();
++    // Register the known USB vendor ID, with the subclass used for Treuzell
++    // 2023-12-13 Edited by CenturyArks for SilkyEvCam
++    tz_cam_discovery->add_usb_id(0x31f7, 0x0002, 0x19);
++    tz_cam_discovery->add_usb_id(0x31f7, 0x0003, 0x19);
++    tz_cam_discovery->add_usb_id(0x31f7, 0x0004, 0x19);
++
++    // Register live camera discoveries
++    auto &tz_disc  = plugin.add_camera_discovery(std::move(tz_cam_discovery));
++});
++#endif // !defined(__ANDROID__) || defined(ANDROID_USES_LIBUSB)
++
++
++#include "boards/rawfile/psee_file_discovery.h"
++PluginDiscovery register_psee_file([](Plugin &plugin) {
++    auto &file_disc = plugin.add_file_discovery(std::make_unique<PseeFileDiscovery>());
++});
++
++void initialize_plugin(void *plugin_ptr) {
++    Plugin &plugin = plugin_cast(plugin_ptr);
++    // 2023-12-13 Edited by CenturyArks for SilkyEvCam
++    // initialize_psee_plugin(plugin);
++    initialize_psee_plugin(plugin, "CenturyArks");
++    PluginDiscovery::discover(plugin);
++}

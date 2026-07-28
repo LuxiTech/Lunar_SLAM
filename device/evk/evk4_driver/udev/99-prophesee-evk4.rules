@@ -1,0 +1,2 @@
+# Prophesee EVK4 / Cypress FX3 USB 访问权限。
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04b4", ATTR{idProduct}=="00f5", MODE="0666", GROUP="plugdev", TAG+="uaccess"

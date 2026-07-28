@@ -1,0 +1,6 @@
+# add the local Modules directory to the modules path
+set(MetavisionSDK_DIR "${@PROJECT_NAME@_DIR}/../../../opt/openeb_vendor/share/cmake/MetavisionSDK")
+set(MetavisionHAL_DIR "${@PROJECT_NAME@_DIR}/../../../opt/openeb_vendor/share/cmake/MetavisionHAL")
+set(MetavisionPSEEHWLayer_DIR "${@PROJECT_NAME@_DIR}/../../../opt/openeb_vendor/share/cmake/MetavisionPSEEHWLayer")
+
+message(STATUS "Setting MetavisionSDK_DIR to: '${MetavisionSDK_DIR}'")
