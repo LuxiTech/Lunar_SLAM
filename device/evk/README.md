@@ -4,7 +4,8 @@
 
 ```text
 device/evk
-└── evk4_driver
+└── ros2_ws
+    └── evk4_driver
 ```
 
 MetaVision/OpenEB SDK 以及上游 ROS 事件相机依赖不随本仓库上传，使用时按需从官方或上游仓库下载。
@@ -31,4 +32,4 @@ ROS openeb_vendor:
 https://github.com/ros-event-camera/openeb_vendor.git
 ```
 
-建议将这些依赖放在同一个 ROS 2 workspace 的 `src` 路径下，再与 `evk4_driver` 一起构建。
+建议将这些依赖放在同一个 ROS 2 workspace 中，再与 `device/evk/ros2_ws/evk4_driver` 一起构建。
