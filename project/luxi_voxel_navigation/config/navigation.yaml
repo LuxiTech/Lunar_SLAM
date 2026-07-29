@@ -1,0 +1,14 @@
+cloud_to_octomap:
+  ros__parameters:
+    resolution: 0.10
+
+octomap_astar_planner:
+  ros__parameters:
+    robot_radius: 0.18
+    obstacle_min_z: -0.10
+    obstacle_max_z: 1.00
+
+path_follower:
+  ros__parameters:
+    max_linear_speed: 0.10
+    max_angular_speed: 0.35

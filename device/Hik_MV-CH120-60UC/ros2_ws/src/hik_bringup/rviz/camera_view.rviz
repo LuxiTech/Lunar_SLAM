@@ -1,0 +1,42 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Left Camera
+      Normalize Range: false
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Transport Override: raw
+        Value: /left_camera/image
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Right Camera
+      Normalize Range: false
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Transport Override: raw
+        Value: /right_camera/image
+  Enabled: true
+  Global Options:
+    Background Color: 32; 32; 32
+    Fixed Frame: map
+    Frame Rate: 25
+  Name: root
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+Window Geometry:
+  Height: 900
+  Width: 1600
+  X: 50
+  Y: 50

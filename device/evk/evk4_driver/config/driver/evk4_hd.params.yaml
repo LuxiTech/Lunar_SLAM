@@ -1,0 +1,54 @@
+/**:
+  ros__parameters:
+    # Prophesee EVK4 HD / IMX636 默认配置。
+    encoding: evt3
+    frame_id: event_camera
+    serial: ""
+    settings: ""
+    bias_file: ""
+    camerainfo_url: ""
+
+    # 当前 EVK4（IMX636）的室内实测值。提高小幅亮度变化的触发阈值，
+    # 将静止背景带宽从约 24 MB/s 降到约 0.6 MB/s，同时保留运动边缘。
+    bias_diff_on: 20
+    bias_diff_off: 20
+
+    # 数据吞吐与 ROS 发布。
+    use_multithreading: false
+    send_queue_size: 1000
+    event_message_time_threshold: 0.001
+    event_message_size_threshold: 1000000
+    statistics_print_interval: 2.0
+
+    # Gen4 事件率控制。SLAM 前期验证建议保持关闭，避免影响原始事件分布。
+    erc_mode: disabled
+    erc_rate: 100000000
+
+    # 室内灯光常见 100 Hz 周期波动。默认关闭，按需由 launch 开启。
+    anti_flicker: false
+    anti_flicker_low_frequency: 90
+    anti_flicker_high_frequency: 110
+
+    # EVK4 硬件触发输入。未接外部触发线时可在 launch 中设置为 disabled。
+    trigger_in_mode: external
+    trigger_out_mode: disabled
+
+    # 可选事件滤波。默认关闭，便于给 SLAM 管线输入原始事件流。
+    trail_filter: false
+    trail_filter_type: stc_cut_trail
+    trail_filter_threshold: 5000
+
+    # EVK4 / Prophesee 插件触发引脚映射。
+    prophesee_pin_config:
+      evc4a_plugin_imx636:
+        external: 0
+        loopback: 6
+      hal_plugin_gen4_fx3:
+        external: 1
+        loopback: 6
+      hal_plugin_gen41_evk2:
+        external: 1
+        loopback: 3
+      hal_plugin_gen4_evk2:
+        external: 1
+        loopback: 3

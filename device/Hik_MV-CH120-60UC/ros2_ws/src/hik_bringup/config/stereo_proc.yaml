@@ -1,0 +1,37 @@
+stereo_depth_node:
+  ros__parameters:
+    # Topics consumed by the depth node
+    left_image_topic: /left_camera/image
+    right_image_topic: /right_camera/image
+    left_info_topic: /left_camera/camera_info
+    right_info_topic: /right_camera/camera_info
+    # Empty means use /left_camera/image and /right_camera/image directly.
+    # This preserves color for RViz RGB images and RGB point clouds. The packed
+    # /stereo_camera/image_pair_mono topic is grayscale-only.
+    stereo_pair_topic: ''
+
+    # Stereo matching parameters (tune these first for better depth quality)
+    # Use the right projection matrix to derive baseline automatically.
+    # The current calibration gives about 0.100523 m.
+    baseline_m: 0.0
+    max_disparity: 128
+    block_size: 9
+    pre_filter_size: 9
+    pre_filter_cap: 31
+    uniqueness_ratio: 20
+    speckle_size: 220
+    speckle_range: 3
+    disp12_max_diff: 1
+    median_blur_size: 3
+    texture_filter_min_gradient: 4.0
+    depth_edge_filter_max_delta_m: 0.10
+    depth_neighbor_filter_min_count: 3
+    depth_neighbor_filter_max_delta_m: 0.07
+
+    rectify_images: true
+    # 0.5 processes 1024x750 instead of 2048x1500 for much higher throughput.
+    # Use 0.75 for more detail, or 1.0 for full-resolution accuracy.
+    processing_scale: 0.5
+    point_cloud_step: 3
+    min_depth_m: 0.45
+    max_depth_m: 4.5

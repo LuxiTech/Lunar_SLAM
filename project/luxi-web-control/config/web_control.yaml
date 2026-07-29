@@ -1,0 +1,54 @@
+web_control:
+  ros__parameters:
+    # Standard output topic. Remap or change this for any compatible robot.
+    cmd_vel_topic: /cmd_vel
+
+    # HTTP server. Use 127.0.0.1 if the page must not be exposed to the LAN.
+    bind_address: 0.0.0.0
+    http_port: 8080
+    auto_stop_existing_web_control: true
+
+    # A held web control is refreshed at 10 Hz; output is published at 20 Hz.
+    publish_rate: 20.0
+    command_timeout: 0.6
+
+    # Server-side safety limits, independent of browser slider values.
+    max_linear_x: 0.25
+    max_linear_y: 0.0
+    max_angular_z: 0.8
+    enable_output: true
+
+    # The web node can start/stop the project's RTAB-Map launch it owns.
+    # It sources the D435i overlay and the project workspace before launching.
+    enable_mapping_control: true
+    mapping_launch_package: luxi_rtab_map
+    mapping_launch_file: rgbd_mapping.launch.py
+    # D435i driver uses Cyclone DDS; /cmd_vel stays on Fast DDS in the web node.
+    mapping_rmw_implementation: rmw_cyclonedds_cpp
+
+    # Map pairs are discovered as rtab_maps/mapNNN.db and
+    # octo_maps/mapNNN_octomap/mapNNN.bt. Loading also reads the saved
+    # colored PLY and occupied voxels for immediate browser display. It never
+    # enables the path follower by itself.
+    enable_navigation_control: true
+    navigation_launch_package: luxi_voxel_navigation
+    navigation_launch_file: saved_map_navigation.launch.py
+    navigation_rmw_implementation: rmw_cyclonedds_cpp
+    maps_root: /home/lunar/project/lunar_slam/maps
+    # Selecting a database without exported layers runs tools/export_rtabmap_octomap.sh.
+    # The database must already be saved; this limits the one-shot export duration.
+    map_conversion_timeout: 300.0
+    navigation_goal_topic: /navigation/goal_pose
+    navigation_marker_topic: /navigation/occupied_voxels
+    navigation_path_topic: /navigation/planned_path
+    # Goal selection is disabled until RTAB-Map publishes a confident pose.
+    navigation_localization_pose_topic: /rtabmap/localization_pose
+    navigation_localization_max_variance: 100.0
+    navigation_localization_timeout: 3.0
+    max_voxel_points: 12000
+
+    # Read-only RGB and sparse RTAB-Map cloud previews for the web page.
+    enable_preview: true
+    rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
+    cloud_preview_topic: /rtabmap/cloud_map
+    max_cloud_points: 1800

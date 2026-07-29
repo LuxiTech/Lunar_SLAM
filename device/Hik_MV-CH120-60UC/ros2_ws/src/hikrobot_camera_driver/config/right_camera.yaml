@@ -1,0 +1,26 @@
+image_width: 2048
+image_height: 1500
+camera_name: mvch120_right
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [ 914.76478,    0.     , 1010.50268,
+            0.     ,  914.57491,  766.2696 ,
+            0.     ,    0.     ,    1.     ]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [-0.108080, 0.035668, -0.001201, -0.000316, 0.000000]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1., 0., 0.,
+         0., 1., 0.,
+         0., 0., 1.]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [ 857.87429,    0.     , 1010.85565,    0.     ,
+            0.     ,  859.14577,  764.34927,    0.     ,
+            0.     ,    0.     ,    1.     ,    0.     ]

@@ -1,0 +1,171 @@
+# RTAB-Map parameters for the calibrated Hikrobot stereo + H30 IMU rig.
+# The input images are already rectified and downscaled to 1024x750 by
+# stereo_depth_node. Keep the camera and IMU hardware settings in their own
+# existing configuration files.
+
+stereo_depth_node:
+  ros__parameters:
+    left_image_topic: /left_camera/image
+    right_image_topic: /right_camera/image
+    left_info_topic: /left_camera/camera_info
+    right_info_topic: /right_camera/camera_info
+    # Empty means use /left_camera/image and /right_camera/image directly.
+    # This keeps the color information for RGB point clouds. The packed
+    # /stereo_camera/image_pair_mono topic is faster, but it is grayscale-only.
+    stereo_pair_topic: ''
+    rectify_images: true
+    processing_scale: 0.5
+    point_cloud_step: 3
+    baseline_m: 0.0
+    # 0.5 m is near the stereo pair's useful lower range at 1024x750.
+    # Use 128 disparities so near objects are not clipped, then filter very
+    # close/noisy points before they enter RTAB-Map.
+    max_disparity: 128
+    block_size: 9
+    uniqueness_ratio: 20
+    speckle_size: 220
+    speckle_range: 3
+    disp12_max_diff: 1
+    median_blur_size: 3
+    texture_filter_min_gradient: 4.0
+    depth_edge_filter_max_delta_m: 0.10
+    depth_neighbor_filter_min_count: 3
+    depth_neighbor_filter_max_delta_m: 0.07
+    min_depth_m: 0.45
+    max_depth_m: 4.5
+
+rgb_cloud_accumulator_node:
+  ros__parameters:
+    input_cloud_topic: /stereo/points
+    output_cloud_topic: /luxi/cloud_map_accumulated
+    fixed_frame: odom
+    voxel_size: 0.025
+    min_sensor_range_m: 0.45
+    max_sensor_range_m: 4.5
+    stable_min_observations: 2
+    input_stride: 1
+    publish_every_n_clouds: 1
+    max_voxels: 700000
+
+rgbd_odometry:
+  ros__parameters:
+    frame_id: base_link
+    odom_frame_id: odom
+    publish_tf: false
+    # H30 is currently configured in IMU mode: orientation is intentionally
+    # absent (all-zero quaternion). Do not feed that invalid orientation to
+    # RTAB-Map's visual odometry. The calibrated IMU TF and driver remain
+    # available, and these can be switched to true after a valid orientation
+    # source/estimator is enabled.
+    subscribe_imu: false
+    wait_imu_to_init: false
+    always_check_imu_tf: false
+    subscribe_rgbd: true
+    rgbd_cameras: 1
+    # The two cameras are hardware-triggered, but their host-side SDK
+    # timestamps still differ by a few milliseconds. Exact ROS timestamp
+    # synchronization would therefore never invoke RTAB-Map's stereo callback.
+    approx_sync: true
+    approx_sync_max_interval: 0.01
+    # Preserve enough history to absorb bursty DDS delivery from the camera
+    # driver and rectification thread.
+    topic_queue_size: 20
+    sync_queue_size: 20
+    qos: 1
+    qos_camera_info: 1
+    qos_imu: 2
+    # Online SLAM should stay close to real time. RTAB-Map may otherwise chew
+    # through stale frames after a DDS burst and RViz will show large delay.
+    always_process_most_recent_frame: true
+    # Real-time visual odometry setup for a 10 Hz stereo pair. These
+    # parameters intentionally prefer continuous tracking/low latency over
+    # extracting the maximum number of features from every 1024x750 frame.
+    Odom/Strategy: '0'
+    Odom/GuessMotion: 'false'
+    Odom/ResetCountdown: '1'
+    # The 2x2 sampled 1024x750 stream has fewer stereo features than the
+    # original sensor resolution. Keep this low enough to avoid odometry
+    # dropouts in weakly textured indoor scenes; increase it later if drift is
+    # more problematic than tracking continuity.
+    Odom/FillInfoData: 'true'
+    Vis/MinInliers: '8'
+    Vis/MaxFeatures: '600'
+    Vis/FeatureType: '8'
+    Vis/CorType: '1'
+    Vis/Iterations: '100'
+    Vis/BundleAdjustment: '0'
+    Vis/PnPReprojError: '4'
+
+rtabmap:
+  ros__parameters:
+    frame_id: base_link
+    # Consume the /odom message produced by rgbd_odometry. It has the same
+    # timestamp as the RGBD frame, so this avoids waiting for the delayed
+    # odom->camera TF to appear in the TF buffer.
+    odom_frame_id: ''
+    map_frame_id: map
+    publish_tf: true
+    subscribe_stereo: false
+    subscribe_depth: false
+    subscribe_rgbd: true
+    rgbd_cameras: 1
+    subscribe_odom: true
+    # Keep the diagnostic message out of the image synchronizer.
+    subscribe_odom_info: false
+    subscribe_imu: false
+    approx_sync: true
+    approx_sync_max_interval: 0.01
+    topic_queue_size: 20
+    sync_queue_size: 20
+    # The RGBD frame and /odom are approximately synchronized below, therefore
+    # no long TF wait is required in the mapping callback.
+    wait_for_transform: 0.2
+    qos_image: 1
+    qos_camera_info: 1
+    qos_odom: 2
+    qos_imu: 2
+    map_always_update: true
+    # Dense RGB cloud visualization. The local occupancy grid already filters
+    # and downsamples depth; keeping the assembled cloud unvoxelized preserves
+    # wall/object contours for RViz.
+    cloud_output_voxelized: false
+    # Start a new mapping session by default. The launch file stores the DB
+    # below ~/.ros; use localization mode only with a deliberately saved DB.
+    database_path: ~/.ros/luxi_stereo_rtabmap.db
+    delete_db_on_start: true
+    Mem/IncrementalMemory: 'true'
+    Mem/InitWMWithAllNodes: 'false'
+    Rtabmap/DetectionRate: '4'
+    Rtabmap/TimeThr: '0'
+    RGBD/LinearUpdate: '0.02'
+    RGBD/AngularUpdate: '0.03'
+    RGBD/OptimizeFromGraphEnd: 'false'
+    Vis/MinInliers: '8'
+    Vis/MaxFeatures: '600'
+    Mem/SaveDepth16Format: 'true'
+    RGBD/CreateOccupancyGrid: 'true'
+    Grid/Sensor: '1'
+    Grid/3D: 'false'
+    Grid/DepthDecimation: '1'
+    Grid/CellSize: '0.03'
+    Grid/NormalsSegmentation: 'false'
+    Grid/MaxGroundHeight: '0.25'
+    Grid/MaxObstacleHeight: '2.0'
+    Grid/RangeMin: '0.45'
+    Grid/RangeMax: '4.5'
+    Grid/NoiseFilteringRadius: '0.08'
+    Grid/NoiseFilteringMinNeighbors: '4'
+
+rtabmap_viz:
+  ros__parameters:
+    frame_id: base_link
+    subscribe_stereo: false
+    subscribe_rgbd: true
+    rgbd_cameras: 1
+    subscribe_odom_info: false
+    approx_sync: true
+    approx_sync_max_interval: 0.01
+    topic_queue_size: 20
+    sync_queue_size: 20
+    qos_image: 1
+    qos_camera_info: 1
