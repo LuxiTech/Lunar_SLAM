@@ -13,6 +13,7 @@
 #include "hikrobot_camera_driver/CameraConfig.hpp"
 
 #include <ament_index_cpp/get_package_share_path.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -78,36 +79,46 @@ public:
             RCLCPP_WARN(get_logger(), "Failed to load right camera info from %s", right_calib_file.c_str());
         }
 
+        auto image_qos = rclcpp::SensorDataQoS().keep_last(2);
+        auto info_qos = rclcpp::QoS(5).reliable().durability_volatile();
+        rviz_preview_scale_ = std::clamp(
+            declare_parameter<double>("rviz_preview_scale", 0.25), 0.1, 1.0);
+
         left_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/left_camera/image",
-            10
+            image_qos
         );
 
 
         right_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/right_camera/image",
-            10
+            image_qos
         );
 
         left_info_pub_ =
         create_publisher<sensor_msgs::msg::CameraInfo>(
             "/left_camera/camera_info",
-            10
+            info_qos
         );
 
 
         right_info_pub_ =
         create_publisher<sensor_msgs::msg::CameraInfo>(
             "/right_camera/camera_info",
-            10
+            info_qos
         );
 
         stereo_pair_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/stereo_camera/image_pair_mono",
-            2
+            image_qos
+        );
+        left_preview_pub_ =
+        create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/left_color",
+            image_qos
         );
 
 
@@ -269,7 +280,25 @@ private:
         );
 
         stereo_pair_pub_->publish(*pair_msg);
+        publishRvizPreview(left, left_msg->header);
 
+    }
+
+    void publishRvizPreview(
+        const cv::Mat &image, const std_msgs::msg::Header &header)
+    {
+        // This stream is only for RViz. Publishing it directly from the
+        // acquisition callback avoids making image rendering wait for stereo
+        // rectification/SGBM/depth filtering.
+        cv::Mat preview;
+        if (rviz_preview_scale_ < 0.999) {
+            cv::resize(image, preview, cv::Size(), rviz_preview_scale_,
+                       rviz_preview_scale_, cv::INTER_AREA);
+        } else {
+            preview = image;
+        }
+        left_preview_pub_->publish(
+            *cv_bridge::CvImage(header, "bgr8", preview).toImageMsg());
     }
 
 
@@ -403,6 +432,12 @@ private:
     rclcpp::Publisher<
         sensor_msgs::msg::Image
     >::SharedPtr stereo_pair_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::Image
+    >::SharedPtr left_preview_pub_;
+
+    double rviz_preview_scale_{0.25};
 
     std::shared_ptr<camera_info_manager::CameraInfoManager> left_info_manager_;
     std::shared_ptr<camera_info_manager::CameraInfoManager> right_info_manager_;

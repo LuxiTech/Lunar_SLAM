@@ -20,3 +20,6 @@ __pycache__/
 # Locally captured RTAB-Map databases and exports; keep maps/README.md tracked.
 /maps/map*.db*
 /maps/map*_export/
+
+# Local third-party source trees are documented by README download links.
+/device/Hik_MV-CH120-60UC/ros2_ws/src/third_party/

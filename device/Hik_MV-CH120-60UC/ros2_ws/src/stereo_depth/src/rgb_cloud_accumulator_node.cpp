@@ -80,7 +80,7 @@ public:
             input_topic_, rclcpp::SensorDataQoS().keep_last(3),
             std::bind(&RgbCloudAccumulatorNode::cloudCallback, this, std::placeholders::_1));
         cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-            output_topic_, rclcpp::QoS(1).reliable().durability_volatile());
+            output_topic_, rclcpp::SensorDataQoS().keep_last(1));
 
         RCLCPP_INFO(
             get_logger(),
@@ -185,6 +185,9 @@ private:
                         static_cast<float>(point.b) * new_weight);
                     if (existing.observations < std::numeric_limits<std::uint16_t>::max()) {
                         ++existing.observations;
+                        if (existing.observations == stable_min_observations_) {
+                            ++stable_voxels_;
+                        }
                     }
                 }
             }
@@ -196,26 +199,37 @@ private:
         }
 
         while (map_.size() > max_voxels_ && !insertion_order_.empty()) {
+            const auto it = map_.find(insertion_order_.front());
+            if (it != map_.end() && it->second.observations >= stable_min_observations_ && stable_voxels_ > 0) {
+                --stable_voxels_;
+            }
             map_.erase(insertion_order_.front());
             insertion_order_.pop_front();
         }
 
         ++cloud_count_;
         if ((cloud_count_ % publish_every_n_clouds_) == 0) {
-            publishMap(msg->header.stamp);
+            publishMap();
         }
 
         RCLCPP_INFO_THROTTLE(
             get_logger(), *get_clock(), 2000,
             "Accumulated cloud: +%zu candidate voxels, stable=%zu total=%zu",
-            accepted, stableVoxelCount(), map_.size());
+            accepted, stable_voxels_, map_.size());
     }
 
-    void publishMap(const builtin_interfaces::msg::Time &stamp)
+    void publishMap()
     {
-        const std::size_t stable_count = stableVoxelCount();
+        const std::size_t stable_count = stable_voxels_;
         sensor_msgs::msg::PointCloud2 cloud;
-        cloud.header.stamp = stamp;
+        // Points were transformed with tf2::TimePointZero (the latest TF), so
+        // stamp the assembled map with the same current time. Using the old
+        // camera timestamp here made RViz search for a historical map->odom
+        // transform that had already left its TF cache, filling the message
+        // filter queue and making visualization appear stalled.
+        const int64_t now_ns = get_clock()->now().nanoseconds();
+        cloud.header.stamp.sec = static_cast<std::int32_t>(now_ns / 1000000000LL);
+        cloud.header.stamp.nanosec = static_cast<std::uint32_t>(now_ns % 1000000000LL);
         cloud.header.frame_id = fixed_frame_;
         cloud.height = 1;
         cloud.width = static_cast<std::uint32_t>(stable_count);
@@ -253,17 +267,6 @@ private:
         cloud_pub_->publish(cloud);
     }
 
-    std::size_t stableVoxelCount() const
-    {
-        std::size_t count = 0;
-        for (const auto &[_, point] : map_) {
-            if (point.observations >= stable_min_observations_) {
-                ++count;
-            }
-        }
-        return count;
-    }
-
     std::string input_topic_;
     std::string output_topic_;
     std::string fixed_frame_;
@@ -275,6 +278,7 @@ private:
     int publish_every_n_clouds_{1};
     std::size_t max_voxels_{700000};
     std::size_t cloud_count_{0};
+    std::size_t stable_voxels_{0};
 
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

@@ -15,7 +15,14 @@ stereo_depth_node:
     stereo_pair_topic: ''
     rectify_images: true
     processing_scale: 0.5
-    point_cloud_step: 3
+    # RViz-only streams: 512x375 at the same rate as the depth node.
+    # Mapping continues to receive the full 1024x750 RGBDImage.
+    preview_scale: 0.5
+    preview_publish_every_n_frames: 1
+    # /stereo/points is used only by the lightweight RGB cloud viewer. RTAB-Map
+    # itself consumes /stereo/rgbd_image, so a coarser debug cloud does not
+    # reduce odometry or mapping quality but avoids flooding RViz/DDS.
+    point_cloud_step: 6
     baseline_m: 0.0
     # 0.5 m is near the stereo pair's useful lower range at 1024x750.
     # Use 128 disparities so near objects are not clipped, then filter very
@@ -39,13 +46,17 @@ rgb_cloud_accumulator_node:
     input_cloud_topic: /stereo/points
     output_cloud_topic: /luxi/cloud_map_accumulated
     fixed_frame: odom
-    voxel_size: 0.025
+    # Keep this visualization-only cloud bounded: publishing a full dense map
+    # at camera rate is the main source of RViz stalls.
+    voxel_size: 0.05
     min_sensor_range_m: 0.45
     max_sensor_range_m: 4.5
     stable_min_observations: 2
     input_stride: 1
+    # Publish each incoming cloud for responsive visualization, but keep the
+    # full accumulated message compact enough to render at camera rate.
     publish_every_n_clouds: 1
-    max_voxels: 700000
+    max_voxels: 25000
 
 rgbd_odometry:
   ros__parameters:
@@ -69,8 +80,8 @@ rgbd_odometry:
     approx_sync_max_interval: 0.01
     # Preserve enough history to absorb bursty DDS delivery from the camera
     # driver and rectification thread.
-    topic_queue_size: 20
-    sync_queue_size: 20
+    topic_queue_size: 8
+    sync_queue_size: 8
     qos: 1
     qos_camera_info: 1
     qos_imu: 2
@@ -115,8 +126,8 @@ rtabmap:
     subscribe_imu: false
     approx_sync: true
     approx_sync_max_interval: 0.01
-    topic_queue_size: 20
-    sync_queue_size: 20
+    topic_queue_size: 8
+    sync_queue_size: 8
     # The RGBD frame and /odom are approximately synchronized below, therefore
     # no long TF wait is required in the mapping callback.
     wait_for_transform: 0.2
@@ -165,7 +176,7 @@ rtabmap_viz:
     subscribe_odom_info: false
     approx_sync: true
     approx_sync_max_interval: 0.01
-    topic_queue_size: 20
-    sync_queue_size: 20
+    topic_queue_size: 8
+    sync_queue_size: 8
     qos_image: 1
     qos_camera_info: 1

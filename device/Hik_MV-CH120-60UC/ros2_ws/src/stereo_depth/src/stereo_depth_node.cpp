@@ -56,6 +56,13 @@ public:
         rectify_images_ = declare_parameter<bool>("rectify_images", true);
         processing_scale_ = std::clamp(
             declare_parameter<double>("processing_scale", 0.5), 0.25, 1.0);
+        // Preview topics are deliberately independent of the RGBD mapping
+        // stream. RViz can render these small images smoothly without adding
+        // a second full-resolution DDS consumer to the camera pipeline.
+        preview_scale_ = std::clamp(
+            declare_parameter<double>("preview_scale", 0.5), 0.1, 1.0);
+        preview_publish_every_n_frames_ = std::max(
+            1, static_cast<int>(declare_parameter<int>("preview_publish_every_n_frames", 2)));
         point_cloud_step_ = std::max(
             1, static_cast<int>(declare_parameter<int>("point_cloud_step", 4)));
         min_depth_m_ = declare_parameter<double>("min_depth_m", 0.2);
@@ -88,7 +95,7 @@ public:
 
         if (use_stereo_pair_) {
             stereo_pair_sub_ = create_subscription<sensor_msgs::msg::Image>(
-                stereo_pair_topic, rclcpp::QoS(2),
+                stereo_pair_topic, sensor_qos,
                 std::bind(&StereoDepthNode::stereoPairCb, this, std::placeholders::_1));
         } else {
             left_image_sub_ = create_subscription<sensor_msgs::msg::Image>(
@@ -105,23 +112,31 @@ public:
             right_info_topic, sensor_qos,
             std::bind(&StereoDepthNode::rightInfoCb, this, std::placeholders::_1));
 
-        disparity_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/disparity", 10);
-        depth_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/depth", 10);
-        point_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/stereo/points", 10);
-        left_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/left/image_rect", 10);
-        right_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/right/image_rect", 10);
+        auto output_sensor_qos = rclcpp::SensorDataQoS().keep_last(2);
+        auto rgbd_qos = rclcpp::QoS(2).reliable().durability_volatile();
+        auto camera_info_qos = rclcpp::QoS(5).reliable().durability_volatile();
+
+        disparity_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/disparity", output_sensor_qos);
+        depth_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/depth", output_sensor_qos);
+        point_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/stereo/points", output_sensor_qos);
+        left_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/left/image_rect", output_sensor_qos);
+        right_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/right/image_rect", output_sensor_qos);
         left_rect_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
-            "/stereo/left/image_rect_color", 10);
+            "/stereo/left/image_rect_color", output_sensor_qos);
         right_rect_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
-            "/stereo/right/image_rect_color", 10);
+            "/stereo/right/image_rect_color", output_sensor_qos);
+        preview_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/left_rectified_color", output_sensor_qos);
+        preview_depth_pub_ = create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/depth_visual", output_sensor_qos);
         // These CameraInfo messages describe the rectified/scaled images above.
         // They are required by standard stereo consumers such as RTAB-Map.
         left_rect_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
-            "/stereo/left/camera_info", 10);
+            "/stereo/left/camera_info", camera_info_qos);
         right_rect_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
-            "/stereo/right/camera_info", 10);
+            "/stereo/right/camera_info", camera_info_qos);
         rgbd_pub_ = create_publisher<rtabmap_msgs::msg::RGBDImage>(
-            "/stereo/rgbd_image", 10);
+            "/stereo/rgbd_image", rgbd_qos);
 
         processing_running_.store(true);
         processing_thread_ = std::thread(&StereoDepthNode::processingLoop, this);
@@ -139,8 +154,8 @@ public:
                     median_blur_size_, texture_filter_min_gradient_,
                     depth_edge_filter_max_delta_m_, depth_neighbor_filter_min_count_,
                     depth_neighbor_filter_max_delta_m_);
-        RCLCPP_INFO(get_logger(), "Performance parameters: processing_scale=%.2f point_cloud_step=%d SGBM_mode=3WAY",
-                    processing_scale_, point_cloud_step_);
+        RCLCPP_INFO(get_logger(), "Performance parameters: processing_scale=%.2f point_cloud_step=%d preview=%.2f/%d SGBM_mode=3WAY",
+                    processing_scale_, point_cloud_step_, preview_scale_, preview_publish_every_n_frames_);
     }
 
     ~StereoDepthNode() override
@@ -437,6 +452,7 @@ private:
             rgbd_pub_->publish(rgbd_msg);
 
             publishPointCloud(depth, left_color, fx, fy, cx, cy, left_header.stamp, frame_id);
+            publishPreview(left_color, depth, left_rect_header);
 
             const int valid_pixels = static_cast<int>(cv::countNonZero(depth > 0));
             const double process_ms = std::chrono::duration<double, std::milli>(
@@ -604,6 +620,39 @@ private:
         point_cloud_pub_->publish(cloud);
     }
 
+    void publishPreview(
+        const cv::Mat &color, const cv::Mat &depth,
+        const std_msgs::msg::Header &header)
+    {
+        ++preview_frame_count_;
+        if ((preview_frame_count_ % preview_publish_every_n_frames_) != 0) {
+            return;
+        }
+
+        cv::Mat preview_color;
+        cv::Mat preview_depth;
+        if (preview_scale_ < 0.999) {
+            cv::resize(color, preview_color, cv::Size(), preview_scale_, preview_scale_, cv::INTER_AREA);
+            cv::resize(depth, preview_depth, cv::Size(), preview_scale_, preview_scale_, cv::INTER_NEAREST);
+        } else {
+            preview_color = color;
+            preview_depth = depth;
+        }
+
+        // Visual-only 8-bit inverse depth.  Invalid pixels remain black;
+        // near valid surfaces are brighter, which is convenient in RViz.
+        cv::Mat depth_visual;
+        const double span = std::max(0.001, max_depth_m_ - min_depth_m_);
+        preview_depth.convertTo(
+            depth_visual, CV_8U, -255.0 / span, 255.0 * max_depth_m_ / span);
+        depth_visual.setTo(0, preview_depth <= 0.0f);
+
+        preview_color_pub_->publish(
+            *cv_bridge::CvImage(header, "bgr8", preview_color).toImageMsg());
+        preview_depth_pub_->publish(
+            *cv_bridge::CvImage(header, "mono8", depth_visual).toImageMsg());
+    }
+
     void filterDepthEdges(cv::Mat &depth) const
     {
         if (depth_edge_filter_max_delta_m_ <= 0.0 || depth.rows < 3 || depth.cols < 3) {
@@ -705,6 +754,8 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_rect_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_rect_color_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_rect_color_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr preview_color_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr preview_depth_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr left_rect_info_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr right_rect_info_pub_;
     rclcpp::Publisher<rtabmap_msgs::msg::RGBDImage>::SharedPtr rgbd_pub_;
@@ -736,6 +787,9 @@ private:
     bool rectify_images_{true};
     bool use_stereo_pair_{false};
     double processing_scale_{0.5};
+    double preview_scale_{0.5};
+    int preview_publish_every_n_frames_{2};
+    std::size_t preview_frame_count_{0};
     int point_cloud_step_{4};
     double min_depth_m_{0.2};
     double max_depth_m_{10.0};
