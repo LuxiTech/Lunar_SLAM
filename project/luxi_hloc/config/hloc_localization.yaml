@@ -1,0 +1,36 @@
+luxi_hloc_localizer:
+  ros__parameters:
+    map_directory: /home/lunar/project/lunar_slam/maps/hloc_maps/map012
+    device: cuda
+    resize_max: 640
+    max_keypoints: 1024
+    cpu_threads: 4
+    top_k: 5
+
+    color_topic: /sensors/rgbd/color/image_raw
+    depth_topic: /sensors/rgbd/depth/image_raw
+    camera_info_topic: /sensors/rgbd/color/camera_info
+    coarse_pose_topic: /luxi_hloc/coarse_pose
+    status_topic: /luxi_hloc/status
+    diagnostics_topic: /luxi_hloc/diagnostics
+    map_frame: map
+    base_frame: base_link
+    query_period: 1.0
+    maximum_sensor_time_difference: 0.05
+    depth_scale_16u: 0.001
+
+    minimum_retrieval_score: 0.05
+    minimum_matches: 30
+    minimum_landmarks: 20
+    minimum_inliers: 15
+    minimum_inlier_ratio: 0.25
+    maximum_reprojection_rmse: 3.0
+    ransac_reprojection_error: 4.0
+    ransac_iterations: 1000
+    ransac_confidence: 0.999
+
+    require_depth_verification: true
+    minimum_depth_verified: 8
+    maximum_median_depth_residual: 0.25
+    minimum_depth: 0.25
+    maximum_depth: 6.0

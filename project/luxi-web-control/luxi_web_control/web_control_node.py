@@ -41,6 +41,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
+from std_msgs.msg import Float32, String
 from visualization_msgs.msg import Marker
 
 
@@ -72,9 +73,10 @@ def _map_id_from_export_path(candidate: Path, octo_directory: Path) -> str:
 
 
 def discover_navigation_maps(maps_root: Path) -> list:
-    """Return saved RTAB-Map/OctoMap pairs grouped by their mapNNN identifier."""
+    """Return saved map layers and optional HLoc indices grouped by mapNNN."""
     rtab_directory = maps_root / "rtab_maps"
     octo_directory = maps_root / "octo_maps"
+    hloc_directory = maps_root / "hloc_maps"
     databases = {
         candidate.stem: candidate.resolve()
         for candidate in rtab_directory.glob("map*.db")
@@ -99,13 +101,22 @@ def discover_navigation_maps(maps_root: Path) -> list:
         database = databases.get(map_id)
         octomap = octomaps.get(map_id)
         cloud = clouds.get(map_id)
+        hloc_map = (hloc_directory / map_id).resolve()
+        hloc_ready = (hloc_map / "metadata.yaml").is_file()
         maps.append({
             "id": map_id,
             "database_path": str(database) if database else None,
             "octomap_path": str(octomap) if octomap else None,
             "cloud_path": str(cloud) if cloud else None,
+            "hloc_map_directory": str(hloc_map) if hloc_ready else None,
             "convertible": database is not None,
             "loadable": database is not None and octomap is not None,
+            "localizable": (
+                database is not None
+                and octomap is not None
+                and cloud is not None
+                and hloc_ready
+            ),
         })
     return maps
 
@@ -207,12 +218,42 @@ def parse_octomap_point_output(output: str) -> Tuple[float, list]:
 
 
 def localization_covariance_ready(covariance: list, maximum: float) -> bool:
-    """Return whether RTAB-Map has supplied a finite, confident map pose."""
+    """Return whether the coarse localizer supplied a finite, confident pose."""
     if len(covariance) < 36 or not math.isfinite(maximum) or maximum <= 0.0:
         return False
     values = (covariance[0], covariance[7], covariance[35])
     return all(math.isfinite(value) and 0.0 <= value <= maximum
                for value in values)
+
+
+def localization_pose_summary(message: PoseWithCovarianceStamped) -> Optional[dict]:
+    """Return a finite map pose in the compact form consumed by the browser."""
+    pose = message.pose.pose
+    values = (
+        pose.position.x, pose.position.y, pose.position.z,
+        pose.orientation.x, pose.orientation.y,
+        pose.orientation.z, pose.orientation.w,
+    )
+    if not all(math.isfinite(value) for value in values):
+        return None
+    quaternion_norm = math.sqrt(sum(value * value for value in values[3:]))
+    if quaternion_norm < 1.0e-6:
+        return None
+    x, y, z, qx, qy, qz, qw = values
+    qx, qy, qz, qw = (
+        value / quaternion_norm for value in (qx, qy, qz, qw)
+    )
+    yaw = math.atan2(
+        2.0 * (qw * qz + qx * qy),
+        1.0 - 2.0 * (qy * qy + qz * qz),
+    )
+    return {
+        "x": round(x, 4),
+        "y": round(y, 4),
+        "z": round(z, 4),
+        "yaw": round(yaw, 5),
+        "yaw_degrees": round(math.degrees(yaw), 2),
+    }
 
 
 def parse_navigation_goal(payload: Dict[str, Any]) -> Tuple[float, float, float]:
@@ -689,7 +730,13 @@ class NavigationController:
         self._stop_requested = False
         self._map_id = ""
 
-    def _command(self, database_path: Path, octomap_path: Path) -> list:
+    def _command(
+        self,
+        database_path: Path,
+        octomap_path: Path,
+        cloud_path: Path,
+        hloc_map_directory: Path,
+    ) -> list:
         source_commands = [
             f"source {shlex.quote(str(self.d435_setup))}",
             f"source {shlex.quote(str(self.workspace_setup))}",
@@ -702,6 +749,8 @@ class NavigationController:
             "ros2", "launch", self.package, self.launch_file,
             f"database_path:={database_path}",
             f"octomap_path:={octomap_path}",
+            f"cloud_path:={cloud_path}",
+            f"hloc_map_directory:={hloc_map_directory}",
             "cmd_vel_topic:=/navigation/cmd_vel",
         ])
         script = "set -e; " + "; ".join(source_commands)
@@ -712,6 +761,8 @@ class NavigationController:
         map_id: str,
         database_path: Path,
         octomap_path: Path,
+        cloud_path: Path,
+        hloc_map_directory: Path,
     ) -> Tuple[bool, str]:
         with self._lock:
             if not self.enabled:
@@ -724,6 +775,8 @@ class NavigationController:
                     self.workspace_setup,
                     database_path,
                     octomap_path,
+                    cloud_path,
+                    hloc_map_directory / "metadata.yaml",
                 )
                 if not path.is_file()
             ]
@@ -740,7 +793,12 @@ class NavigationController:
                         "luxi_web_control =====\n"
                     )
                     self._process = subprocess.Popen(
-                        self._command(database_path, octomap_path),
+                        self._command(
+                            database_path,
+                            octomap_path,
+                            cloud_path,
+                            hloc_map_directory,
+                        ),
                         stdout=log_file, stderr=subprocess.STDOUT,
                         start_new_session=True, env=os.environ.copy())
             except OSError as exc:
@@ -1075,6 +1133,21 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 "navigation": node.navigation_status(),
             })
             return
+        if path == "/api/navigation/localize":
+            map_id = payload.get("map_id")
+            if not isinstance(map_id, str):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "map_id must be a string")
+                return
+            started, message = node.start_navigation_localization(map_id)
+            if not started:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "ok": True,
+                "message": message,
+                "navigation": node.navigation_status(),
+            })
+            return
         if path == "/api/navigation/stop":
             stopped, message = node.stop_navigation()
             if not stopped:
@@ -1144,9 +1217,18 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
         self.declare_parameter(
-            "navigation_localization_pose_topic", "/rtabmap/localization_pose"
+            "navigation_localization_pose_topic", "/luxi_hloc/coarse_pose"
         )
-        self.declare_parameter("navigation_localization_max_variance", 100.0)
+        self.declare_parameter(
+            "navigation_refined_pose_topic", "/luxi_location/pose"
+        )
+        self.declare_parameter(
+            "navigation_refined_fitness_topic", "/luxi_location/fitness"
+        )
+        self.declare_parameter(
+            "navigation_refined_status_topic", "/luxi_location/status"
+        )
+        self.declare_parameter("navigation_localization_max_variance", 0.5)
         self.declare_parameter("navigation_localization_timeout", 3.0)
         self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("enable_preview", True)
@@ -1235,6 +1317,15 @@ class WebControlNode(Node):
         self.navigation_localization_pose_topic = str(
             self.get_parameter("navigation_localization_pose_topic").value
         )
+        self.navigation_refined_pose_topic = str(
+            self.get_parameter("navigation_refined_pose_topic").value
+        )
+        self.navigation_refined_fitness_topic = str(
+            self.get_parameter("navigation_refined_fitness_topic").value
+        )
+        self.navigation_refined_status_topic = str(
+            self.get_parameter("navigation_refined_status_topic").value
+        )
         self.navigation_localization_max_variance = float(
             self.get_parameter("navigation_localization_max_variance").value
         )
@@ -1307,6 +1398,11 @@ class WebControlNode(Node):
         self._localization_ready = False
         self._localization_variance: Optional[float] = None
         self._localization_received_at: Optional[float] = None
+        self._coarse_localization_pose: Optional[dict] = None
+        self._refined_localization_pose: Optional[dict] = None
+        self._refined_localization_received_at: Optional[float] = None
+        self._refined_localization_fitness: Optional[float] = None
+        self._refined_localization_status = ""
         self._navigation_cloud_points = []
         self._navigation_cloud_map_id: Optional[str] = None
         self._navigation_cloud_error = ""
@@ -1350,6 +1446,24 @@ class WebControlNode(Node):
             self.navigation_localization_pose_topic,
             self._on_navigation_localization_pose,
             localization_qos,
+        )
+        self.navigation_refined_pose_subscription = self.create_subscription(
+            PoseWithCovarianceStamped,
+            self.navigation_refined_pose_topic,
+            self._on_navigation_refined_pose,
+            localization_qos,
+        )
+        self.navigation_refined_fitness_subscription = self.create_subscription(
+            Float32,
+            self.navigation_refined_fitness_topic,
+            self._on_navigation_refined_fitness,
+            qos,
+        )
+        self.navigation_refined_status_subscription = self.create_subscription(
+            String,
+            self.navigation_refined_status_topic,
+            self._on_navigation_refined_status,
+            qos,
         )
         if self.preview_enabled:
             image_qos = QoSProfile(
@@ -1509,6 +1623,7 @@ class WebControlNode(Node):
         self, message: PoseWithCovarianceStamped
     ) -> None:
         covariance = list(message.pose.covariance)
+        pose = localization_pose_summary(message)
         values = (
             (covariance[0], covariance[7], covariance[35])
             if len(covariance) >= 36 else ()
@@ -1521,6 +1636,27 @@ class WebControlNode(Node):
                 else None
             )
             self._localization_received_at = time.monotonic()
+            self._coarse_localization_pose = pose
+
+    def _on_navigation_refined_pose(
+        self, message: PoseWithCovarianceStamped
+    ) -> None:
+        pose = localization_pose_summary(message)
+        if pose is None:
+            return
+        with self._navigation_lock:
+            self._refined_localization_pose = pose
+            self._refined_localization_received_at = time.monotonic()
+
+    def _on_navigation_refined_fitness(self, message: Float32) -> None:
+        if not math.isfinite(message.data):
+            return
+        with self._navigation_lock:
+            self._refined_localization_fitness = round(float(message.data), 4)
+
+    def _on_navigation_refined_status(self, message: String) -> None:
+        with self._navigation_lock:
+            self._refined_localization_status = message.data[:300]
 
     def _clear_cloud_preview(self) -> None:
         """Discard map data which belongs to a previous mapping session."""
@@ -1538,6 +1674,11 @@ class WebControlNode(Node):
             self._localization_ready = False
             self._localization_variance = None
             self._localization_received_at = None
+            self._coarse_localization_pose = None
+            self._refined_localization_pose = None
+            self._refined_localization_received_at = None
+            self._refined_localization_fitness = None
+            self._refined_localization_status = ""
             self._navigation_cloud_points = []
             self._navigation_cloud_map_id = None
             self._navigation_cloud_error = ""
@@ -1815,36 +1956,80 @@ class WebControlNode(Node):
             self._clear_navigation_preview()
             cloud_error = self._load_navigation_cloud(map_id, record.get("cloud_path"))
             voxel_error = self._load_navigation_voxels(map_id, record["octomap_path"])
-            started, message = self.navigation.start(
-                map_id,
-                Path(record["database_path"]),
-                Path(record["octomap_path"]),
-            )
             preview_errors = []
             for label, error in (("colored cloud", cloud_error),
                                  ("OctoMap voxels", voxel_error)):
                 if error:
                     preview_errors.append(label + ": " + error)
-            if not started:
-                return True, "map layers loaded; navigation unavailable: " + message + (
-                    "; " + "; ".join(preview_errors) if preview_errors else "")
-            return True, message + (
+            return True, f"map {map_id} layers loaded" + (
                 "; " + "; ".join(preview_errors) if preview_errors else "")
         finally:
             self._navigation_map_operation_lock.release()
 
+    def start_navigation_localization(self, map_id: str) -> Tuple[bool, str]:
+        """Start HLoc coarse localization followed by ICP refinement."""
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            return False, "map_id must use the mapNNN format"
+        record = next(
+            (item for item in self.navigation_maps() if item["id"] == map_id),
+            None,
+        )
+        if record is None:
+            return False, f"map {map_id} does not exist under {self.maps_root}"
+        required = (
+            "database_path",
+            "octomap_path",
+            "cloud_path",
+            "hloc_map_directory",
+        )
+        if any(not record.get(name) for name in required):
+            return False, (
+                f"map {map_id} needs display layers and a built HLoc index first"
+            )
+        with self._navigation_lock:
+            if (
+                self._navigation_cloud_map_id != map_id
+                or self._navigation_voxel_map_id != map_id
+            ):
+                return False, f"load map {map_id} before starting localization"
+            self._localization_ready = False
+            self._localization_variance = None
+            self._localization_received_at = None
+            self._coarse_localization_pose = None
+            self._refined_localization_pose = None
+            self._refined_localization_received_at = None
+            self._refined_localization_fitness = None
+            self._refined_localization_status = ""
+        return self.navigation.start(
+            map_id,
+            Path(record["database_path"]),
+            Path(record["octomap_path"]),
+            Path(record["cloud_path"]),
+            Path(record["hloc_map_directory"]),
+        )
+
     def stop_navigation(self) -> Tuple[bool, str]:
         """Stop localization/planning while retaining the currently loaded map."""
         stopped, message = self.navigation.stop()
+        if stopped:
+            with self._navigation_lock:
+                self._localization_ready = False
+                self._localization_variance = None
+                self._localization_received_at = None
+                self._coarse_localization_pose = None
+                self._refined_localization_pose = None
+                self._refined_localization_received_at = None
+                self._refined_localization_fitness = None
+                self._refined_localization_status = ""
         return stopped, message
 
     def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
-        """Publish a map-frame goal only after RTAB-Map localization is ready."""
+        """Publish a map-frame goal only after HLoc and ICP localization is ready."""
         navigation = self.navigation_status()
         if navigation["state"] != "running":
             return False, "load a map and wait for navigation to start first"
         if not navigation["localization_ready"]:
-            return False, "wait for RTAB-Map localization before selecting a goal"
+            return False, "wait for HLoc and ICP localization before selecting a goal"
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         with self._navigation_lock:
@@ -1862,14 +2047,46 @@ class WebControlNode(Node):
         """Return selected-map navigation state without large preview payloads."""
         status = self.navigation.status()
         with self._navigation_lock:
-            age = None if self._localization_received_at is None else round(
+            coarse_age = None if self._localization_received_at is None else round(
                 time.monotonic() - self._localization_received_at, 2)
-            ready = self._localization_ready and age is not None and (
-                age <= self.navigation_localization_timeout)
-            status["localization_ready"] = (
-                status["state"] == "running" and ready)
+            refined_age = (
+                None if self._refined_localization_received_at is None else round(
+                    time.monotonic() - self._refined_localization_received_at, 2)
+            )
+            coarse_ready = self._localization_ready and coarse_age is not None and (
+                coarse_age <= self.navigation_localization_timeout)
+            refined_ready = (
+                self._refined_localization_pose is not None
+                and refined_age is not None
+                and refined_age <= self.navigation_localization_timeout
+            )
+            running = status["state"] == "running"
+            status["coarse_localization_ready"] = running and coarse_ready
+            status["refined_localization_ready"] = running and refined_ready
+            status["localization_ready"] = running and refined_ready
             status["localization_variance"] = self._localization_variance
-            status["localization_age_seconds"] = age
+            status["localization_age_seconds"] = refined_age
+            status["coarse_localization_age_seconds"] = coarse_age
+            status["localization_fitness"] = self._refined_localization_fitness
+            status["localization_status"] = self._refined_localization_status or None
+            if running and refined_ready:
+                status["localization_stage"] = "localized"
+                status["pose"] = {
+                    **self._refined_localization_pose,
+                    "source": "icp",
+                }
+            elif running and coarse_ready and self._coarse_localization_pose:
+                status["localization_stage"] = "refining"
+                status["pose"] = {
+                    **self._coarse_localization_pose,
+                    "source": "hloc",
+                }
+            elif running:
+                status["localization_stage"] = "searching"
+                status["pose"] = None
+            else:
+                status["localization_stage"] = "stopped"
+                status["pose"] = None
         return status
 
     def status(self) -> Dict[str, Any]:

@@ -18,8 +18,11 @@ __pycache__/
 .DS_Store
 
 # Locally captured RTAB-Map databases and exports; keep maps/README.md tracked.
-/maps/map*.db*
-/maps/map*_export/
+/maps/**
+!/maps/README.md
 
-# Local third-party source trees are documented by README download links.
-/device/Hik_MV-CH120-60UC/ros2_ws/src/third_party/
+# Machine-local third-party runtimes, Python packages, and downloaded models.
+# Source repositories under 3parts/ are managed as Git submodules instead.
+/3parts/hloc_gpu_python/
+/3parts/hloc_python/
+/3parts/hloc_models/

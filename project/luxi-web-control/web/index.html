@@ -157,6 +157,7 @@
           <select id="navigationMapSelect" aria-label="选择已建地图"></select>
         </label>
         <button id="navigationLoadButton" class="mapping-start">重新加载</button>
+        <button id="navigationLocateButton" class="mapping-start" disabled>自动定位</button>
         <button id="navigationStopButton" class="mapping-stop" disabled>停止定位</button>
         <button id="navigationGoalButton" class="goal-select" disabled>选择目标点</button>
       </div>
@@ -165,12 +166,13 @@
         <label><input id="navigationShowCloud" type="checkbox" checked> 彩色建图点云</label>
         <label><input id="navigationShowVoxels" type="checkbox" checked> OctoMap 体素</label>
         <label><input id="navigationShowMappingOrigin" type="checkbox" checked> 建图起点 (0, 0, 0)</label>
+        <label><input id="navigationShowRobot" type="checkbox" checked> 当前定位</label>
       </div>
       <div class="voxel-frame">
         <canvas id="voxelMapCanvas" aria-label="可拖动查看的彩色点云、体素地图和全局路径"></canvas>
         <span id="voxelMapHint" class="preview-overlay">加载地图后显示彩色点云和体素地图；拖动旋转，滚轮缩放</span>
       </div>
-      <p class="navigation-note">选择地图会自动调用离线转换工具生成彩色点云和 OctoMap；已转换地图会直接显示。彩色点为 RTAB-Map 导出的建图结果，青色为 OctoMap 占据体素，黄色为 A* 全局路径，橙色十字为 map 坐标系的建图起点 (0, 0, 0)。拖动可旋转视角，滚轮可缩放；请先点击“选择目标点”，再点击地图发送目标。</p>
+      <p class="navigation-note">选择地图会自动转换并显示彩色点云和 OctoMap。点击“自动定位”后缓慢移动或转动机器人：GPU HLoc 先检索并验证历史关键帧，ICP 再精确配准。紫色箭头为当前机器人位姿；定位完成后可选择目标点规划路径。</p>
     </section>
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -1,7 +1,13 @@
-"""Localize in a selected RTAB-Map database and plan on its saved OctoMap."""
+"""Run HLoc/ICP localization and plan on a selected saved OctoMap."""
+
+import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetEnvironmentVariable,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -9,17 +15,33 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description() -> LaunchDescription:
-    database_path = LaunchConfiguration("database_path")
+    cloud_path = LaunchConfiguration("cloud_path")
+    octomap_library_path = (
+        "/home/lunar/project/lunar_slam/3parts/octomap/install/lib"
+    )
+    library_path = os.pathsep.join(
+        part
+        for part in (octomap_library_path, os.environ.get("LD_LIBRARY_PATH", ""))
+        if part
+    )
     localization_launch = PythonLaunchDescriptionSource([
-        FindPackageShare("luxi_rtab_map"), "/launch/rgbd_localization.launch.py"
+        FindPackageShare("luxi_hloc"), "/launch/hloc_icp_localization.launch.py"
     ])
     return LaunchDescription([
         DeclareLaunchArgument("database_path", default_value=""),
         DeclareLaunchArgument("octomap_path", default_value=""),
+        DeclareLaunchArgument("cloud_path", default_value=""),
+        DeclareLaunchArgument("hloc_map_directory", default_value=""),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/navigation/cmd_vel"),
+        SetEnvironmentVariable("LD_LIBRARY_PATH", library_path),
         IncludeLaunchDescription(
             localization_launch,
-            launch_arguments={"database_path": database_path, "rviz": "false"}.items()),
+            launch_arguments={
+                "map_directory": LaunchConfiguration("hloc_map_directory"),
+                "cloud_path": cloud_path,
+                "device": "cuda",
+                "icp_publish_tf": "true",
+            }.items()),
         Node(
             package="luxi_voxel_navigation",
             executable="octomap_file_loader_node",

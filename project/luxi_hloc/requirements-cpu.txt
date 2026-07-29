@@ -1,0 +1,7 @@
+h5py==3.10.0
+kornia==0.7.3
+numpy==1.23.5
+pillow==12.3.0
+torch==2.4.0
+torchvision==0.19.0
+tqdm==4.66.5

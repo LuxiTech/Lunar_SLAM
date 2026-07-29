@@ -21,6 +21,7 @@ import pytest
 
 from pathlib import Path
 
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from sensor_msgs.msg import PointCloud2, PointField
 
 from luxi_web_control.web_control_node import discover_navigation_maps
@@ -29,7 +30,9 @@ from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import MappingController
 from luxi_web_control.web_control_node import is_managed_web_control_command
 from luxi_web_control.web_control_node import localization_covariance_ready
+from luxi_web_control.web_control_node import localization_pose_summary
 from luxi_web_control.web_control_node import make_access_urls
+from luxi_web_control.web_control_node import NavigationController
 from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
 from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
@@ -112,6 +115,39 @@ def test_mapping_status_extracts_error_from_launch_log(tmp_path):
     )
 
 
+def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
+    setup = Path(tmp_path / "setup.bash")
+    database = Path(tmp_path / "map.db")
+    octomap = Path(tmp_path / "map.bt")
+    cloud = Path(tmp_path / "map_cloud.ply")
+    hloc_map = Path(tmp_path / "hloc_map")
+    hloc_map.mkdir()
+    (hloc_map / "metadata.yaml").touch()
+    for path in (setup, database, octomap):
+        path.touch()
+    controller = NavigationController(
+        enabled=True,
+        package="luxi_voxel_navigation",
+        launch_file="saved_map_navigation.launch.py",
+        rmw_implementation="rmw_cyclonedds_cpp",
+        d435_setup=setup,
+        workspace_setup=setup,
+        octomap_library_path=Path(tmp_path),
+        log_path=Path(tmp_path / "navigation.log"),
+    )
+
+    started, message = controller.start(
+        "map012", database, octomap, cloud, hloc_map
+    )
+    assert not started
+    assert str(cloud) in message
+
+    cloud.touch()
+    command = controller._command(database, octomap, cloud, hloc_map)
+    assert f"cloud_path:={cloud}" in command[-1]
+    assert f"hloc_map_directory:={hloc_map}" in command[-1]
+
+
 def test_sparse_cloud_extracts_finite_xyzrgb_points():
     cloud = PointCloud2()
     cloud.width = 3
@@ -144,6 +180,11 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
     (tmp_path / "octo_maps" / "map011_octomap").mkdir(parents=True)
     (tmp_path / "rtab_maps" / "map011.db").write_bytes(b"database")
     (tmp_path / "rtab_maps" / "map012.db").write_bytes(b"database")
+    (tmp_path / "hloc_maps" / "map011").mkdir(parents=True)
+    (tmp_path / "hloc_maps" / "map011" / "metadata.yaml").write_text(
+        "schema_version: 1\n",
+        encoding="utf-8",
+    )
     (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").write_bytes(b"octomap")
     cloud_path = tmp_path / "octo_maps" / "map011_octomap" / "map011_cloud.ply"
     cloud_path.write_text(
@@ -162,16 +203,22 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
                 (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").resolve()
             ),
             "cloud_path": str(cloud_path.resolve()),
+            "hloc_map_directory": str(
+                (tmp_path / "hloc_maps" / "map011").resolve()
+            ),
             "convertible": True,
             "loadable": True,
+            "localizable": True,
         },
         {
             "id": "map012",
             "database_path": str((tmp_path / "rtab_maps" / "map012.db").resolve()),
             "octomap_path": None,
             "cloud_path": None,
+            "hloc_map_directory": None,
             "convertible": True,
             "loadable": False,
+            "localizable": False,
         },
     ]
 
@@ -210,6 +257,28 @@ def test_localization_requires_confident_xyz_yaw_covariance():
 
     covariance[35] = 9999.0
     assert not localization_covariance_ready(covariance, 10.0)
+
+
+def test_localization_pose_summary_returns_planar_heading():
+    message = PoseWithCovarianceStamped()
+    message.pose.pose.position.x = 1.25
+    message.pose.pose.position.y = -0.5
+    message.pose.pose.orientation.z = math.sin(math.pi / 4.0)
+    message.pose.pose.orientation.w = math.cos(math.pi / 4.0)
+
+    assert localization_pose_summary(message) == {
+        "x": 1.25,
+        "y": -0.5,
+        "z": 0.0,
+        "yaw": round(math.pi / 2.0, 5),
+        "yaw_degrees": 90.0,
+    }
+
+
+def test_localization_pose_summary_rejects_invalid_quaternion():
+    message = PoseWithCovarianceStamped()
+    message.pose.pose.orientation.w = 0.0
+    assert localization_pose_summary(message) is None
 
 
 @pytest.mark.parametrize("payload", [
