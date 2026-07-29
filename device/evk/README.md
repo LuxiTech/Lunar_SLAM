@@ -33,3 +33,7 @@ https://github.com/ros-event-camera/openeb_vendor.git
 ```
 
 建议将这些依赖放在同一个 ROS 2 workspace 中，再与 `device/evk/ros2_ws/evk4_driver` 一起构建。
+
+当前 Ubuntu 22.04 / ROS 2 Humble 的准备、构建和启动命令见
+[`ros2_ws/README_humble.md`](ros2_ws/README_humble.md)。旧的 Lyrical 本地
+vendor 目录不能直接复用。

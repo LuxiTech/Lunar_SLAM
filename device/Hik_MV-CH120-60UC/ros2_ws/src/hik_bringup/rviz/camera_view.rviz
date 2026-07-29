@@ -12,9 +12,9 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Transport Override: raw
-        Value: /left_camera/image
+        Reliability Policy: Best Effort
+        Transport Override: compressed
+        Value: /stereo/preview/left_color
     - Class: rviz_default_plugins/Image
       Enabled: true
       Name: Right Camera
@@ -23,9 +23,9 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Transport Override: raw
-        Value: /right_camera/image
+        Reliability Policy: Best Effort
+        Transport Override: compressed
+        Value: /stereo/preview/right_color
   Enabled: true
   Global Options:
     Background Color: 32; 32; 32

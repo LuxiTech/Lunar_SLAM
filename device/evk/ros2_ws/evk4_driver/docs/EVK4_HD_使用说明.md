@@ -1,6 +1,11 @@
 # Prophesee EVK4 HD 使用说明
 
-本文档面向当前工作空间：
+> 注意：本文件保留了旧工作站的功能说明。Ubuntu 22.04 / ROS 2 Humble 的
+> 实际准备、构建和启动命令以
+> [`../../README_humble.md`](../../README_humble.md) 为准；不要执行本文中
+> `/home/changxin`、Lyrical 或 `.local_ros` 的历史命令。
+
+本文档最初面向的工作空间：
 
 ```bash
 /home/changxin/Ultimate SLAM

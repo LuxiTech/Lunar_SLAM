@@ -2,8 +2,9 @@
 
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
+#include "sensor_msgs/msg/compressed_image.hpp"
 
-#include "cv_bridge/cv_bridge.hpp"
+#include "cv_bridge/cv_bridge.h"
 
 #include "opencv2/opencv.hpp"
 
@@ -12,11 +13,12 @@
 #include "hikrobot_camera_driver/StereoCamera.hpp"
 #include "hikrobot_camera_driver/CameraConfig.hpp"
 
-#include <ament_index_cpp/get_package_share_path.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 class StereoCameraNode : public rclcpp::Node
 {
@@ -28,9 +30,9 @@ public:
     Node("stereo_node")
     {
 
-        const std::string default_config = (
-            ament_index_cpp::get_package_share_path("hikrobot_camera_driver") /
-            "config/stereo_camera.xml").string();
+        const std::string package_share =
+            ament_index_cpp::get_package_share_directory("hikrobot_camera_driver");
+        const std::string default_config = package_share + "/config/stereo_camera.xml";
         const std::string config_file = declare_parameter<std::string>("config_file", default_config);
         StereoCameraConfig config;
         std::string config_error;
@@ -50,26 +52,18 @@ public:
 
         const std::string left_calib_file = declare_parameter<std::string>(
             "left_camera_info_file",
-            (ament_index_cpp::get_package_share_path("hikrobot_camera_driver") / "config/stereo_left.yaml").string());
+            package_share + "/config/stereo_left.yaml");
         const std::string right_calib_file = declare_parameter<std::string>(
             "right_camera_info_file",
-            (ament_index_cpp::get_package_share_path("hikrobot_camera_driver") / "config/stereo_right.yaml").string());
+            package_share + "/config/stereo_right.yaml");
 
         left_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(
-            this->get_node_base_interface(),
-            this->get_node_services_interface(),
-            this->get_node_logging_interface(),
+            this,
             "mvch120_stereo/left",
-            "",
-            rclcpp::SystemDefaultsQoS(),
             "");
         right_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(
-            this->get_node_base_interface(),
-            this->get_node_services_interface(),
-            this->get_node_logging_interface(),
+            this,
             "mvch120_stereo/right",
-            "",
-            rclcpp::SystemDefaultsQoS(),
             "");
 
         if (!left_info_manager_->loadCameraInfo("file://" + left_calib_file)) {
@@ -118,6 +112,21 @@ public:
         left_preview_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/stereo/preview/left_color",
+            image_qos
+        );
+        right_preview_pub_ =
+        create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/right_color",
+            image_qos
+        );
+        left_preview_compressed_pub_ =
+        create_publisher<sensor_msgs::msg::CompressedImage>(
+            "/stereo/preview/left_color/compressed",
+            image_qos
+        );
+        right_preview_compressed_pub_ =
+        create_publisher<sensor_msgs::msg::CompressedImage>(
+            "/stereo/preview/right_color/compressed",
             image_qos
         );
 
@@ -280,25 +289,50 @@ private:
         );
 
         stereo_pair_pub_->publish(*pair_msg);
-        publishRvizPreview(left, left_msg->header);
+        publishRvizPreviews(left, right, left_msg->header);
 
     }
 
-    void publishRvizPreview(
-        const cv::Mat &image, const std_msgs::msg::Header &header)
+    void publishRvizPreviews(
+        const cv::Mat &left, const cv::Mat &right,
+        const std_msgs::msg::Header &header)
     {
-        // This stream is only for RViz. Publishing it directly from the
-        // acquisition callback avoids making image rendering wait for stereo
-        // rectification/SGBM/depth filtering.
-        cv::Mat preview;
+        // These streams are only for remote RViz.  Keep full-resolution
+        // images local for stereo depth, while sending compact previews over
+        // Wi-Fi so the display does not build up multi-second DDS queues.
+        cv::Mat left_preview;
+        cv::Mat right_preview;
         if (rviz_preview_scale_ < 0.999) {
-            cv::resize(image, preview, cv::Size(), rviz_preview_scale_,
+            cv::resize(left, left_preview, cv::Size(), rviz_preview_scale_,
+                       rviz_preview_scale_, cv::INTER_AREA);
+            cv::resize(right, right_preview, cv::Size(), rviz_preview_scale_,
                        rviz_preview_scale_, cv::INTER_AREA);
         } else {
-            preview = image;
+            left_preview = left;
+            right_preview = right;
         }
         left_preview_pub_->publish(
-            *cv_bridge::CvImage(header, "bgr8", preview).toImageMsg());
+            *cv_bridge::CvImage(header, "bgr8", left_preview).toImageMsg());
+        right_preview_pub_->publish(
+            *cv_bridge::CvImage(header, "bgr8", right_preview).toImageMsg());
+
+        const std::vector<int> jpeg_parameters{cv::IMWRITE_JPEG_QUALITY, 80};
+        std::vector<uchar> left_jpeg;
+        std::vector<uchar> right_jpeg;
+        cv::imencode(".jpg", left_preview, left_jpeg, jpeg_parameters);
+        cv::imencode(".jpg", right_preview, right_jpeg, jpeg_parameters);
+
+        auto left_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
+        left_compressed->header = header;
+        left_compressed->format = "bgr8; jpeg compressed bgr8";
+        left_compressed->data = std::move(left_jpeg);
+        left_preview_compressed_pub_->publish(std::move(left_compressed));
+
+        auto right_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
+        right_compressed->header = header;
+        right_compressed->format = "bgr8; jpeg compressed bgr8";
+        right_compressed->data = std::move(right_jpeg);
+        right_preview_compressed_pub_->publish(std::move(right_compressed));
     }
 
 
@@ -436,6 +470,18 @@ private:
     rclcpp::Publisher<
         sensor_msgs::msg::Image
     >::SharedPtr left_preview_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::Image
+    >::SharedPtr right_preview_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::CompressedImage
+    >::SharedPtr left_preview_compressed_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::CompressedImage
+    >::SharedPtr right_preview_compressed_pub_;
 
     double rviz_preview_scale_{0.25};
 

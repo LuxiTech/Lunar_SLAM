@@ -24,11 +24,6 @@ add_executable(rgb_cloud_accumulator_node src/rgb_cloud_accumulator_node.cpp)
 
 target_include_directories(stereo_depth_node PRIVATE
   ${OpenCV_INCLUDE_DIRS}
-  /opt/ros/lyrical/include
-  /opt/ros/lyrical/include/rclcpp
-  /opt/ros/lyrical/include/sensor_msgs
-  /opt/ros/lyrical/include/std_msgs
-  /opt/ros/lyrical/include/cv_bridge
 )
 
 target_link_libraries(stereo_depth_node
@@ -39,15 +34,21 @@ target_link_libraries(stereo_depth_node
   pthread
 )
 
+ament_target_dependencies(stereo_depth_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+  cv_bridge
+  rtabmap_msgs
+  ament_index_cpp
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+)
+
 target_include_directories(rgb_cloud_accumulator_node PRIVATE
-  /opt/ros/lyrical/include
-  /opt/ros/lyrical/include/rclcpp
-  /opt/ros/lyrical/include/sensor_msgs
-  /opt/ros/lyrical/include/geometry_msgs
-  /opt/ros/lyrical/include/nav_msgs
-  /opt/ros/lyrical/include/tf2
-  /opt/ros/lyrical/include/tf2_geometry_msgs
-  /opt/ros/lyrical/include/tf2_ros
 )
 
 target_link_libraries(rgb_cloud_accumulator_node
@@ -57,6 +58,16 @@ target_link_libraries(rgb_cloud_accumulator_node
   tf2_ros::tf2_ros
   tf2_geometry_msgs::tf2_geometry_msgs
   pthread
+)
+
+ament_target_dependencies(rgb_cloud_accumulator_node
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
 )
 
 install(TARGETS

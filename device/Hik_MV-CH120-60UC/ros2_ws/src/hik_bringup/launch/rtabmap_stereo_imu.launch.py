@@ -20,14 +20,6 @@ def generate_launch_description():
     use_status_monitor = LaunchConfiguration('use_status_monitor')
     database_path = LaunchConfiguration('database_path')
     delete_db_on_start = LaunchConfiguration('delete_db_on_start')
-    # MVS exports an older libusb in LD_LIBRARY_PATH. System PCL (used by
-    # RTAB-Map) requires libusb_set_option, which only exists in the system
-    # libusb. Apply this only to RTAB-Map processes: the Hikrobot SDK keeps
-    # using its own runtime libraries.
-    rtabmap_environment = {
-        'LD_PRELOAD': '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0',
-    }
-
     rgbd_remappings = [
         ('rgbd_image', '/stereo/rgbd_image'),
     ]
@@ -97,7 +89,7 @@ def generate_launch_description():
         Node(
             package='rtabmap_odom', executable='rgbd_odometry',
             name='rgbd_odometry', output='screen', parameters=[slam_params],
-            remappings=rgbd_remappings, additional_env=rtabmap_environment),
+            remappings=rgbd_remappings),
         Node(
             package='hik_bringup', executable='odom_tf_republisher.py',
             name='odom_tf_republisher', output='screen'),
@@ -111,7 +103,7 @@ def generate_launch_description():
                 'database_path': database_path,
                 'delete_db_on_start': delete_db_on_start,
             }],
-            remappings=rtabmap_remappings, additional_env=rtabmap_environment),
+            remappings=rtabmap_remappings),
         Node(
             package='hik_bringup', executable='rtabmap_status.py',
             name='rtabmap_status', output='screen',
@@ -119,5 +111,5 @@ def generate_launch_description():
         Node(
             package='rtabmap_viz', executable='rtabmap_viz', name='rtabmap_viz',
             output='screen', parameters=[slam_params], remappings=rgbd_remappings,
-            condition=IfCondition(use_rtabmap_viz), additional_env=rtabmap_environment),
+            condition=IfCondition(use_rtabmap_viz)),
     ])

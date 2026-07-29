@@ -6,6 +6,7 @@ must be supplied to the later VIO/fusion package.
 """
 
 import os
+import platform
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -21,6 +22,11 @@ def generate_launch_description():
     default_imu_params = os.path.join(bringup_share, 'config', 'h30_imu.yaml')
     camera_params = LaunchConfiguration('camera_params')
     imu_params = LaunchConfiguration('imu_params')
+    mvs_root = os.environ.get('MVS_ROOT', '/opt/MVS')
+    mvs_arch = 'aarch64' if platform.machine() in ('aarch64', 'arm64') else '64'
+    mvs_environment = {
+        'LD_LIBRARY_PATH': os.path.join(mvs_root, 'lib', mvs_arch) + os.pathsep + os.environ.get('LD_LIBRARY_PATH', ''),
+    }
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -31,7 +37,8 @@ def generate_launch_description():
             description='Path to WheelTec H30 IMU parameter YAML file'),
         Node(
             package='hikrobot_camera_driver', executable='stereo_node',
-            name='stereo_node', output='screen', parameters=[camera_params]),
+            name='stereo_node', output='screen', parameters=[camera_params],
+            additional_env=mvs_environment),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(bringup_share, 'launch', 'h30_imu.launch.py')),

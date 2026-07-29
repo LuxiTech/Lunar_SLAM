@@ -41,9 +41,9 @@ Visualization Manager:
         Depth: 10
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Transport Override: raw
-        Value: /left_camera/image
+        Reliability Policy: Best Effort
+        Transport Override: compressed
+        Value: /stereo/preview/left_color
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -56,9 +56,9 @@ Visualization Manager:
         Depth: 10
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Transport Override: raw
-        Value: /right_camera/image
+        Reliability Policy: Best Effort
+        Transport Override: compressed
+        Value: /stereo/preview/right_color
       Value: true
   Enabled: true
   Global Options:
