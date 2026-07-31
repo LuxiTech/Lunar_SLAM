@@ -1,5 +1,6 @@
 #include "luxi_location/depth_projection.hpp"
 #include "luxi_location/icp_localizer.hpp"
+#include "luxi_location/localization_supervisor.hpp"
 
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -11,6 +12,7 @@
 #include <sensor_msgs/msg/point_field.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 #include <tf2/exceptions.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
@@ -27,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -157,6 +160,11 @@ public:
     declare_parameter("maximum_yaw_correction_deg", 20.0);
     declare_parameter("initial_maximum_translation_correction", 1.50);
     declare_parameter("initial_maximum_yaw_correction_deg", 45.0);
+    declare_parameter("hloc_consistent_pose_count", 3);
+    declare_parameter("hloc_maximum_translation_difference", 0.50);
+    declare_parameter("hloc_maximum_yaw_difference_deg", 20.0);
+    declare_parameter("icp_failures_before_relocalization", 5);
+    declare_parameter("hloc_enable_service", "/luxi_hloc_localizer/enable");
 
     map_frame_ = get_parameter("map_frame").as_string();
     base_frame_ = get_parameter("base_frame").as_string();
@@ -197,6 +205,20 @@ public:
       get_parameter("initial_maximum_yaw_correction_deg").as_double() * M_PI / 180.0;
     localizer_ = std::make_unique<IcpLocalizer>(parameters);
 
+    LocalizationSupervisorParameters supervisor_parameters;
+    supervisor_parameters.consistent_pose_count =
+      get_parameter("hloc_consistent_pose_count").as_int();
+    supervisor_parameters.maximum_translation_difference =
+      get_parameter("hloc_maximum_translation_difference").as_double();
+    supervisor_parameters.maximum_yaw_difference =
+      get_parameter("hloc_maximum_yaw_difference_deg").as_double() * M_PI / 180.0;
+    supervisor_parameters.failures_before_relocalization =
+      get_parameter("icp_failures_before_relocalization").as_int();
+    consistent_pose_count_required_ = supervisor_parameters.consistent_pose_count;
+    failures_before_relocalization_ =
+      supervisor_parameters.failures_before_relocalization;
+    supervisor_ = std::make_unique<LocalizationSupervisor>(supervisor_parameters);
+
     const std::string map_path = get_parameter("map_path").as_string();
     std::string error;
     if (map_path.empty() || !localizer_->load_map(map_path, error)) {
@@ -214,6 +236,11 @@ public:
       create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
       get_parameter("initial_pose_topic").as_string(), 10,
       std::bind(&LocalizationNode::initial_pose_callback, this, std::placeholders::_1));
+    hloc_enable_client_ = create_client<std_srvs::srv::SetBool>(
+      get_parameter("hloc_enable_service").as_string());
+    hloc_control_timer_ = create_wall_timer(
+      std::chrono::milliseconds(500),
+      std::bind(&LocalizationNode::synchronize_hloc_control, this));
 
     pose_publisher_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       get_parameter("pose_topic").as_string(), 10);
@@ -228,10 +255,13 @@ public:
       get_parameter("map_cloud_topic").as_string(), map_qos);
 
     publish_map();
-    publish_status("waiting for /initialpose");
+    publish_status(
+      "waiting for " + std::to_string(consistent_pose_count_required_) +
+      " consistent HLoc poses");
     RCLCPP_INFO(
-      get_logger(), "loaded %zu map points from %s; waiting for /initialpose",
-      localizer_->map().points_.size(), map_path.c_str());
+      get_logger(),
+      "loaded %zu map points from %s; waiting for %d consistent HLoc poses",
+      localizer_->map().points_.size(), map_path.c_str(), consistent_pose_count_required_);
   }
 
 private:
@@ -271,11 +301,28 @@ private:
         return;
       }
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    pose_ = pose_matrix(message->pose.pose);
-    has_pose_ = true;
-    initial_alignment_ = true;
-    publish_status("initial pose accepted; waiting for depth");
+    const Eigen::Matrix4d coarse_pose = pose_matrix(message->pose.pose);
+    std::optional<Eigen::Matrix4d> accepted_pose;
+    int consistent_pose_count = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      accepted_pose = supervisor_->add_coarse_pose(coarse_pose);
+      consistent_pose_count = supervisor_->consistent_pose_count();
+      if (accepted_pose.has_value()) {
+        pose_ = *accepted_pose;
+        has_pose_ = true;
+        initial_alignment_ = true;
+      }
+    }
+    if (accepted_pose.has_value()) {
+      publish_status(
+        "HLoc consistency " + std::to_string(consistent_pose_count_required_) + "/" +
+        std::to_string(consistent_pose_count_required_) + "; waiting for ICP");
+    } else if (consistent_pose_count > 0) {
+      publish_status(
+        "HLoc consistency " + std::to_string(consistent_pose_count) + "/" +
+        std::to_string(consistent_pose_count_required_));
+    }
   }
 
   void depth_callback(const sensor_msgs::msg::Image::SharedPtr message)
@@ -358,15 +405,35 @@ private:
 
     std::ostringstream status;
     status << result.reason << " fitness=" << result.fitness << " rmse=" << result.rmse;
-    if (!result.accepted) {
-      publish_status(status.str());
-      return;
-    }
-
+    HlocAction hloc_action = HlocAction::kNone;
+    int consecutive_failures = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      pose_ = result.pose;
-      initial_alignment_ = false;
+      hloc_action = supervisor_->report_icp_result(result.accepted);
+      consecutive_failures = supervisor_->consecutive_icp_failures();
+      if (result.accepted) {
+        pose_ = result.pose;
+        initial_alignment_ = false;
+      } else if (hloc_action == HlocAction::kEnable) {
+        has_pose_ = false;
+        initial_alignment_ = true;
+      }
+    }
+    if (hloc_action == HlocAction::kDisable) {
+      request_hloc_enabled(false);
+      status << "; HLoc pose injection disabled";
+    } else if (hloc_action == HlocAction::kEnable) {
+      request_hloc_enabled(true);
+      status << "; " << failures_before_relocalization_
+             << " consecutive ICP failures, restarting HLoc";
+    }
+    if (!result.accepted) {
+      if (hloc_action != HlocAction::kEnable) {
+        status << "; consecutive failures=" << consecutive_failures << "/"
+               << failures_before_relocalization_;
+      }
+      publish_status(status.str());
+      return;
     }
     geometry_msgs::msg::PoseWithCovarianceStamped pose;
     pose.header.stamp = stamp;
@@ -421,6 +488,45 @@ private:
     status_publisher_->publish(message);
   }
 
+  void request_hloc_enabled(bool enabled)
+  {
+    desired_hloc_enabled_ = enabled;
+    hloc_control_synchronized_ = false;
+    synchronize_hloc_control();
+  }
+
+  void synchronize_hloc_control()
+  {
+    if (!desired_hloc_enabled_.has_value() || hloc_request_in_flight_ ||
+      hloc_control_synchronized_ || !hloc_enable_client_->service_is_ready())
+    {
+      return;
+    }
+    const bool requested_state = *desired_hloc_enabled_;
+    auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+    request->data = requested_state;
+    hloc_request_in_flight_ = true;
+    hloc_enable_client_->async_send_request(
+      request,
+      [this, requested_state](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+        hloc_request_in_flight_ = false;
+        const auto response = future.get();
+        if (!response->success) {
+          RCLCPP_WARN(
+            get_logger(), "HLoc enable service rejected request: %s",
+            response->message.c_str());
+          return;
+        }
+        if (desired_hloc_enabled_.has_value() &&
+          *desired_hloc_enabled_ == requested_state)
+        {
+          hloc_control_synchronized_ = true;
+          RCLCPP_INFO(
+            get_logger(), "HLoc inference %s", requested_state ? "enabled" : "disabled");
+        }
+      });
+  }
+
   std::string map_frame_;
   std::string base_frame_;
   bool publish_tf_{true};
@@ -430,6 +536,8 @@ private:
   double minimum_depth_{0.25};
   double maximum_depth_{4.0};
   double initial_pose_max_variance_{0.0};
+  int consistent_pose_count_required_{3};
+  int failures_before_relocalization_{5};
 
   std::mutex mutex_;
   CameraIntrinsics intrinsics_;
@@ -439,6 +547,10 @@ private:
   bool initial_alignment_{true};
   std::chrono::steady_clock::time_point last_processing_time_;
   std::unique_ptr<IcpLocalizer> localizer_;
+  std::unique_ptr<LocalizationSupervisor> supervisor_;
+  std::optional<bool> desired_hloc_enabled_;
+  bool hloc_request_in_flight_{false};
+  bool hloc_control_synchronized_{false};
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
@@ -452,6 +564,8 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_publisher_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr fitness_publisher_;
+  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr hloc_enable_client_;
+  rclcpp::TimerBase::SharedPtr hloc_control_timer_;
 };
 
 }  // namespace luxi_location

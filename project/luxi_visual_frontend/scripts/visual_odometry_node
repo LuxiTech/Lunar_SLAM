@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Load the isolated CUDA runtime and start the learned frontend node."""
+
+from pathlib import Path
+import os
+import sys
+
+
+WORKSPACE = Path(__file__).resolve().parents[3]
+RUNTIME = os.environ.get("LUXI_VISUAL_FRONTEND_RUNTIME", "gpu").lower()
+if RUNTIME not in {"auto", "gpu", "cpu"}:
+    raise RuntimeError("LUXI_VISUAL_FRONTEND_RUNTIME must be auto, gpu or cpu")
+dependencies = [
+    WORKSPACE / "3parts/hloc_python",
+    WORKSPACE / "3parts/hloc",
+    WORKSPACE / "3parts/lightglue",
+    WORKSPACE / "install/luxi_visual_frontend/local/lib/python3.10/dist-packages",
+    WORKSPACE / "project/luxi_visual_frontend",
+]
+gpu_runtime = WORKSPACE / "3parts/hloc_gpu_python"
+if RUNTIME != "cpu" and gpu_runtime.is_dir():
+    dependencies.insert(0, gpu_runtime)
+elif RUNTIME == "gpu":
+    raise RuntimeError(f"GPU runtime not found: {gpu_runtime}")
+sys.path[:0] = [str(path) for path in dependencies]
+os.environ.setdefault("TORCH_HOME", str(WORKSPACE / "3parts/hloc_models"))
+
+from luxi_visual_frontend.node import main
+
+
+if __name__ == "__main__":
+    main()

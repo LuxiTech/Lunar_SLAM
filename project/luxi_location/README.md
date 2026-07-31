@@ -3,10 +3,10 @@
 `luxi_location` 使用 Open3D ICP 将 D435i 当前深度帧生成的局部点云配准到保存的 RTAB-Map
 彩色 PLY。它通过统一的 `/sensors/rgbd/*` 话题读取数据，不依赖 D435i 厂商话题。
 
-ICP 是局部精配准算法，启动后必须提供一次位于地图附近的初始位姿。单独运行时默认为
-`/initialpose`；网页自动定位流程会改为接收 RTAB-Map 的
-`/rtabmap/localization_pose`，并拒绝协方差不可信的粗定位结果。节点约束输出为地面
-三自由度 `(x, y, yaw)`，发布：
+ICP 是局部精配准算法，启动后必须提供位于地图附近的初始位姿。单独运行时默认为
+`/initialpose`；网页自动定位流程改为接收 `/luxi_hloc/coarse_pose`。节点仅在连续
+3 帧 HLoc 位姿的平移差不超过 0.5 m、航向差不超过 20° 时初始化 ICP。节点约束输出
+为地面三自由度 `(x, y, yaw)`，发布：
 
 - `/luxi_location/pose`：`geometry_msgs/PoseWithCovarianceStamped`
 - `/luxi_location/map_cloud`：下采样后的全局地图
@@ -40,10 +40,10 @@ ros2 launch luxi_adapter sensor_bringup.launch.py
 ros2 launch luxi_location icp_localization.launch.py
 ```
 
-提供地图中的粗初始位姿，例如建图起点：
+提供地图中的粗初始位姿，例如建图起点。默认同样需要连续发布 3 个一致位姿：
 
 ```bash
-ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+ros2 topic pub --rate 2 --times 3 /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
   "{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}}"
 ```
 
@@ -58,15 +58,17 @@ ros2 topic hz /luxi_location/pose
 初始位姿必须足够接近真实位置。默认首次允许 1.5 m、45° 的修正，后续每次允许 0.5 m、20°；
 fitness、RMSE 或修正量不满足阈值时保留上一可信位姿。
 
-## RTAB-Map 自动粗定位 + ICP 精定位
+## HLoc 首次粗定位 + ICP 连续定位
 
 网页和导航包使用以下链路，无需在地图上手工点击初始位姿：
 
 ```text
-统一 RGB-D/IMU -> RTAB-Map 保存数据库全局粗定位
-               -> 可信 /rtabmap/localization_pose
-               -> luxi_location Open3D ICP
-               -> /luxi_location/pose
+统一 RGB-D -> HLoc 全局粗定位
+           -> 连续 3 帧一致性门控
+           -> luxi_location Open3D ICP
+           -> 首次 ICP 成功，停用 HLoc
+           -> ICP 连续跟踪
+           -> 连续 5 帧失败，清除旧位姿并重启 HLoc
 ```
 
 可脱离网页直接启动整条链路：
@@ -78,8 +80,9 @@ ros2 launch luxi_voxel_navigation saved_map_navigation.launch.py \
   cloud_path:=/path/to/exported_cloud.ply
 ```
 
-此模式由 RTAB-Map 发布 `map -> odom`，因此 ICP 的 `publish_tf` 被关闭，只发布精配准
-位姿供网页和规划准入使用，避免两个节点竞争同一 TF。
+联合启动时，ICP 节点通过 `/luxi_hloc_localizer/enable` 控制 HLoc 推理。成功跟踪期间
+不会继续运行 HLoc 模型，也不会接受新的 HLoc 位姿注入。所有门限位于
+`config/icp_localization.yaml`。
 
 ## 离线验证
 

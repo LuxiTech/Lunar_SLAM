@@ -92,6 +92,10 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert response.status == 200
             assert b"Luxi" in response.read()
 
+        with urlopen(base_url + "/map_projection.js", timeout=2.0) as response:
+            assert response.status == 200
+            assert b"unprojectGround" in response.read()
+
         with urlopen(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200
             preview = json.load(response)["cloud"]

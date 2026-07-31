@@ -14,7 +14,10 @@
   -> /luxi_location/pose
 ```
 
-建图仍由 RTAB-Map 负责。HLoc 只负责从未知初始位置获得全局粗位姿，ICP 负责点云精配准。
+建图仍由 RTAB-Map 负责。HLoc 只负责从未知初始位置获得首次全局粗位姿，ICP 负责后续
+点云精配准。连续 3 帧 HLoc 结果在 0.5 m、20° 范围内一致后才交给 ICP；首次 ICP
+成功会通过 `enable=false` 停用 HLoc。只有 ICP 连续失败 5 帧后才清除旧位姿并重新启用
+HLoc。
 
 ## 当前实现
 

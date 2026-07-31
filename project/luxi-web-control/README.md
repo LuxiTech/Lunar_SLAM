@@ -178,7 +178,8 @@ ros2 launch luxi_adapter sensor_bringup.launch.py
 
 1. 确认“ROS 订阅者”为 `1` 或更大。
 2. 点击“开始建图”，状态变为“建图中”。网页会以无 RViz 模式启动
-   `luxi_rtab_map/rgbd_mapping.launch.py`。
+   `luxi_rtab_map/rgbd_mapping_learned.launch.py`。该流程使用
+   SuperPoint + LightGlue 外部里程计，并将 SuperPoint 局部特征交给 RTAB 后端。
 3. 使用虚拟摇杆缓慢运动并采集环境。
 4. 点击“停止建图”。网页会向它启动的建图进程发送 `SIGINT`，RTAB-Map 正常关闭并
    保存数据库。
@@ -196,22 +197,30 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 网页只停止它自己启动的 RTAB-Map 进程，不会停止手工终端中已经运行的建图任务。
 
 网页还会列出 `maps/rtab_maps/mapNNN.db`。选择地图后，网页会自动调用
-`tools/export_rtabmap_octomap.sh` 补齐彩色 PLY 和 `.bt`，并立即加载显示；这一步不会
-启动相机定位。地图画布支持拖动旋转视角和滚轮缩放。
+`tools/export_rtabmap_octomap.sh` 补齐彩色 PLY 和 `.bt`，并在缺失时调用
+`luxi_hloc` 导出器和 CUDA 模型构建器生成 HLoc 索引，随后立即加载显示；这一步不会
+启动相机定位。保存地图的彩色 PLY 默认读取并显示全部有效顶点，不使用实时预览的
+1800 点抽样上限。地图画布支持拖动旋转视角和滚轮缩放。默认视角遵循 ROS REP-103：
+`+X`（机器人前方）朝屏幕上方，`+Y`（机器人左方）朝屏幕左侧，画布左下角同时显示
+方向标记。水平拖动采用观察相机环绕语义：向右拖动时观察方向向右环绕，地图内容相对
+向左旋转；该手势只改变观察角度，不修改地图坐标。
 
 要进行无需手工点击初始位姿的自动定位：
 
 1. 选择地图，等待彩色点云和 OctoMap 图层加载完成。
 2. 点击“自动定位”，缓慢移动或原地转动机器人，让相机看到建图时记录过的区域。
 3. GPU HLoc 使用 NetVLAD 检索候选、SuperPoint + LightGlue 匹配，并通过
-   PnP/RANSAC 和当前深度验证后，将 `/luxi_hloc/coarse_pose` 交给后级。
+   PnP/RANSAC 和当前深度验证。只有连续 3 帧粗位姿相差不超过 0.5 m、20°，才交给
+   ICP。
 4. `luxi_location` 使用当前深度点云和保存的彩色 PLY 进行 Open3D ICP 精配准，结果
-   发布到 `/luxi_location/pose`。
+   发布到 `/luxi_location/pose`。首次成功后自动停用 HLoc，避免持续占用 GPU 和重复
+   注入粗位姿；ICP 连续失败 5 帧才清除旧位姿并重新启用 HLoc。
 5. 页面显示“已定位”后，以紫色箭头显示机器人位置和朝向，同时显示 `x/y/yaw` 与
    ICP fitness；“选择目标点”此时才会启用。
 
-因此粗定位失败时不会盲目启动 ICP，ICP 失败时也不会开放导航目标。没有对应
-`maps/hloc_maps/mapNNN/metadata.yaml` 的地图只能显示，网页会禁用“自动定位”。
+因此粗定位失败时不会盲目启动 ICP，ICP 失败时也不会开放导航目标。默认情况下，没有
+`maps/hloc_maps/mapNNN/metadata.yaml` 的地图会在加载时自动构建；构建失败时地图仍可
+显示，但网页会报告具体错误并禁用“自动定位”。
 点击“停止定位”会结束 HLoc、ICP、OctoMap 和规划进程，但保留已加载的地图图层。该功能不会自动
 启用路径跟随，默认也不会向 `/cmd_vel` 发送导航速度。
 
@@ -235,11 +244,14 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `web_root` | 安装目录 | 自定义网页资源目录，主要用于开发测试 |
 | `enable_mapping_control` | `true` | 是否显示并允许 RTAB-Map 建图开关 |
 | `mapping_launch_package` | `luxi_rtab_map` | 被网页管理的建图 ROS 包 |
-| `mapping_launch_file` | `rgbd_mapping.launch.py` | 被网页管理的建图 launch 文件 |
+| `mapping_launch_file` | `rgbd_mapping_learned.launch.py` | 被网页管理的学习型前端建图 launch 文件 |
+| `auto_build_hloc_index` | `true` | 加载地图时是否自动构建缺失的 GPU HLoc 索引 |
+| `hloc_index_build_timeout` | `900.0` | HLoc 导出和单个模型构建步骤的超时秒数 |
 | `enable_preview` | `true` | 是否订阅并提供 RGB、稀疏点云预览 |
 | `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `1800` | 单次浏览器点云预览的最大抽样点数 |
+| `max_saved_cloud_points` | `0` | 保存 PLY 的显示点数上限；0 表示显示全部有效点 |
 | `navigation_localization_pose_topic` | `/luxi_hloc/coarse_pose` | HLoc 粗定位输入 |
 | `navigation_refined_pose_topic` | `/luxi_location/pose` | ICP 精定位结果 |
 | `navigation_refined_fitness_topic` | `/luxi_location/fitness` | ICP 匹配得分 |

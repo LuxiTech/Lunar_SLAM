@@ -1,6 +1,7 @@
 "use strict";
 
 const $ = (selector) => document.querySelector(selector);
+const mapProjection = window.LuxiMapProjection;
 const connection = $("#connection");
 const connectionText = $("#connectionText");
 const topic = $("#topic");
@@ -359,7 +360,10 @@ function updateNavigation(navigation) {
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
   navigationGoalButton.disabled = !navigation.localization_ready;
   navigationPose = navigation.pose || null;
-  if (navigation.last_error) {
+  if (navigationLoadPending) {
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+    return;
+  } else if (navigation.last_error) {
     navigationDetail.textContent = navigation.last_error;
   } else if (navigation.state === "running") {
     const mapName = navigation.map_id || "所选地图";
@@ -400,7 +404,7 @@ function updateNavigationMaps(maps) {
     option.value = item.id;
     option.disabled = !item.convertible;
     option.textContent = item.loadable
-      ? `${item.id}${item.cloud_path ? "（彩色点云 + 体素地图" : "（体素地图；未导出彩色点云"}${item.localizable ? " + HLoc）" : "；未构建 HLoc）"}`
+      ? `${item.id}${item.cloud_path ? "（完整彩色点云 + 体素地图" : "（体素地图；未导出彩色点云"}${item.localizable ? " + HLoc）" : "；未构建 HLoc）"}`
       : item.convertible
         ? `${item.id}（选择后自动转换）`
         : `${item.id}（缺少 .db，无法转换）`;
@@ -472,51 +476,72 @@ function drawNavigationMap(voxels, path, cloud) {
     voxelViewport = null;
     return;
   }
-  const xs = all.map((point) => point[0]);
-  const ys = all.map((point) => point[1]);
-  const zs = all.map((point) => point[2] || 0);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const minZ = Math.min(...zs);
-  const maxZ = Math.max(...zs);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (const point of all) {
+    const x = Number(point[0]);
+    const y = Number(point[1]);
+    const z = Number(point[2]) || 0;
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+    minZ = Math.min(minZ, z);
+    maxZ = Math.max(maxZ, z);
+  }
   const spanX = Math.max(0.5, maxX - minX);
   const spanY = Math.max(0.5, maxY - minY);
   const spanZ = Math.max(0.5, maxZ - minZ);
   const span = Math.max(spanX, spanY, spanZ);
   if (!navigationView) {
-    navigationView = {yaw: -0.75, pitch: 0.62, zoom: 1.0};
+    navigationView = {...mapProjection.defaultView};
   }
   const scale = Math.min((width - 44) / span, (height - 44) / span) * navigationView.zoom;
   const centerX = (minX + maxX) * 0.5;
   const centerY = (minY + maxY) * 0.5;
   const centerZ = (minZ + maxZ) * 0.5;
-  const cosYaw = Math.cos(navigationView.yaw);
-  const sinYaw = Math.sin(navigationView.yaw);
-  const cosPitch = Math.cos(navigationView.pitch);
-  const sinPitch = Math.sin(navigationView.pitch);
+  const center = [centerX, centerY, centerZ];
   voxelViewport = {
     minX, maxX, minY, maxY, minZ, maxZ, centerX, centerY, centerZ,
-    scale, width, height, cosYaw, sinYaw, cosPitch, sinPitch,
+    scale, width, height, view: navigationView,
   };
   const toCanvas = (point) => {
-    const dx = point[0] - centerX;
-    const dy = point[1] - centerY;
-    const dz = (point[2] || 0) - centerZ;
-    const horizontal = cosYaw * dx - sinYaw * dy;
-    const depth = sinYaw * dx + cosYaw * dy;
-    const vertical = cosPitch * dz - sinPitch * depth;
+    const {horizontal, vertical, depth} = mapProjection.projectMapPoint(
+      point,
+      center,
+      navigationView,
+    );
     return [width * 0.5 + horizontal * scale, height * 0.5 - vertical * scale, depth];
   };
-  context.strokeStyle = "rgba(132, 151, 180, .24)";
-  context.lineWidth = 1;
-  context.beginPath();
-  context.moveTo(18, height - 18);
-  context.lineTo(48, height - 18);
-  context.moveTo(18, height - 18);
-  context.lineTo(18, height - 48);
-  context.stroke();
+  const drawCompassAxis = (point, color, label) => {
+    const projected = mapProjection.projectMapPoint(
+      point,
+      [0, 0, 0],
+      navigationView,
+    );
+    const dx = projected.horizontal;
+    const dy = -projected.vertical;
+    const length = Math.max(1e-6, Math.hypot(dx, dy));
+    const originX = 48;
+    const originY = height - 42;
+    const tipX = originX + 28 * dx / length;
+    const tipY = originY + 28 * dy / length;
+    context.strokeStyle = color;
+    context.fillStyle = color;
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(originX, originY);
+    context.lineTo(tipX, tipY);
+    context.stroke();
+    context.font = "600 11px system-ui, sans-serif";
+    context.fillText(label, tipX + 3, tipY - 3);
+  };
+  drawCompassAxis([1, 0, 0], "#ff7580", "+X 前");
+  drawCompassAxis([0, 1, 0], "#65e3b5", "+Y 左");
   if (navigationShowCloud.checked) {
     for (const point of cloudPoints) {
       const [x, y] = toCanvas(point);
@@ -678,6 +703,8 @@ async function loadNavigationMap(automatic = false) {
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   if (!map.loadable) {
     navigationDetail.textContent = `${mapId} 正在转换为网页显示格式，请稍候…`;
+  } else if (!map.localizable) {
+    navigationDetail.textContent = `${mapId} 正在使用 GPU 构建 HLoc 索引，请稍候…`;
   }
   try {
     const result = await api("/api/navigation/load_map", {map_id: mapId});
@@ -763,11 +790,12 @@ async function selectNavigationGoal(event) {
   const rect = voxelMapCanvas.getBoundingClientRect();
   const horizontal = (event.clientX - rect.left - voxelViewport.width * 0.5) / voxelViewport.scale;
   const vertical = (voxelViewport.height * 0.5 - (event.clientY - rect.top)) / voxelViewport.scale;
-  const depth = (
-    voxelViewport.cosPitch * -voxelViewport.centerZ - vertical
-  ) / voxelViewport.sinPitch;
-  const x = voxelViewport.centerX + voxelViewport.cosYaw * horizontal + voxelViewport.sinYaw * depth;
-  const y = voxelViewport.centerY - voxelViewport.sinYaw * horizontal + voxelViewport.cosYaw * depth;
+  const {x, y} = mapProjection.unprojectGround(
+    horizontal,
+    vertical,
+    [voxelViewport.centerX, voxelViewport.centerY, voxelViewport.centerZ],
+    voxelViewport.view,
+  );
   selectedGoal = {x, y};
   try {
     await api("/api/navigation/goal", {x, y, z: 0});
@@ -824,7 +852,7 @@ voxelMapCanvas.addEventListener("pointermove", (event) => {
     return;
   }
   if (!navigationDrag || navigationDrag.pointerId !== event.pointerId) return;
-  navigationView.yaw = navigationDrag.yaw - (event.clientX - navigationDrag.x) * 0.012;
+  navigationView.yaw = navigationDrag.yaw + (event.clientX - navigationDrag.x) * 0.012;
   navigationView.pitch = Math.max(
     0.16, Math.min(1.4, navigationDrag.pitch + (event.clientY - navigationDrag.y) * 0.012),
   );
@@ -958,16 +986,15 @@ function drawCloud(points) {
   context.fillRect(0, 0, width, height);
   if (!points.length) return;
 
-  const yaw = 0.78;
-  const cosine = Math.cos(yaw);
-  const sine = Math.sin(yaw);
-  const projected = points.map(([x, y, z, red, green, blue]) => ({
-    x: x * cosine - y * sine,
-    y: (x * sine + y * cosine) * 0.42 - z,
-    red,
-    green,
-    blue,
-  }));
+  const previewView = {yaw: Math.PI / 2, pitch: 0.42, zoom: 1};
+  const projected = points.map(([x, y, z, red, green, blue]) => {
+    const result = mapProjection.projectMapPoint(
+      [x, y, z],
+      [0, 0, 0],
+      previewView,
+    );
+    return {x: result.horizontal, y: result.vertical, red, green, blue};
+  });
   const xs = projected.map((point) => point.x);
   const ys = projected.map((point) => point.y);
   const spanX = Math.max(0.1, Math.max(...xs) - Math.min(...xs));
@@ -977,7 +1004,7 @@ function drawCloud(points) {
   const centerY = (Math.min(...ys) + Math.max(...ys)) * 0.5;
   for (const point of projected) {
     const screenX = width * 0.5 + (point.x - centerX) * scale;
-    const screenY = height * 0.5 + (point.y - centerY) * scale;
+    const screenY = height * 0.5 - (point.y - centerY) * scale;
     context.fillStyle = `rgb(${point.red}, ${point.green}, ${point.blue})`;
     context.fillRect(screenX, screenY, 2, 2);
   }

@@ -150,7 +150,7 @@
         </div>
         <span id="navigationState" class="preview-state">未加载</span>
       </div>
-      <p id="navigationDetail" class="navigation-detail">选择已保存的地图；缺少显示图层时会自动转换。</p>
+      <p id="navigationDetail" class="navigation-detail">选择已保存的地图；缺少显示图层或 HLoc 索引时会自动构建。</p>
       <div class="navigation-actions">
         <label>
           <span>地图</span>
@@ -169,13 +169,14 @@
         <label><input id="navigationShowRobot" type="checkbox" checked> 当前定位</label>
       </div>
       <div class="voxel-frame">
-        <canvas id="voxelMapCanvas" aria-label="可拖动查看的彩色点云、体素地图和全局路径"></canvas>
-        <span id="voxelMapHint" class="preview-overlay">加载地图后显示彩色点云和体素地图；拖动旋转，滚轮缩放</span>
+        <canvas id="voxelMapCanvas" aria-label="可拖动查看的完整彩色点云、体素地图和全局路径"></canvas>
+        <span id="voxelMapHint" class="preview-overlay">加载地图后显示完整彩色点云和体素地图；拖动旋转，滚轮缩放</span>
       </div>
-      <p class="navigation-note">选择地图会自动转换并显示彩色点云和 OctoMap。点击“自动定位”后缓慢移动或转动机器人：GPU HLoc 先检索并验证历史关键帧，ICP 再精确配准。紫色箭头为当前机器人位姿；定位完成后可选择目标点规划路径。</p>
+      <p class="navigation-note">选择地图会自动生成 HLoc 索引、转换并显示完整彩色点云和 OctoMap。默认视角中 +X（前方）朝上、+Y（左方）朝左。点击“自动定位”后缓慢移动或转动机器人：连续 3 帧一致的 GPU HLoc 粗位姿用于初始化 ICP；ICP 成功后 HLoc 暂停，连续 5 帧 ICP 失败时自动重启 HLoc。紫色箭头为当前机器人位姿；定位完成后可选择目标点规划路径。</p>
     </section>
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/map_projection.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

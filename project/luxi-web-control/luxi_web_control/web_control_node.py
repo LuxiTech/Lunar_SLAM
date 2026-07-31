@@ -122,7 +122,7 @@ def discover_navigation_maps(maps_root: Path) -> list:
 
 
 def extract_colored_ply_points(path: Path, max_points: int) -> list:
-    """Read a bounded XYZRGB sample from a standard RTAB-Map/PCL PLY export."""
+    """Read XYZRGB vertices from PLY, or sample them when max_points is positive."""
     with path.open("rb") as stream:
         if stream.readline().strip() != b"ply":
             raise ValueError("not a PLY file")
@@ -155,7 +155,10 @@ def extract_colored_ply_points(path: Path, max_points: int) -> list:
         names = [name for name, _ in properties]
         if not {"x", "y", "z"}.issubset(names):
             raise ValueError("PLY vertices need x, y and z")
-        stride = max(1, (vertex_count + max_points - 1) // max_points)
+        stride = (
+            1 if max_points <= 0
+            else max(1, (vertex_count + max_points - 1) // max_points)
+        )
         unpack = None
         record_size = 0
         if file_format == "binary_little_endian":
@@ -521,6 +524,97 @@ def extract_sparse_cloud(
             (round(x, 3), round(y, 3), round(z, 3), red, green, blue)
         )
     return points
+
+
+class HlocIndexBuilder:
+    """Build one GPU HLoc reference index from a saved RTAB database."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        exporter: Path,
+        model_builder: Path,
+        timeout: float,
+    ) -> None:
+        """Store the two installed tools and construction policy."""
+        self.enabled = enabled
+        self.exporter = exporter
+        self.model_builder = model_builder
+        self.timeout = timeout
+
+    def build(
+        self,
+        map_id: str,
+        database: Path,
+        output_directory: Path,
+    ) -> Tuple[bool, str]:
+        """Create reference frames and neural features unless already ready."""
+        metadata = output_directory / "metadata.yaml"
+        if metadata.is_file():
+            return True, f"map {map_id} HLoc index already exists"
+        if not self.enabled:
+            return False, "automatic HLoc index construction is disabled"
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            return False, "map_id must use the mapNNN format"
+        if not database.is_file():
+            return False, f"HLoc source database is missing: {database}"
+        for label, executable in (
+            ("HLoc RTAB exporter", self.exporter),
+            ("HLoc model builder", self.model_builder),
+        ):
+            if not executable.is_file():
+                return False, f"{label} is missing: {executable}"
+
+        output_directory.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment["LUXI_HLOC_RUNTIME"] = "gpu"
+        environment["PYTHONUNBUFFERED"] = "1"
+        commands = (
+            [
+                str(self.exporter),
+                "--database", str(database),
+                "--output", str(output_directory),
+            ],
+            [
+                str(self.model_builder),
+                "--map-directory", str(output_directory),
+                "--source-database", str(database),
+                "--resize-max", "640",
+                "--max-keypoints", "1024",
+                "--overwrite",
+            ],
+        )
+        try:
+            outputs = []
+            for command in commands:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=True,
+                    timeout=self.timeout,
+                    env=environment,
+                )
+                outputs.append(result.stdout or "")
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"map {map_id} HLoc construction exceeded "
+                f"{self.timeout:.0f} seconds"
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = getattr(exc, "stdout", "") or str(exc)
+            return False, (
+                f"map {map_id} HLoc construction failed: "
+                f"{detail.strip()[-800:]}"
+            )
+        if not metadata.is_file():
+            detail = "\n".join(outputs).strip()
+            return False, (
+                f"map {map_id} HLoc builder produced no metadata.yaml"
+                + (f": {detail[-800:]}" if detail else "")
+            )
+        return True, f"map {map_id} HLoc index built with CUDA"
 
 
 class MappingController:
@@ -1015,6 +1109,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             "/": ("index.html", "text/html; charset=utf-8"),
             "/index.html": ("index.html", "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+            "/map_projection.js": (
+                "map_projection.js",
+                "text/javascript; charset=utf-8",
+            ),
             "/styles.css": ("styles.css", "text/css; charset=utf-8"),
         }
         asset = assets.get(path)
@@ -1196,7 +1294,7 @@ class WebControlNode(Node):
         self.declare_parameter("web_root", "")
         self.declare_parameter("enable_mapping_control", True)
         self.declare_parameter("mapping_launch_package", "luxi_rtab_map")
-        self.declare_parameter("mapping_launch_file", "rgbd_mapping.launch.py")
+        self.declare_parameter("mapping_launch_file", "rgbd_mapping_learned.launch.py")
         self.declare_parameter(
             "mapping_rmw_implementation",
             "rmw_cyclonedds_cpp",
@@ -1213,6 +1311,8 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_log_path", "")
         self.declare_parameter("maps_root", "")
         self.declare_parameter("map_conversion_timeout", 300.0)
+        self.declare_parameter("auto_build_hloc_index", True)
+        self.declare_parameter("hloc_index_build_timeout", 900.0)
         self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
@@ -1238,6 +1338,7 @@ class WebControlNode(Node):
         )
         self.declare_parameter("cloud_preview_topic", "/rtabmap/cloud_map")
         self.declare_parameter("max_cloud_points", 1800)
+        self.declare_parameter("max_saved_cloud_points", 0)
 
         self.cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
         bind_address = str(self.get_parameter("bind_address").value)
@@ -1300,6 +1401,20 @@ class WebControlNode(Node):
         ).resolve()
         self.map_conversion_timeout = float(
             self.get_parameter("map_conversion_timeout").value
+        )
+        self.hloc_index_builder = HlocIndexBuilder(
+            enabled=bool(self.get_parameter("auto_build_hloc_index").value),
+            exporter=(
+                workspace_root / "install/luxi_hloc/lib/luxi_hloc/"
+                "rtab_hloc_exporter"
+            ).resolve(),
+            model_builder=(
+                workspace_root / "install/luxi_hloc/lib/luxi_hloc/"
+                "build_reference_model.py"
+            ).resolve(),
+            timeout=float(
+                self.get_parameter("hloc_index_build_timeout").value
+            ),
         )
         self.octomap_points_executable = (
             workspace_root / "install/luxi_voxel_navigation/lib/"
@@ -1365,6 +1480,9 @@ class WebControlNode(Node):
         self.max_cloud_points = int(
             self.get_parameter("max_cloud_points").value
         )
+        self.max_saved_cloud_points = int(
+            self.get_parameter("max_saved_cloud_points").value
+        )
 
         self._validate_parameters(http_port, publish_rate)
         replacement_message = ""
@@ -1399,6 +1517,7 @@ class WebControlNode(Node):
         self._localization_variance: Optional[float] = None
         self._localization_received_at: Optional[float] = None
         self._coarse_localization_pose: Optional[dict] = None
+        self._coarse_gate_ready = False
         self._refined_localization_pose: Optional[dict] = None
         self._refined_localization_received_at: Optional[float] = None
         self._refined_localization_fitness: Optional[float] = None
@@ -1528,6 +1647,8 @@ class WebControlNode(Node):
             raise ValueError("command_timeout must be greater than zero")
         if not 100 <= self.max_cloud_points <= 20000:
             raise ValueError("max_cloud_points must be between 100 and 20000")
+        if self.max_saved_cloud_points < 0:
+            raise ValueError("max_saved_cloud_points must be zero or positive")
         if not 100 <= self.max_voxel_points <= 50000:
             raise ValueError("max_voxel_points must be between 100 and 50000")
         if self.navigation_localization_max_variance <= 0.0:
@@ -1536,6 +1657,8 @@ class WebControlNode(Node):
             raise ValueError("navigation_localization_timeout must be positive")
         if self.map_conversion_timeout <= 0.0:
             raise ValueError("map_conversion_timeout must be positive")
+        if self.hloc_index_builder.timeout <= 0.0:
+            raise ValueError("hloc_index_build_timeout must be positive")
         if not self.cmd_vel_topic:
             raise ValueError("cmd_vel_topic must not be empty")
         invalid_limits = any(
@@ -1645,6 +1768,7 @@ class WebControlNode(Node):
         if pose is None:
             return
         with self._navigation_lock:
+            self._coarse_gate_ready = True
             self._refined_localization_pose = pose
             self._refined_localization_received_at = time.monotonic()
 
@@ -1657,6 +1781,15 @@ class WebControlNode(Node):
     def _on_navigation_refined_status(self, message: String) -> None:
         with self._navigation_lock:
             self._refined_localization_status = message.data[:300]
+            if "HLoc consistency 3/3" in message.data:
+                self._coarse_gate_ready = True
+            elif (
+                "consistent HLoc poses" in message.data
+                or "restarting HLoc" in message.data
+            ):
+                self._coarse_gate_ready = False
+                self._refined_localization_pose = None
+                self._refined_localization_received_at = None
 
     def _clear_cloud_preview(self) -> None:
         """Discard map data which belongs to a previous mapping session."""
@@ -1675,6 +1808,7 @@ class WebControlNode(Node):
             self._localization_variance = None
             self._localization_received_at = None
             self._coarse_localization_pose = None
+            self._coarse_gate_ready = False
             self._refined_localization_pose = None
             self._refined_localization_received_at = None
             self._refined_localization_fitness = None
@@ -1747,7 +1881,7 @@ class WebControlNode(Node):
         return ""
 
     def navigation_cloud_preview(self) -> Dict[str, Any]:
-        """Return the selected saved map's bounded RGB point cloud."""
+        """Return the selected saved map's RGB point cloud."""
         with self._navigation_lock:
             return {
                 "map_id": self._navigation_cloud_map_id,
@@ -1765,7 +1899,7 @@ class WebControlNode(Node):
             return self._navigation_cloud_error
         try:
             points = extract_colored_ply_points(
-                Path(cloud_path), self.max_cloud_points)
+                Path(cloud_path), self.max_saved_cloud_points)
         except (OSError, UnicodeDecodeError, ValueError, struct.error) as exc:
             with self._navigation_lock:
                 self._navigation_cloud_points = []
@@ -1924,7 +2058,7 @@ class WebControlNode(Node):
         return True, f"map {map_id} converted for browser display"
 
     def load_navigation_map(self, map_id: str) -> Tuple[bool, str]:
-        """Convert a database when necessary, then load its browser map layers."""
+        """Build missing display/HLoc assets, then load browser map layers."""
         if not MAP_IDENTIFIER.fullmatch(map_id):
             return False, "map_id must use the mapNNN format"
         if not self._navigation_map_operation_lock.acquire(blocking=False):
@@ -1938,20 +2072,53 @@ class WebControlNode(Node):
                 return False, f"map {map_id} does not exist under {self.maps_root}"
             if not record["database_path"]:
                 return False, f"map {map_id} has no RTAB-Map .db file to convert"
+            if self.mapping_status()["state"] == "running":
+                return False, (
+                    "stop mapping and save the database before loading or "
+                    "building its HLoc index"
+                )
 
             # A localization launch also owns RTAB-Map processes. Stop it before
             # calling the offline export tool, which correctly refuses live maps.
             self.navigation.stop()
+            operation_messages = []
             if not record["loadable"] or not record["cloud_path"]:
                 converted, message = self._convert_navigation_map(record)
                 if not converted:
                     return False, message
+                operation_messages.append(message)
                 record = next(
                     (item for item in self.navigation_maps() if item["id"] == map_id),
                     None,
                 )
                 if record is None or not record["loadable"]:
                     return False, f"map {map_id} is still missing its exported .bt file"
+
+            hloc_warning = ""
+            if not record.get("hloc_map_directory"):
+                hloc_directory = (
+                    self.maps_root / "hloc_maps" / map_id
+                ).resolve()
+                built, message = self.hloc_index_builder.build(
+                    map_id,
+                    Path(record["database_path"]),
+                    hloc_directory,
+                )
+                if built:
+                    operation_messages.append(message)
+                    record = next(
+                        (
+                            item for item in self.navigation_maps()
+                            if item["id"] == map_id
+                        ),
+                        None,
+                    )
+                    if record is None:
+                        return False, (
+                            f"map {map_id} disappeared after HLoc construction"
+                        )
+                else:
+                    hloc_warning = "HLoc: " + message
 
             self._clear_navigation_preview()
             cloud_error = self._load_navigation_cloud(map_id, record.get("cloud_path"))
@@ -1961,8 +2128,11 @@ class WebControlNode(Node):
                                  ("OctoMap voxels", voxel_error)):
                 if error:
                     preview_errors.append(label + ": " + error)
+            details = operation_messages + preview_errors
+            if hloc_warning:
+                details.append(hloc_warning)
             return True, f"map {map_id} layers loaded" + (
-                "; " + "; ".join(preview_errors) if preview_errors else "")
+                "; " + "; ".join(details) if details else "")
         finally:
             self._navigation_map_operation_lock.release()
 
@@ -1996,6 +2166,7 @@ class WebControlNode(Node):
             self._localization_variance = None
             self._localization_received_at = None
             self._coarse_localization_pose = None
+            self._coarse_gate_ready = False
             self._refined_localization_pose = None
             self._refined_localization_received_at = None
             self._refined_localization_fitness = None
@@ -2017,6 +2188,7 @@ class WebControlNode(Node):
                 self._localization_variance = None
                 self._localization_received_at = None
                 self._coarse_localization_pose = None
+                self._coarse_gate_ready = False
                 self._refined_localization_pose = None
                 self._refined_localization_received_at = None
                 self._refined_localization_fitness = None
@@ -2053,8 +2225,12 @@ class WebControlNode(Node):
                 None if self._refined_localization_received_at is None else round(
                     time.monotonic() - self._refined_localization_received_at, 2)
             )
-            coarse_ready = self._localization_ready and coarse_age is not None and (
-                coarse_age <= self.navigation_localization_timeout)
+            coarse_ready = (
+                self._coarse_gate_ready
+                and self._localization_ready
+                and coarse_age is not None
+                and coarse_age <= self.navigation_localization_timeout
+            )
             refined_ready = (
                 self._refined_localization_pose is not None
                 and refined_age is not None
@@ -2062,6 +2238,9 @@ class WebControlNode(Node):
             )
             running = status["state"] == "running"
             status["coarse_localization_ready"] = running and coarse_ready
+            status["coarse_consistency_ready"] = (
+                running and self._coarse_gate_ready
+            )
             status["refined_localization_ready"] = running and refined_ready
             status["localization_ready"] = running and refined_ready
             status["localization_variance"] = self._localization_variance

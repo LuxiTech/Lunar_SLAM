@@ -5,6 +5,11 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
+
+## 0. 把问题梳理清除，明确需求！！（最重要！！！）
+接收到任务后，遇到不清楚的地方，请整理好不清楚的部分以后重新向我提问，直到我明确了所有的要求
+先对我的问题请求进行思考，如果我描述的方法不是最优解，可以停下来向我说明更优的方法，并询问我的实现意见
+
 ## 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**

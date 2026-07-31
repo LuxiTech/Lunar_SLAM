@@ -22,7 +22,7 @@ web_control:
     # It sources the D435i overlay and the project workspace before launching.
     enable_mapping_control: true
     mapping_launch_package: luxi_rtab_map
-    mapping_launch_file: rgbd_mapping.launch.py
+    mapping_launch_file: rgbd_mapping_learned.launch.py
     # D435i driver uses Cyclone DDS; /cmd_vel stays on Fast DDS in the web node.
     mapping_rmw_implementation: rmw_cyclonedds_cpp
 
@@ -38,6 +38,9 @@ web_control:
     # Selecting a database without exported layers runs tools/export_rtabmap_octomap.sh.
     # The database must already be saved; this limits the one-shot export duration.
     map_conversion_timeout: 300.0
+    # A missing maps/hloc_maps/mapNNN index is exported and built on CUDA.
+    auto_build_hloc_index: true
+    hloc_index_build_timeout: 900.0
     navigation_goal_topic: /navigation/goal_pose
     navigation_marker_topic: /navigation/occupied_voxels
     navigation_path_topic: /navigation/planned_path
@@ -56,3 +59,5 @@ web_control:
     rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
     cloud_preview_topic: /rtabmap/cloud_map
     max_cloud_points: 1800
+    # Zero loads every valid vertex from the selected saved PLY.
+    max_saved_cloud_points: 0

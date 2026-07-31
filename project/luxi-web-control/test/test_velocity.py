@@ -27,6 +27,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from luxi_web_control.web_control_node import discover_navigation_maps
 from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
+from luxi_web_control.web_control_node import HlocIndexBuilder
 from luxi_web_control.web_control_node import MappingController
 from luxi_web_control.web_control_node import is_managed_web_control_command
 from luxi_web_control.web_control_node import localization_covariance_ready
@@ -175,6 +176,46 @@ def test_sparse_cloud_extracts_finite_xyzrgb_points():
     ]
 
 
+def test_hloc_index_builder_runs_export_and_cuda_model_build(
+    tmp_path,
+    monkeypatch,
+):
+    exporter = tmp_path / "rtab_hloc_exporter"
+    model_builder = tmp_path / "build_reference_model.py"
+    database = tmp_path / "map021.db"
+    output = tmp_path / "hloc_maps" / "map021"
+    for path in (exporter, model_builder, database):
+        path.touch()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == str(model_builder):
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "metadata.yaml").write_text(
+                "schema_version: 1\n",
+                encoding="utf-8",
+            )
+        return type("Result", (), {"stdout": "ok"})()
+
+    monkeypatch.setattr(
+        "luxi_web_control.web_control_node.subprocess.run",
+        fake_run,
+    )
+    builder = HlocIndexBuilder(True, exporter, model_builder, 30.0)
+
+    built, message = builder.build("map021", database, output)
+
+    assert built
+    assert "CUDA" in message
+    assert [call[0][0] for call in calls] == [
+        str(exporter),
+        str(model_builder),
+    ]
+    assert calls[1][0][-1] == "--overwrite"
+    assert calls[1][1]["env"]["LUXI_HLOC_RUNTIME"] == "gpu"
+
+
 def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
     (tmp_path / "rtab_maps").mkdir()
     (tmp_path / "octo_maps" / "map011_octomap").mkdir(parents=True)
@@ -235,6 +276,23 @@ def test_colored_ply_points_extracts_xyzrgb_from_ascii_export(tmp_path):
 
     assert extract_colored_ply_points(cloud_path, 2) == [
         (0.0, 1.0, 2.0, 1, 2, 3),
+        (7.0, 8.0, 9.0, 0, 0, 0),
+    ]
+
+
+def test_colored_ply_points_reads_all_vertices_when_limit_is_zero(tmp_path):
+    cloud_path = tmp_path / "complete_cloud.ply"
+    cloud_path.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 3\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "end_header\n0 1 2 1 2 3\n4 5 6 254 253 252\n7 8 9 0 0 0\n",
+        encoding="ascii",
+    )
+
+    assert extract_colored_ply_points(cloud_path, 0) == [
+        (0.0, 1.0, 2.0, 1, 2, 3),
+        (4.0, 5.0, 6.0, 254, 253, 252),
         (7.0, 8.0, 9.0, 0, 0, 0),
     ]
 

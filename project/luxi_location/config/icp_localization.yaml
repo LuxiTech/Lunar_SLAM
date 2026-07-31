@@ -30,4 +30,11 @@ luxi_icp_localization:
     initial_maximum_translation_correction: 1.50
     initial_maximum_yaw_correction_deg: 45.0
 
+    # HLoc is only active while acquiring a global initialization.
+    hloc_consistent_pose_count: 3
+    hloc_maximum_translation_difference: 0.50
+    hloc_maximum_yaw_difference_deg: 20.0
+    icp_failures_before_relocalization: 5
+    hloc_enable_service: /luxi_hloc_localizer/enable
+
     publish_tf: true

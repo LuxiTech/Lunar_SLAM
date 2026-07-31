@@ -1,0 +1,45 @@
+luxi_visual_frontend:
+  ros__parameters:
+    device: cuda
+    resize_max: 800
+    max_keypoints: 2048
+    nms_radius: 3
+    lightglue_depth_confidence: 0.90
+    lightglue_width_confidence: 0.95
+    cpu_threads: 4
+
+    color_topic: /sensors/rgbd/color/image_raw
+    depth_topic: /sensors/rgbd/depth/image_raw
+    camera_info_topic: /sensors/rgbd/color/camera_info
+    odom_topic: /luxi_visual_frontend/odom
+    rgbd_features_topic: /luxi_visual_frontend/rgbd_image
+    status_topic: /luxi_visual_frontend/status
+    diagnostics_topic: /luxi_visual_frontend/diagnostics
+    odom_frame: odom
+    base_frame: base_link
+
+    target_rate: 10.0
+    maximum_sensor_time_difference: 0.05
+    transform_timeout: 0.5
+    depth_scale_16u: 0.001
+    publish_tf: true
+
+    minimum_keypoints: 80
+    minimum_matches: 50
+    minimum_depth_matches: 30
+    minimum_inliers: 25
+    minimum_inlier_ratio: 0.25
+    minimum_grid_coverage: 0.25
+    maximum_reprojection_rmse: 3.0
+    ransac_reprojection_error: 4.0
+    ransac_iterations: 1000
+    ransac_confidence: 0.999
+    minimum_depth: 0.2
+    maximum_depth: 6.0
+
+    keyframe_min_translation: 0.10
+    keyframe_min_rotation_deg: 8.0
+    keyframe_max_age: 1.0
+    keyframe_min_inlier_ratio: 0.40
+    maximum_frame_translation: 1.0
+    maximum_frame_rotation_deg: 60.0

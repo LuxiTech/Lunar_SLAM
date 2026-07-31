@@ -38,6 +38,7 @@ TEST_PROCESS_MARKERS = (
     "/rtabmap_sync/rgbd_sync",
     "/rtabmap_odom/rgbd_odometry",
     "/rtabmap_slam/rtabmap",
+    "luxi_visual_frontend/visual_odometry_node",
 )
 
 MAPS_DIRECTORY = "/home/lunar/project/lunar_slam/maps/rtab_maps"
@@ -212,12 +213,15 @@ def generate_launch_description() -> LaunchDescription:
             "rgb_topic": LaunchConfiguration("rgb_topic"),
             "depth_topic": LaunchConfiguration("depth_topic"),
             "camera_info_topic": LaunchConfiguration("camera_info_topic"),
-            "rgbd_sync": "true",
+            "rgbd_sync": LaunchConfiguration("rgbd_sync"),
+            "subscribe_rgbd": LaunchConfiguration("subscribe_rgbd"),
+            "rgbd_topic": LaunchConfiguration("rgbd_topic"),
             "approx_rgbd_sync": "true",
             "approx_sync": "true",
             "approx_sync_max_interval": LaunchConfiguration("approx_sync_max_interval"),
-            "visual_odometry": "true",
-            "icp_odometry": "false",
+            "visual_odometry": LaunchConfiguration("visual_odometry"),
+            "icp_odometry": LaunchConfiguration("icp_odometry"),
+            "odom_topic": LaunchConfiguration("odom_topic"),
             "qos": LaunchConfiguration("qos"),
             "qos_image": LaunchConfiguration("qos"),
             "qos_camera_info": LaunchConfiguration("qos"),
@@ -237,6 +241,15 @@ def generate_launch_description() -> LaunchDescription:
         arguments=["-d", rviz_config],
         condition=IfCondition(LaunchConfiguration("rviz")),
         output="screen",
+    )
+
+    learned_frontend = Node(
+        package="luxi_visual_frontend",
+        executable="visual_odometry_node",
+        name="luxi_visual_frontend",
+        output="screen",
+        parameters=[LaunchConfiguration("visual_frontend_config")],
+        condition=IfCondition(LaunchConfiguration("learned_frontend")),
     )
 
     # The adapter owns sensor TF and is started before this algorithm launch.
@@ -287,6 +300,23 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="/sensors/rgbd/depth/image_raw",
             ),
             DeclareLaunchArgument("camera_info_topic", default_value="/sensors/rgbd/color/camera_info"),
+            DeclareLaunchArgument("learned_frontend", default_value="false"),
+            DeclareLaunchArgument(
+                "visual_frontend_config",
+                default_value=PathJoinSubstitution(
+                    [
+                        FindPackageShare("luxi_visual_frontend"),
+                        "config",
+                        "visual_odometry.yaml",
+                    ]
+                ),
+            ),
+            DeclareLaunchArgument("visual_odometry", default_value="true"),
+            DeclareLaunchArgument("icp_odometry", default_value="false"),
+            DeclareLaunchArgument("odom_topic", default_value="odom"),
+            DeclareLaunchArgument("rgbd_sync", default_value="true"),
+            DeclareLaunchArgument("subscribe_rgbd", default_value="false"),
+            DeclareLaunchArgument("rgbd_topic", default_value="rgbd_image"),
             DeclareLaunchArgument("qos", default_value="2"),
             DeclareLaunchArgument("approx_sync_max_interval", default_value="0.05"),
             DeclareLaunchArgument("wait_for_transform", default_value="0.5"),
@@ -336,6 +366,7 @@ def generate_launch_description() -> LaunchDescription:
             OpaqueFunction(function=_terminate_processes),
             OpaqueFunction(function=_prepare_database_path),
             OpaqueFunction(function=_wait_for_camera_inputs),
+            learned_frontend,
             delayed_rtabmap,
             delayed_rviz,
             publish_map,

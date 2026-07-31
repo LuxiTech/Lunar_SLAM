@@ -13,6 +13,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 set(
@@ -23,7 +24,8 @@ find_package(Open3D REQUIRED PATHS "${OPEN3D_INSTALL}/lib/cmake/Open3D" NO_DEFAU
 
 add_library(luxi_location_core
   src/depth_projection.cpp
-  src/icp_localizer.cpp)
+  src/icp_localizer.cpp
+  src/localization_supervisor.cpp)
 target_include_directories(luxi_location_core
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -38,6 +40,7 @@ ament_target_dependencies(
   rclcpp
   sensor_msgs
   std_msgs
+  std_srvs
   tf2_ros)
 
 add_executable(offline_registration_test src/offline_registration_test.cpp)

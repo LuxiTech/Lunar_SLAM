@@ -1,5 +1,6 @@
 #include "luxi_location/depth_projection.hpp"
 #include "luxi_location/icp_localizer.hpp"
+#include "luxi_location/localization_supervisor.hpp"
 
 #include <gtest/gtest.h>
 #include <open3d/Open3D.h>
@@ -119,4 +120,105 @@ TEST(IcpLocalizer, RejectsScanWithTooFewPoints)
 
   EXPECT_FALSE(result.accepted);
   EXPECT_EQ(result.reason, "scan has too few points");
+}
+
+TEST(LocalizationSupervisor, RequiresThreeMutuallyConsistentHlocPoses)
+{
+  luxi_location::LocalizationSupervisorParameters parameters;
+  parameters.consistent_pose_count = 3;
+  parameters.maximum_translation_difference = 0.5;
+  parameters.maximum_yaw_difference = 20.0 * M_PI / 180.0;
+  luxi_location::LocalizationSupervisor supervisor(parameters);
+
+  const auto first =
+    luxi_location::IcpLocalizer::planar_pose(1.0, 2.0, 0.0, 0.10);
+  const auto second =
+    luxi_location::IcpLocalizer::planar_pose(1.2, 1.9, 0.0, 0.15);
+  const auto third =
+    luxi_location::IcpLocalizer::planar_pose(0.9, 2.1, 0.0, 0.05);
+
+  EXPECT_FALSE(supervisor.add_coarse_pose(first).has_value());
+  EXPECT_FALSE(supervisor.add_coarse_pose(second).has_value());
+  const auto accepted = supervisor.add_coarse_pose(third);
+  ASSERT_TRUE(accepted.has_value());
+  EXPECT_TRUE(accepted->isApprox(third));
+  EXPECT_EQ(supervisor.phase(), luxi_location::LocalizationPhase::kWaitingForIcp);
+}
+
+TEST(LocalizationSupervisor, InconsistentPoseRestartsConsecutiveCount)
+{
+  luxi_location::LocalizationSupervisor supervisor;
+  const auto first =
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0);
+  const auto inconsistent =
+    luxi_location::IcpLocalizer::planar_pose(2.0, 0.0, 0.0, 0.0);
+
+  supervisor.add_coarse_pose(first);
+  supervisor.add_coarse_pose(first);
+  EXPECT_EQ(supervisor.consistent_pose_count(), 2);
+  EXPECT_FALSE(supervisor.add_coarse_pose(inconsistent).has_value());
+  EXPECT_EQ(supervisor.consistent_pose_count(), 1);
+}
+
+TEST(LocalizationSupervisor, DisablesHlocAfterFirstIcpSuccess)
+{
+  luxi_location::LocalizationSupervisor supervisor;
+  const auto pose =
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0);
+  supervisor.add_coarse_pose(pose);
+  supervisor.add_coarse_pose(pose);
+  ASSERT_TRUE(supervisor.add_coarse_pose(pose).has_value());
+
+  EXPECT_EQ(
+    supervisor.report_icp_result(true),
+    luxi_location::HlocAction::kDisable);
+  EXPECT_EQ(supervisor.phase(), luxi_location::LocalizationPhase::kTracking);
+  EXPECT_EQ(
+    supervisor.report_icp_result(true),
+    luxi_location::HlocAction::kNone);
+}
+
+TEST(LocalizationSupervisor, RestartsHlocAfterFiveConsecutiveIcpFailures)
+{
+  luxi_location::LocalizationSupervisor supervisor;
+  const auto pose =
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0);
+  supervisor.add_coarse_pose(pose);
+  supervisor.add_coarse_pose(pose);
+  ASSERT_TRUE(supervisor.add_coarse_pose(pose).has_value());
+  ASSERT_EQ(
+    supervisor.report_icp_result(true),
+    luxi_location::HlocAction::kDisable);
+
+  for (int failure = 1; failure < 5; ++failure) {
+    EXPECT_EQ(
+      supervisor.report_icp_result(false),
+      luxi_location::HlocAction::kNone);
+    EXPECT_EQ(supervisor.consecutive_icp_failures(), failure);
+  }
+  EXPECT_EQ(
+    supervisor.report_icp_result(false),
+    luxi_location::HlocAction::kEnable);
+  EXPECT_EQ(supervisor.phase(), luxi_location::LocalizationPhase::kSearching);
+  EXPECT_EQ(supervisor.consistent_pose_count(), 0);
+  EXPECT_EQ(supervisor.consecutive_icp_failures(), 0);
+}
+
+TEST(LocalizationSupervisor, SuccessfulTrackingResetsFailureCount)
+{
+  luxi_location::LocalizationSupervisor supervisor;
+  const auto pose =
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0);
+  supervisor.add_coarse_pose(pose);
+  supervisor.add_coarse_pose(pose);
+  ASSERT_TRUE(supervisor.add_coarse_pose(pose).has_value());
+  supervisor.report_icp_result(true);
+
+  supervisor.report_icp_result(false);
+  supervisor.report_icp_result(false);
+  EXPECT_EQ(supervisor.consecutive_icp_failures(), 2);
+  EXPECT_EQ(
+    supervisor.report_icp_result(true),
+    luxi_location::HlocAction::kNone);
+  EXPECT_EQ(supervisor.consecutive_icp_failures(), 0);
 }
