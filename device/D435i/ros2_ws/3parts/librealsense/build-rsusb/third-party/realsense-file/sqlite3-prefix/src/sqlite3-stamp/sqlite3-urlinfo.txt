@@ -1,0 +1,3 @@
+repository='external project URL'
+module='https://sqlite.org/2025/sqlite-amalgamation-3490100.zip'
+tag=''

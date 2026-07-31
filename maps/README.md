@@ -82,8 +82,8 @@ cd /home/lunar/project/lunar_slam
 tools/export_rtabmap_octomap.sh
 ```
 
-实时定位、稀疏点云转 OctoMap 与路径规划的完整启动方法见
-`project/luxi_voxel_navigation/README.md`。路径跟随器默认发布到
+OctoMap 转换工具见 `project/luxi_voxel_navigation/README.md`；当前地面支撑型
+三维 A* 定位与路径规划见 `project/luxi_3d_navigation/README.md`。路径跟随器默认发布到
 `/navigation/cmd_vel`，不会直接驱动底盘。
 
 ## 继续已有地图

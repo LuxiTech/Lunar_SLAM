@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../../Release/libfastcdr.a CMakeFiles/fastcdr.dir/Cdr.cpp.o CMakeFiles/fastcdr.dir/FastCdr.cpp.o CMakeFiles/fastcdr.dir/FastBuffer.cpp.o CMakeFiles/fastcdr.dir/exceptions/Exception.cpp.o CMakeFiles/fastcdr.dir/exceptions/NotEnoughMemoryException.cpp.o CMakeFiles/fastcdr.dir/exceptions/BadParamException.cpp.o
+/usr/bin/ranlib ../../../../Release/libfastcdr.a

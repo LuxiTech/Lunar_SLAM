@@ -1,0 +1,18 @@
+octomap_3d_astar_planner:
+  ros__parameters:
+    robot_radius: 0.18
+    robot_height: 0.35
+    max_step_height: 0.15
+    max_slope_degrees: 50.0
+    strict_direct_ground_support: false
+    ground_support_xy_radius_cells: 1
+    ground_support_depth_cells: 2
+    snap_search_radius_cells: 12
+    max_iterations: 500000
+
+terrain_path_follower:
+  ros__parameters:
+    max_linear_speed: 0.10
+    max_angular_speed: 0.35
+    lookahead_m: 0.25
+    goal_tolerance_m: 0.12

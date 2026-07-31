@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/CMakeFiles/sqlite3"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/CMakeFiles/sqlite3.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/CMakeFiles/sqlite3-complete.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/sqlite3-prefix/src/sqlite3-stamp/sqlite3-build.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/sqlite3-prefix/src/sqlite3-stamp/sqlite3-configure.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/sqlite3-prefix/src/sqlite3-stamp/sqlite3-download.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/sqlite3-prefix/src/sqlite3-stamp/sqlite3-install.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/sqlite3-prefix/src/sqlite3-stamp/sqlite3-mkdir.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/sqlite3-prefix/src/sqlite3-stamp/sqlite3-patch.rule"
+		},
+		{
+			"file" : "/home/lunar/project/lunar_slam/device/D435i/ros2_ws/3parts/librealsense/build-rsusb/third-party/realsense-file/sqlite3-prefix/src/sqlite3-stamp/sqlite3-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"sqlite3"
+		],
+		"name" : "sqlite3"
+	}
+}

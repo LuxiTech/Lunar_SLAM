@@ -121,6 +121,7 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
     database = Path(tmp_path / "map.db")
     octomap = Path(tmp_path / "map.bt")
     cloud = Path(tmp_path / "map_cloud.ply")
+    semantic = Path(tmp_path / "annotations.json")
     hloc_map = Path(tmp_path / "hloc_map")
     hloc_map.mkdir()
     (hloc_map / "metadata.yaml").touch()
@@ -128,7 +129,7 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
         path.touch()
     controller = NavigationController(
         enabled=True,
-        package="luxi_voxel_navigation",
+        package="luxi_3d_navigation",
         launch_file="saved_map_navigation.launch.py",
         rmw_implementation="rmw_cyclonedds_cpp",
         d435_setup=setup,
@@ -138,15 +139,16 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
     )
 
     started, message = controller.start(
-        "map012", database, octomap, cloud, hloc_map
+        "map012", database, octomap, cloud, hloc_map, semantic
     )
     assert not started
     assert str(cloud) in message
 
     cloud.touch()
-    command = controller._command(database, octomap, cloud, hloc_map)
+    command = controller._command(database, octomap, cloud, hloc_map, semantic)
     assert f"cloud_path:={cloud}" in command[-1]
     assert f"hloc_map_directory:={hloc_map}" in command[-1]
+    assert f"semantic_path:={semantic}" in command[-1]
 
 
 def test_sparse_cloud_extracts_finite_xyzrgb_points():

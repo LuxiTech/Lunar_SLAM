@@ -928,6 +928,7 @@ class NavigationController:
         octomap_path: Path,
         cloud_path: Path,
         hloc_map_directory: Path,
+        semantic_path: Path,
     ) -> list:
         source_commands = [
             f"source {shlex.quote(str(self.d435_setup))}",
@@ -943,6 +944,7 @@ class NavigationController:
             f"octomap_path:={octomap_path}",
             f"cloud_path:={cloud_path}",
             f"hloc_map_directory:={hloc_map_directory}",
+            f"semantic_path:={semantic_path}",
             "cmd_vel_topic:=/navigation/cmd_vel",
         ])
         script = "set -e; " + "; ".join(source_commands)
@@ -955,6 +957,7 @@ class NavigationController:
         octomap_path: Path,
         cloud_path: Path,
         hloc_map_directory: Path,
+        semantic_path: Path,
     ) -> Tuple[bool, str]:
         with self._lock:
             if not self.enabled:
@@ -990,6 +993,7 @@ class NavigationController:
                             octomap_path,
                             cloud_path,
                             hloc_map_directory,
+                            semantic_path,
                         ),
                         stdout=log_file, stderr=subprocess.STDOUT,
                         start_new_session=True, env=os.environ.copy())
@@ -1419,7 +1423,7 @@ class WebControlNode(Node):
         self.declare_parameter("mapping_workspace_setup", "")
         self.declare_parameter("mapping_log_path", "")
         self.declare_parameter("enable_navigation_control", True)
-        self.declare_parameter("navigation_launch_package", "luxi_voxel_navigation")
+        self.declare_parameter("navigation_launch_package", "luxi_3d_navigation")
         self.declare_parameter("navigation_launch_file", "saved_map_navigation.launch.py")
         self.declare_parameter("navigation_rmw_implementation", "rmw_cyclonedds_cpp")
         self.declare_parameter("navigation_d435_setup", "")
@@ -2350,6 +2354,7 @@ class WebControlNode(Node):
             Path(record["octomap_path"]),
             Path(record["cloud_path"]),
             Path(record["hloc_map_directory"]),
+            self.semantic_annotation_store.output_root / map_id / "annotations.json",
         )
 
     def stop_navigation(self) -> Tuple[bool, str]:

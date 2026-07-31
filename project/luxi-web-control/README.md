@@ -26,7 +26,7 @@ source /opt/ros/humble/setup.bash
 sudo apt-get install ros-humble-rtabmap-launch
 colcon build --packages-select \
   luxi_adapter luxi_location luxi_rtab_map luxi_semantic_annotation \
-  luxi_voxel_navigation luxi_web_control \
+  luxi_voxel_navigation luxi_3d_navigation luxi_web_control \
   --symlink-install
 ```
 
@@ -247,6 +247,12 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 显示，但网页会报告具体错误并禁用“自动定位”。
 点击“停止定位”会结束 HLoc、ICP、OctoMap 和规划进程，但保留已加载的地图图层。该功能不会自动
 启用路径跟随，默认也不会向 `/cmd_vel` 发送导航速度。
+
+定位成功后，网页目标会交给 `luxi_3d_navigation`。它在 OctoMap 的 26 邻域中进行
+三维 A* 搜索，并要求每个路径体素具有地面支撑、足够的机器人净空且不超过配置的
+台阶和坡度；语义标注中的坑多边形会作为不可通行区域。网页点击仍提供 x/y，规划器
+会自动吸附到附近可行走表面的 z。发布的路径保留三维高度，但地面底盘只跟随 x/y
+和偏航；仍需显式向 `/navigation/start` 发布 `true` 才会开始运动。
 
 若只需浏览已保存的 OctoMap，可以不启动终端一；但要让 RTAB-Map 使用当前相机进行
 定位、获得可信位姿并启用“选择目标点”，仍必须启动硬件 profile。

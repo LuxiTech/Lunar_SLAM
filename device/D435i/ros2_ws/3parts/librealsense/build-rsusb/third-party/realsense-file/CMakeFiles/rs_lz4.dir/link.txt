@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../Release/librs_lz4.a CMakeFiles/rs_lz4.dir/lz4/lz4.c.o
+/usr/bin/ranlib ../../Release/librs_lz4.a

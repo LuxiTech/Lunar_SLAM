@@ -31,7 +31,7 @@ web_control:
     # colored PLY and occupied voxels for immediate browser display. It never
     # enables the path follower by itself.
     enable_navigation_control: true
-    navigation_launch_package: luxi_voxel_navigation
+    navigation_launch_package: luxi_3d_navigation
     navigation_launch_file: saved_map_navigation.launch.py
     navigation_rmw_implementation: rmw_cyclonedds_cpp
     maps_root: /home/lunar/project/lunar_slam/maps
