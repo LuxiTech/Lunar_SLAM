@@ -40,8 +40,19 @@ const voxelMapCanvas = $("#voxelMapCanvas");
 const voxelMapHint = $("#voxelMapHint");
 const navigationShowCloud = $("#navigationShowCloud");
 const navigationShowVoxels = $("#navigationShowVoxels");
+const navigationShowSemantics = $("#navigationShowSemantics");
 const navigationShowMappingOrigin = $("#navigationShowMappingOrigin");
 const navigationShowRobot = $("#navigationShowRobot");
+const semanticTool = $("#semanticTool");
+const semanticGroundZ = $("#semanticGroundZ");
+const semanticMinimumHeight = $("#semanticMinimumHeight");
+const semanticBrushRadius = $("#semanticBrushRadius");
+const semanticPitDepth = $("#semanticPitDepth");
+const semanticFinishPitButton = $("#semanticFinishPitButton");
+const semanticUndoButton = $("#semanticUndoButton");
+const semanticReloadButton = $("#semanticReloadButton");
+const semanticSaveButton = $("#semanticSaveButton");
+const semanticStatus = $("#semanticStatus");
 
 const held = new Set();
 let estopActive = false;
@@ -71,6 +82,12 @@ const navigationPointers = new Map();
 let navigationGoalMode = false;
 let navigationMapRecords = new Map();
 let navigationPose = null;
+let semanticAnnotation = null;
+let semanticDraftPit = [];
+let semanticHistory = [];
+let semanticBrushActive = false;
+let semanticBrushPointerId = null;
+let semanticDirty = false;
 
 const keyActions = {
   KeyW: "forward",
@@ -419,8 +436,8 @@ function updateNavigationMaps(maps) {
   if (Array.from(navigationMapSelect.options).some((option) => option.value === previous)) {
     navigationMapSelect.value = previous;
   } else {
-    const firstConvertible = maps.find((item) => item.convertible);
-    navigationMapSelect.value = firstConvertible ? firstConvertible.id : "";
+    const latestConvertible = [...maps].reverse().find((item) => item.convertible);
+    navigationMapSelect.value = latestConvertible ? latestConvertible.id : "";
   }
 }
 
@@ -452,6 +469,56 @@ function canvasMetrics(canvas) {
   const context = canvas.getContext("2d");
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   return {context, width, height, rect};
+}
+
+function semanticVoxelKey(point) {
+  return [point.x ?? point[0], point.y ?? point[1], point.z ?? point[2]]
+    .map((value) => Number(value).toFixed(3))
+    .join(":");
+}
+
+function semanticGround() {
+  return {
+    z: Number(semanticGroundZ.value),
+    minimum_height: Math.max(0, Number(semanticMinimumHeight.value)),
+  };
+}
+
+function semanticSnapshot() {
+  return {
+    annotation: semanticAnnotation
+      ? JSON.parse(JSON.stringify(semanticAnnotation))
+      : null,
+    draftPit: JSON.parse(JSON.stringify(semanticDraftPit)),
+  };
+}
+
+function updateSemanticControls() {
+  const loaded = Boolean(semanticAnnotation);
+  const labels = semanticAnnotation?.occupied_labels || [];
+  const pits = semanticAnnotation?.pits || [];
+  const rockCount = labels.filter((item) => item.type === "rock").length;
+  const wallCount = labels.filter((item) => item.type === "wall").length;
+  semanticFinishPitButton.disabled = !loaded || semanticDraftPit.length < 3;
+  semanticUndoButton.disabled = !semanticHistory.length;
+  semanticReloadButton.disabled = !loaded;
+  semanticSaveButton.disabled = !loaded || !semanticDirty || semanticDraftPit.length > 0;
+  semanticStatus.textContent = loaded
+    ? "岩石 " + rockCount + " 体素 · 墙 " + wallCount +
+      " 体素 · 坑 " + pits.length + " 区域" +
+      (semanticDraftPit.length ? ` · 坑草稿 ${semanticDraftPit.length} 点` : "") +
+      (semanticDirty ? " · 尚未保存" : " · 已保存")
+    : "加载地图后可以标注";
+  const marking = loaded && semanticTool.value !== "orbit";
+  voxelMapCanvas.classList.toggle("semantic-marking", marking);
+}
+
+function pushSemanticHistory() {
+  if (!semanticAnnotation) return;
+  semanticHistory.push(semanticSnapshot());
+  if (semanticHistory.length > 50) semanticHistory.shift();
+  semanticDirty = true;
+  updateSemanticControls();
 }
 
 function drawNavigationMap(voxels, path, cloud) {
@@ -554,10 +621,56 @@ function drawNavigationMap(voxels, path, cloud) {
   }
   if (navigationShowVoxels.checked) {
     context.fillStyle = "rgba(101, 227, 181, .54)";
+    const ground = semanticGround();
+    const filterHighVoxels = (
+      semanticAnnotation && ["rock", "wall"].includes(semanticTool.value)
+    );
     for (const point of points) {
+      if (filterHighVoxels && Number(point[2]) < ground.z + ground.minimum_height) {
+        continue;
+      }
       const [x, y] = toCanvas(point);
       const voxelSize = Math.max(1, Math.min(14, (Number(point[3]) || voxels.resolution || 0.1) * scale));
       context.fillRect(x - voxelSize * 0.5, y - voxelSize * 0.5, voxelSize, voxelSize);
+    }
+  }
+  if (semanticAnnotation && navigationShowSemantics.checked) {
+    const groundZ = semanticGround().z;
+    for (const pit of semanticAnnotation.pits || []) {
+      const polygon = pit.polygon || [];
+      if (polygon.length < 3) continue;
+      context.fillStyle = "rgba(61, 157, 255, .25)";
+      context.strokeStyle = "#58a6ff";
+      context.lineWidth = 2;
+      context.beginPath();
+      polygon.forEach((point, index) => {
+        const [x, y] = toCanvas([point[0], point[1], groundZ]);
+        if (index) context.lineTo(x, y);
+        else context.moveTo(x, y);
+      });
+      context.closePath();
+      context.fill();
+      context.stroke();
+    }
+    for (const label of semanticAnnotation.occupied_labels || []) {
+      const [x, y] = toCanvas([label.x, label.y, label.z]);
+      context.fillStyle = label.type === "rock" ? "#ff9f43" : "#ff5e66";
+      context.beginPath();
+      context.arc(x, y, 4.5, 0, Math.PI * 2);
+      context.fill();
+    }
+    if (semanticDraftPit.length) {
+      context.strokeStyle = "#8dc6ff";
+      context.fillStyle = "#8dc6ff";
+      context.lineWidth = 2;
+      context.beginPath();
+      semanticDraftPit.forEach((point, index) => {
+        const [x, y] = toCanvas([point[0], point[1], groundZ]);
+        if (index) context.lineTo(x, y);
+        else context.moveTo(x, y);
+        context.fillRect(x - 2, y - 2, 4, 4);
+      });
+      context.stroke();
     }
   }
   if (pathPoints.length) {
@@ -686,6 +799,37 @@ async function refreshNavigationCloud() {
   );
 }
 
+function clearSemanticAnnotations() {
+  semanticAnnotation = null;
+  semanticDraftPit = [];
+  semanticHistory = [];
+  semanticDirty = false;
+  semanticTool.value = "orbit";
+  updateSemanticControls();
+}
+
+async function refreshSemanticAnnotations(mapId) {
+  if (!mapId) {
+    clearSemanticAnnotations();
+    return;
+  }
+  const response = await fetch(
+    "/api/semantic/annotations?map_id=" + encodeURIComponent(mapId),
+    {cache: "no-store"},
+  );
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "标注加载失败");
+  semanticAnnotation = result.annotation;
+  semanticDraftPit = [];
+  semanticHistory = [];
+  semanticDirty = false;
+  semanticGroundZ.value = Number(semanticAnnotation.ground.z).toFixed(2);
+  semanticMinimumHeight.value =
+    Number(semanticAnnotation.ground.minimum_height).toFixed(2);
+  updateSemanticControls();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+}
+
 async function loadNavigationMap(automatic = false) {
   const mapId = navigationMapSelect.value;
   const map = navigationMapRecords.get(mapId);
@@ -699,6 +843,7 @@ async function loadNavigationMap(automatic = false) {
   navigationPath = {};
   navigationView = null;
   navigationPose = null;
+  clearSemanticAnnotations();
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   if (!map.loadable) {
@@ -711,7 +856,11 @@ async function loadNavigationMap(automatic = false) {
     updateNavigationMaps(Array.isArray(result.maps) ? result.maps : []);
     navigationResult = result.navigation || navigationResult;
     updateNavigation(navigationResult);
-    await refreshNavigationCloud();
+    await Promise.all([
+      refreshNavigationCloud(),
+      refreshVoxelMap(),
+      refreshSemanticAnnotations(mapId),
+    ]);
     const loadedMap = navigationMapRecords.get(mapId);
     showToast(
       `${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；` +
@@ -763,6 +912,7 @@ navigationMapSelect.addEventListener("change", () => {
   navigationPath = {};
   navigationView = null;
   navigationPose = null;
+  clearSemanticAnnotations();
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   updateNavigation({enabled: true, state: "stopped"});
@@ -770,13 +920,16 @@ navigationMapSelect.addEventListener("change", () => {
 });
 navigationShowCloud.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowVoxels.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowSemantics.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowMappingOrigin.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowRobot.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 function setNavigationGoalMode(enabled) {
   navigationGoalMode = enabled;
+  if (enabled) semanticTool.value = "orbit";
   navigationGoalButton.classList.toggle("active", enabled);
   navigationGoalButton.textContent = enabled ? "请点击地图目标" : "选择目标点";
   voxelMapCanvas.classList.toggle("selecting-goal", enabled);
+  updateSemanticControls();
 }
 
 navigationGoalButton.addEventListener("click", () => {
@@ -787,15 +940,9 @@ navigationGoalButton.addEventListener("click", () => {
 
 async function selectNavigationGoal(event) {
   if (!voxelViewport) return;
-  const rect = voxelMapCanvas.getBoundingClientRect();
-  const horizontal = (event.clientX - rect.left - voxelViewport.width * 0.5) / voxelViewport.scale;
-  const vertical = (voxelViewport.height * 0.5 - (event.clientY - rect.top)) / voxelViewport.scale;
-  const {x, y} = mapProjection.unprojectGround(
-    horizontal,
-    vertical,
-    [voxelViewport.centerX, voxelViewport.centerY, voxelViewport.centerZ],
-    voxelViewport.view,
-  );
+  const point = canvasGroundPoint(event, 0);
+  if (!point) return;
+  const {x, y} = point;
   selectedGoal = {x, y};
   try {
     await api("/api/navigation/goal", {x, y, z: 0});
@@ -807,9 +954,124 @@ async function selectNavigationGoal(event) {
   }
 }
 
+function canvasGroundPoint(event, groundZ) {
+  if (!voxelViewport) return null;
+  const rect = voxelMapCanvas.getBoundingClientRect();
+  const horizontal = (event.clientX - rect.left - voxelViewport.width * 0.5) / voxelViewport.scale;
+  const vertical = (voxelViewport.height * 0.5 - (event.clientY - rect.top)) / voxelViewport.scale;
+  return mapProjection.unprojectGround(
+    horizontal,
+    vertical,
+    [voxelViewport.centerX, voxelViewport.centerY, voxelViewport.centerZ],
+    voxelViewport.view,
+    groundZ,
+  );
+}
+
+function navigationPointToCanvas(point) {
+  if (!voxelViewport) return null;
+  const projected = mapProjection.projectMapPoint(
+    point,
+    [voxelViewport.centerX, voxelViewport.centerY, voxelViewport.centerZ],
+    voxelViewport.view,
+  );
+  return {
+    x: voxelViewport.width * 0.5 + projected.horizontal * voxelViewport.scale,
+    y: voxelViewport.height * 0.5 - projected.vertical * voxelViewport.scale,
+  };
+}
+
+function pointInsidePolygon(x, y, polygon) {
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1;
+    index < polygon.length;
+    previous = index, index += 1) {
+    const currentPoint = polygon[index];
+    const previousPoint = polygon[previous];
+    const intersects = ((currentPoint.y > y) !== (previousPoint.y > y)) &&
+      (x < (previousPoint.x - currentPoint.x) * (y - currentPoint.y) /
+        (previousPoint.y - currentPoint.y) + currentPoint.x);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function applySemanticBrush(event) {
+  if (!semanticAnnotation || !voxelViewport) return;
+  const rect = voxelMapCanvas.getBoundingClientRect();
+  const cursorX = event.clientX - rect.left;
+  const cursorY = event.clientY - rect.top;
+  const radius = Math.max(3, Math.min(80, Number(semanticBrushRadius.value)));
+  const type = semanticTool.value;
+  const labels = new Map(
+    (semanticAnnotation.occupied_labels || []).map(
+      (label) => [semanticVoxelKey(label), label],
+    ),
+  );
+  if (type === "erase") {
+    for (const [key, label] of labels) {
+      const screen = navigationPointToCanvas([label.x, label.y, label.z]);
+      if (screen && Math.hypot(screen.x - cursorX, screen.y - cursorY) <= radius) {
+        labels.delete(key);
+      }
+    }
+    semanticAnnotation.pits = (semanticAnnotation.pits || []).filter((pit) => {
+      const projected = (pit.polygon || []).map((point) =>
+        navigationPointToCanvas([point[0], point[1], semanticGround().z])
+      ).filter(Boolean);
+      return projected.length < 3 || !pointInsidePolygon(cursorX, cursorY, projected);
+    });
+  } else {
+    const ground = semanticGround();
+    for (const point of navigationVoxels.points || []) {
+      if (Number(point[2]) < ground.z + ground.minimum_height) continue;
+      const screen = navigationPointToCanvas(point);
+      if (!screen || Math.hypot(screen.x - cursorX, screen.y - cursorY) > radius) {
+        continue;
+      }
+      labels.set(semanticVoxelKey(point), {
+        type,
+        x: Number(point[0]),
+        y: Number(point[1]),
+        z: Number(point[2]),
+        size: Number(point[3]) || Number(navigationVoxels.resolution) || 0.1,
+      });
+    }
+  }
+  semanticAnnotation.ground = semanticGround();
+  semanticAnnotation.occupied_labels = Array.from(labels.values());
+  semanticDirty = true;
+  updateSemanticControls();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+}
+
+function addSemanticPitVertex(event) {
+  const point = canvasGroundPoint(event, semanticGround().z);
+  if (!point || !semanticAnnotation) return;
+  pushSemanticHistory();
+  semanticDraftPit.push([
+    Number(point.x.toFixed(3)),
+    Number(point.y.toFixed(3)),
+  ]);
+  updateSemanticControls();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+}
+
 voxelMapCanvas.addEventListener("pointerdown", (event) => {
   if (navigationGoalMode) {
     selectNavigationGoal(event);
+    return;
+  }
+  if (semanticAnnotation && semanticTool.value !== "orbit") {
+    if (semanticTool.value === "pit") {
+      addSemanticPitVertex(event);
+      return;
+    }
+    pushSemanticHistory();
+    semanticBrushActive = true;
+    semanticBrushPointerId = event.pointerId;
+    voxelMapCanvas.setPointerCapture?.(event.pointerId);
+    applySemanticBrush(event);
     return;
   }
   if (!voxelViewport) return;
@@ -836,6 +1098,10 @@ voxelMapCanvas.addEventListener("pointerdown", (event) => {
   voxelMapCanvas.classList.add("dragging");
 });
 voxelMapCanvas.addEventListener("pointermove", (event) => {
+  if (semanticBrushActive && semanticBrushPointerId === event.pointerId) {
+    applySemanticBrush(event);
+    return;
+  }
   const pointer = navigationPointers.get(event.pointerId);
   if (!pointer) return;
   pointer.x = event.clientX;
@@ -859,6 +1125,14 @@ voxelMapCanvas.addEventListener("pointermove", (event) => {
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
 });
 function endNavigationDrag(event) {
+  if (semanticBrushPointerId === event.pointerId) {
+    if (voxelMapCanvas.hasPointerCapture?.(event.pointerId)) {
+      voxelMapCanvas.releasePointerCapture(event.pointerId);
+    }
+    semanticBrushActive = false;
+    semanticBrushPointerId = null;
+    return;
+  }
   if (!navigationPointers.has(event.pointerId)) return;
   if (voxelMapCanvas.hasPointerCapture?.(event.pointerId)) {
     voxelMapCanvas.releasePointerCapture(event.pointerId);
@@ -887,6 +1161,96 @@ voxelMapCanvas.addEventListener("wheel", (event) => {
   navigationView.zoom = Math.max(0.3, Math.min(5.0, navigationView.zoom * Math.exp(-event.deltaY * 0.001)));
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
 }, {passive: false});
+
+semanticTool.addEventListener("change", () => {
+  if (semanticTool.value !== "orbit") {
+    setNavigationGoalMode(false);
+    navigationShowSemantics.checked = true;
+  }
+  updateSemanticControls();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+});
+
+function applySemanticGroundInputs() {
+  if (!semanticAnnotation) return;
+  semanticAnnotation.ground = semanticGround();
+  semanticDirty = true;
+  updateSemanticControls();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+}
+
+semanticGroundZ.addEventListener("change", applySemanticGroundInputs);
+semanticMinimumHeight.addEventListener("change", applySemanticGroundInputs);
+
+semanticFinishPitButton.addEventListener("click", () => {
+  if (!semanticAnnotation || semanticDraftPit.length < 3) return;
+  const depth = Number(semanticPitDepth.value);
+  if (!Number.isFinite(depth) || depth <= 0) {
+    showToast("坑深必须大于 0");
+    return;
+  }
+  pushSemanticHistory();
+  const usedIds = new Set((semanticAnnotation.pits || []).map((pit) => pit.id));
+  let sequence = 1;
+  while (usedIds.has(`pit_${String(sequence).padStart(3, "0")}`)) sequence += 1;
+  semanticAnnotation.pits.push({
+    id: `pit_${String(sequence).padStart(3, "0")}`,
+    type: "pit",
+    depth,
+    polygon: semanticDraftPit,
+  });
+  semanticDraftPit = [];
+  semanticDirty = true;
+  updateSemanticControls();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+});
+
+semanticUndoButton.addEventListener("click", () => {
+  const snapshot = semanticHistory.pop();
+  if (!snapshot) return;
+  semanticAnnotation = snapshot.annotation;
+  semanticDraftPit = snapshot.draftPit;
+  semanticDirty = true;
+  if (semanticAnnotation) {
+    semanticGroundZ.value = Number(semanticAnnotation.ground.z).toFixed(2);
+    semanticMinimumHeight.value =
+      Number(semanticAnnotation.ground.minimum_height).toFixed(2);
+  }
+  updateSemanticControls();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+});
+
+semanticReloadButton.addEventListener("click", async () => {
+  const mapId = semanticAnnotation?.map_id;
+  if (!mapId || (semanticDirty &&
+    !window.confirm("放弃尚未保存的修改并重新载入标注？"))) return;
+  try {
+    await refreshSemanticAnnotations(mapId);
+    showToast("标注已重新载入");
+  } catch (error) {
+    showToast(`标注重载失败：${error.message}`);
+  }
+});
+
+semanticSaveButton.addEventListener("click", async () => {
+  if (!semanticAnnotation) return;
+  semanticAnnotation.ground = semanticGround();
+  semanticSaveButton.disabled = true;
+  try {
+    const result = await api("/api/semantic/save", semanticAnnotation);
+    semanticAnnotation = result.annotation;
+    semanticDraftPit = [];
+    semanticHistory = [];
+    semanticDirty = false;
+    updateSemanticControls();
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+    showToast("语义标注已校验并保存");
+  } catch (error) {
+    semanticDirty = true;
+    updateSemanticControls();
+    showToast(`标注保存失败：${error.message}`);
+  }
+});
 
 function updateMapping(mapping) {
   if (!mapping) return;

@@ -165,14 +165,48 @@
         <span>显示图层</span>
         <label><input id="navigationShowCloud" type="checkbox" checked> 彩色建图点云</label>
         <label><input id="navigationShowVoxels" type="checkbox" checked> OctoMap 体素</label>
+        <label><input id="navigationShowSemantics" type="checkbox" checked> 语义标注</label>
         <label><input id="navigationShowMappingOrigin" type="checkbox" checked> 建图起点 (0, 0, 0)</label>
         <label><input id="navigationShowRobot" type="checkbox" checked> 当前定位</label>
+      </div>
+      <div class="semantic-toolbar" aria-label="离线语义标注工具">
+        <label>
+          <span>标注工具</span>
+          <select id="semanticTool">
+            <option value="orbit">旋转地图</option>
+            <option value="rock">岩石画笔</option>
+            <option value="wall">墙体画笔</option>
+            <option value="pit">坑多边形</option>
+            <option value="erase">橡皮擦</option>
+          </select>
+        </label>
+        <label>
+          <span>地面 Z (m)</span>
+          <input id="semanticGroundZ" type="number" step="0.05" value="0">
+        </label>
+        <label>
+          <span>最小高度 (m)</span>
+          <input id="semanticMinimumHeight" type="number" min="0" step="0.05" value="0.15">
+        </label>
+        <label>
+          <span>画笔 (px)</span>
+          <input id="semanticBrushRadius" type="number" min="3" max="80" step="1" value="18">
+        </label>
+        <label>
+          <span>坑深 (m)</span>
+          <input id="semanticPitDepth" type="number" min="0.01" step="0.05" value="0.30">
+        </label>
+        <button id="semanticFinishPitButton" disabled>闭合坑区域</button>
+        <button id="semanticUndoButton" disabled>撤销</button>
+        <button id="semanticReloadButton" disabled>重载标注</button>
+        <button id="semanticSaveButton" class="mapping-start" disabled>保存标注</button>
+        <span id="semanticStatus" class="semantic-status">加载地图后可以标注</span>
       </div>
       <div class="voxel-frame">
         <canvas id="voxelMapCanvas" aria-label="可拖动查看的完整彩色点云、体素地图和全局路径"></canvas>
         <span id="voxelMapHint" class="preview-overlay">加载地图后显示完整彩色点云和体素地图；拖动旋转，滚轮缩放</span>
       </div>
-      <p class="navigation-note">选择地图会自动生成 HLoc 索引、转换并显示完整彩色点云和 OctoMap。默认视角中 +X（前方）朝上、+Y（左方）朝左。点击“自动定位”后缓慢移动或转动机器人：连续 3 帧一致的 GPU HLoc 粗位姿用于初始化 ICP；ICP 成功后 HLoc 暂停，连续 5 帧 ICP 失败时自动重启 HLoc。紫色箭头为当前机器人位姿；定位完成后可选择目标点规划路径。</p>
+      <p class="navigation-note">选择地图会自动生成 HLoc 索引、转换并显示完整彩色点云和 OctoMap。语义标注不会修改原始地图：岩石/墙画笔只选择高于地面阈值的占用体素；坑通过地面多边形和估计深度记录。默认视角中 +X（前方）朝上、+Y（左方）朝左。点击“自动定位”后缓慢移动或转动机器人：连续 3 帧一致的 GPU HLoc 粗位姿用于初始化 ICP；ICP 成功后 HLoc 暂停，连续 5 帧 ICP 失败时自动重启 HLoc。紫色箭头为当前机器人位姿；定位完成后可选择目标点规划路径。</p>
     </section>
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

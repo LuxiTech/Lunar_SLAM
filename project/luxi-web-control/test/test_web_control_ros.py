@@ -96,6 +96,21 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert response.status == 200
             assert b"unprojectGround" in response.read()
 
+        with urlopen(base_url + "/", timeout=2.0) as response:
+            page = response.read()
+            assert b"semanticSaveButton" in page
+            assert b"semanticGroundZ" in page
+            assert b"navigationShowSemantics" in page
+
+        with urlopen(base_url + "/app.js", timeout=2.0) as response:
+            assert response.headers["Cache-Control"] == "no-store"
+            app = response.read()
+            assert b"/api/semantic/save" in app
+            assert b"applySemanticBrush" in app
+            assert b"semanticAnnotation && navigationShowSemantics.checked" in app
+            assert b"[...maps].reverse().find" in app
+            assert b"navigationDrag.yaw +" in app
+
         with urlopen(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200
             preview = json.load(response)["cloud"]

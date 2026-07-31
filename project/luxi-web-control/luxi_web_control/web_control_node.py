@@ -31,7 +31,7 @@ import subprocess
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
@@ -45,7 +45,7 @@ from std_msgs.msg import Float32, String
 from visualization_msgs.msg import Marker
 
 
-MAX_REQUEST_BYTES = 16 * 1024
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 SIOCGIFADDR = 0x8915
 MAP_IDENTIFIER = re.compile(r"^map\d+$")
 PLY_SCALAR_FORMATS = {
@@ -617,6 +617,104 @@ class HlocIndexBuilder:
         return True, f"map {map_id} HLoc index built with CUDA"
 
 
+class SemanticAnnotationStore:
+    """Validate and persist offline map annotations through the C++ tool."""
+
+    def __init__(
+        self,
+        executable: Path,
+        output_root: Path,
+        octomap_library_path: Path,
+        timeout: float,
+    ) -> None:
+        self.executable = executable
+        self.output_root = output_root
+        self.octomap_library_path = octomap_library_path
+        self.timeout = timeout
+        self._lock = threading.Lock()
+
+    def _run(self, arguments: list, input_text: Optional[str] = None) -> dict:
+        if not self.executable.is_file():
+            raise RuntimeError(
+                f"semantic annotation tool is missing: {self.executable}"
+            )
+        environment = os.environ.copy()
+        environment["LD_LIBRARY_PATH"] = (
+            str(self.octomap_library_path)
+            + ":"
+            + environment.get("LD_LIBRARY_PATH", "")
+        )
+        try:
+            result = subprocess.run(
+                [str(self.executable), *arguments],
+                input=input_text,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=self.timeout,
+                env=environment,
+            )
+            output = json.loads(result.stdout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("semantic annotation operation timed out") from exc
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            detail = getattr(exc, "stderr", "") or str(exc)
+            raise RuntimeError(detail.strip()[-800:]) from exc
+        if not isinstance(output, dict):
+            raise RuntimeError("semantic annotation tool returned invalid JSON")
+        return output
+
+    def load(self, map_id: str, octomap_path: Path) -> dict:
+        """Return validated annotations and an automatically estimated ground."""
+        with self._lock:
+            summary = self._run(["inspect", str(octomap_path)])
+            output = self.output_root / map_id / "annotations.json"
+            if output.is_file():
+                annotation = self._run(
+                    ["validate", str(octomap_path), map_id, str(output)]
+                )
+                saved = True
+            else:
+                annotation = {
+                    "schema_version": 1,
+                    "map_id": map_id,
+                    "frame_id": "map",
+                    "ground": {
+                        "z": summary["suggested_ground_z"],
+                        "minimum_height": 0.15,
+                    },
+                    "occupied_labels": [],
+                    "pits": [],
+                }
+                saved = False
+            return {
+                "annotation": annotation,
+                "summary": summary,
+                "saved": saved,
+                "path": str(output),
+            }
+
+    def save(self, map_id: str, octomap_path: Path, annotation: dict) -> dict:
+        """Validate against occupied voxels and atomically save canonical JSON."""
+        output = self.output_root / map_id / "annotations.json"
+        with self._lock:
+            canonical = self._run(
+                [
+                    "save",
+                    str(octomap_path),
+                    map_id,
+                    "-",
+                    str(output),
+                ],
+                json.dumps(annotation, ensure_ascii=False),
+            )
+        return {
+            "annotation": canonical,
+            "saved": True,
+            "path": str(output),
+        }
+
+
 class MappingController:
     """Own the RTAB-Map launch process started from the web interface."""
 
@@ -1061,7 +1159,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         """Serve current state or one of the bundled web assets."""
-        path = urlsplit(self.path).path
+        parsed_url = urlsplit(self.path)
+        path = parsed_url.path
         if path == "/api/status":
             self._send_json(HTTPStatus.OK, self.server.control_node.status())
             return
@@ -1104,6 +1203,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 {"ok": True, "path": self.server.control_node.path_preview()},
             )
             return
+        if path == "/api/semantic/annotations":
+            map_id = parse_qs(parsed_url.query).get("map_id", [""])[0]
+            try:
+                result = self.server.control_node.semantic_annotations(map_id)
+            except (RuntimeError, ValueError) as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
 
         assets = {
             "/": ("index.html", "text/html; charset=utf-8"),
@@ -1132,7 +1240,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             content_type,
             len(data),
-            cache_control="public, max-age=60",
+            cache_control="no-store",
         )
         self.wfile.write(data)
 
@@ -1270,6 +1378,14 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 "ok": True, "message": message, "goal": {"x": x, "y": y, "z": z},
             })
             return
+        if path == "/api/semantic/save":
+            try:
+                result = node.save_semantic_annotations(payload)
+            except (RuntimeError, ValueError) as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
         self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
 
 
@@ -1339,6 +1455,9 @@ class WebControlNode(Node):
         self.declare_parameter("cloud_preview_topic", "/rtabmap/cloud_map")
         self.declare_parameter("max_cloud_points", 1800)
         self.declare_parameter("max_saved_cloud_points", 0)
+        self.declare_parameter("semantic_annotation_timeout", 15.0)
+        self.declare_parameter("semantic_annotation_executable", "")
+        self.declare_parameter("semantic_maps_root", "")
 
         self.cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
         bind_address = str(self.get_parameter("bind_address").value)
@@ -1414,6 +1533,30 @@ class WebControlNode(Node):
             ).resolve(),
             timeout=float(
                 self.get_parameter("hloc_index_build_timeout").value
+            ),
+        )
+        annotation_executable = str(
+            self.get_parameter("semantic_annotation_executable").value
+        )
+        semantic_maps_root = str(
+            self.get_parameter("semantic_maps_root").value
+        )
+        self.semantic_annotation_store = SemanticAnnotationStore(
+            executable=Path(
+                annotation_executable
+                or workspace_root
+                / "install/luxi_semantic_annotation/lib/"
+                "luxi_semantic_annotation/semantic_annotation_tool"
+            ).resolve(),
+            output_root=Path(
+                semantic_maps_root
+                or workspace_root / "maps/semantic_maps"
+            ).resolve(),
+            octomap_library_path=(
+                workspace_root / "3parts/octomap/install/lib"
+            ).resolve(),
+            timeout=float(
+                self.get_parameter("semantic_annotation_timeout").value
             ),
         )
         self.octomap_points_executable = (
@@ -1659,6 +1802,8 @@ class WebControlNode(Node):
             raise ValueError("map_conversion_timeout must be positive")
         if self.hloc_index_builder.timeout <= 0.0:
             raise ValueError("hloc_index_build_timeout must be positive")
+        if self.semantic_annotation_store.timeout <= 0.0:
+            raise ValueError("semantic_annotation_timeout must be positive")
         if not self.cmd_vel_topic:
             raise ValueError("cmd_vel_topic must not be empty")
         invalid_limits = any(
@@ -2001,6 +2146,34 @@ class WebControlNode(Node):
     def navigation_maps(self) -> list:
         """Discover selectable pairs without exposing arbitrary filesystem paths."""
         return discover_navigation_maps(self.maps_root)
+
+    def _semantic_map_record(self, map_id: str) -> Dict[str, Any]:
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            raise ValueError("map_id must use the mapNNN format")
+        record = next(
+            (item for item in self.navigation_maps() if item["id"] == map_id),
+            None,
+        )
+        if record is None or not record.get("octomap_path"):
+            raise ValueError(f"map {map_id} has no saved OctoMap")
+        return record
+
+    def semantic_annotations(self, map_id: str) -> dict:
+        """Load annotations for one discovered OctoMap."""
+        record = self._semantic_map_record(map_id)
+        return self.semantic_annotation_store.load(
+            map_id, Path(record["octomap_path"])
+        )
+
+    def save_semantic_annotations(self, annotation: dict) -> dict:
+        """Validate and save annotations without modifying geometry maps."""
+        map_id = annotation.get("map_id")
+        if not isinstance(map_id, str):
+            raise ValueError("annotation map_id must be a string")
+        record = self._semantic_map_record(map_id)
+        return self.semantic_annotation_store.save(
+            map_id, Path(record["octomap_path"]), annotation
+        )
 
     def _convert_navigation_map(self, record: Dict[str, Any]) -> Tuple[bool, str]:
         """Export a saved RTAB-Map database using the project's trusted tool."""

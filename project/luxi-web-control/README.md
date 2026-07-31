@@ -25,7 +25,8 @@ cd /home/lunar/project/lunar_slam
 source /opt/ros/humble/setup.bash
 sudo apt-get install ros-humble-rtabmap-launch
 colcon build --packages-select \
-  luxi_adapter luxi_location luxi_rtab_map luxi_voxel_navigation luxi_web_control \
+  luxi_adapter luxi_location luxi_rtab_map luxi_semantic_annotation \
+  luxi_voxel_navigation luxi_web_control \
   --symlink-install
 ```
 
@@ -89,6 +90,7 @@ hostname -I
 | RGB 预览 | 终端一的 `luxi_adapter` profile |
 | 开始建图、停止保存 | 终端一与终端二；由网页启动 RTAB-Map 算法 |
 | 加载已有地图、显示 OctoMap | 终端二；选择已保存的 `.db` 后网页会自动调用 `tools/export_rtabmap_octomap.sh` 生成彩色 PLY 与 `.bt`，再加载显示 |
+| 离线标注岩石、墙、坑 | 终端二与已有 `.bt`；不需要启动相机或定位 |
 | RTAB-Map 粗定位、ICP 精定位、选择目标点 | 终端一、终端二与已保存的 `.db`、彩色 PLY、`.bt` |
 
 关闭时先在网页点击“停止建图”（若正在建图），再在两个终端分别按 `Ctrl-C`；网页不
@@ -202,8 +204,30 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 启动相机定位。保存地图的彩色 PLY 默认读取并显示全部有效顶点，不使用实时预览的
 1800 点抽样上限。地图画布支持拖动旋转视角和滚轮缩放。默认视角遵循 ROS REP-103：
 `+X`（机器人前方）朝屏幕上方，`+Y`（机器人左方）朝屏幕左侧，画布左下角同时显示
-方向标记。水平拖动采用观察相机环绕语义：向右拖动时观察方向向右环绕，地图内容相对
-向左旋转；该手势只改变观察角度，不修改地图坐标。
+方向标记。首次打开时默认选择编号最大的可用地图；定时刷新列表不会改变用户已经选择
+的地图。水平拖动采用轨道视角语义：向右拖动时观察视角向右环绕，地图内容向左旋转；
+该手势只改变观察角度，不修改地图坐标。
+
+### 已有地图的离线语义标注
+
+选择并加载地图后，地图画布上方会出现语义标注工具。操作顺序如下：
+
+“显示图层”中的“语义标注”复选框可以单独显示或隐藏岩石、墙和坑覆盖层；关闭它只
+影响网页显示，不会删除已经加载或保存的标注。选择标注画笔时该图层会自动重新开启。
+
+1. 检查自动估计的“地面 Z”，必要时手工修正；“最小高度”决定岩石/墙画笔可选择的
+   最低占用体素。
+2. 选择“岩石画笔”或“墙体画笔”后在体素上拖动；选择“橡皮擦”可删除标签，点击
+   已闭合的坑区域可删除整块坑标注。
+3. 标注坑时依次点击地面上的边界点，设置坑深，再点击“闭合坑区域”。未闭合的草稿
+   不允许保存。
+4. 点击“保存标注”。服务端会用 `luxi_semantic_annotation` 核对每个岩石/墙标签确实
+   对应 `.bt` 中高于阈值的占用体素，再原子写入：
+   `maps/semantic_maps/mapNNN/annotations.json`。
+
+原始 `.bt`、RTAB-Map `.db` 和彩色 PLY 始终保持只读。坑之所以记录为二维地面多边形
+加深度，是因为当前 `.bt` 仅能可靠提供占用体素，坑内部没有可供画笔附着的占用节点。
+“撤销”保留最近 50 次操作，“重载标注”可放弃尚未保存的修改。
 
 要进行无需手工点击初始位姿的自动定位：
 
@@ -252,6 +276,8 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `1800` | 单次浏览器点云预览的最大抽样点数 |
 | `max_saved_cloud_points` | `0` | 保存 PLY 的显示点数上限；0 表示显示全部有效点 |
+| `semantic_annotation_timeout` | `15.0` | 单次标注检查或保存的超时秒数 |
+| `semantic_maps_root` | `maps/semantic_maps` | 独立语义标注输出目录 |
 | `navigation_localization_pose_topic` | `/luxi_hloc/coarse_pose` | HLoc 粗定位输入 |
 | `navigation_refined_pose_topic` | `/luxi_location/pose` | ICP 精定位结果 |
 | `navigation_refined_fitness_topic` | `/luxi_location/fitness` | ICP 匹配得分 |
@@ -272,5 +298,7 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 - `POST /api/navigation/stop`：停止定位、规划相关进程。
 - `GET /api/preview/rgb`：最新压缩 RGB 图像，未收到相机数据时返回 404。
 - `GET /api/preview/cloud`：抽样后的 XYZRGB 点云 JSON，用于网页 Canvas 预览。
+- `GET /api/semantic/annotations?map_id=mapNNN`：检查 OctoMap 并加载独立标注。
+- `POST /api/semantic/save`：校验并原子保存所选地图的语义标注 JSON。
 
 即使外部程序直接调用 API，服务端限幅、急停和超时看门狗仍然生效。

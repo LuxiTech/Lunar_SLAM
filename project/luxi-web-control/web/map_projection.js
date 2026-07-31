@@ -23,7 +23,7 @@
     return {horizontal, vertical, depth};
   }
 
-  function unprojectGround(horizontal, vertical, center, view) {
+  function unprojectGround(horizontal, vertical, center, view, groundZ = 0) {
     const cosineYaw = Math.cos(view.yaw);
     const sineYaw = Math.sin(view.yaw);
     const cosinePitch = Math.cos(view.pitch);
@@ -31,7 +31,9 @@
     if (Math.abs(sinePitch) < 1e-6) {
       throw new Error("map view pitch is too small for ground selection");
     }
-    const depth = (vertical + cosinePitch * center[2]) / sinePitch;
+    const depth = (
+      vertical - cosinePitch * (groundZ - center[2])
+    ) / sinePitch;
     return {
       x: center[0] + cosineYaw * horizontal + sineYaw * depth,
       y: center[1] - sineYaw * horizontal + cosineYaw * depth,

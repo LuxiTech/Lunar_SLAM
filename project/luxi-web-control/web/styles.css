@@ -114,10 +114,35 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .navigation-layers > span { font-weight: 800; color: var(--text); }
 .navigation-layers label { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
 .navigation-layers input { accent-color: var(--accent); }
+.semantic-toolbar {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(92px, 1fr)) repeat(4, auto);
+  gap: 8px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: rgba(8, 13, 19, .56);
+}
+.semantic-toolbar label { display: grid; gap: 4px; color: var(--muted); font-size: .66rem; }
+.semantic-toolbar input, .semantic-toolbar select, .semantic-toolbar button {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0d121a;
+  color: var(--text);
+  font-size: .7rem;
+}
+.semantic-toolbar input, .semantic-toolbar select { width: 100%; padding: 0 7px; }
+.semantic-toolbar button { padding: 0 9px; cursor: pointer; font-weight: 750; }
+.semantic-toolbar button:disabled { cursor: not-allowed; opacity: .42; }
+.semantic-status { grid-column: 1 / -1; color: var(--muted); font-size: .68rem; }
 .voxel-frame { position: relative; min-height: 380px; margin-top: 15px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: #080d13; }
 .voxel-frame canvas { display: block; width: 100%; height: 380px; cursor: grab; touch-action: none; }
 .voxel-frame canvas.dragging { cursor: grabbing; }
 .voxel-frame canvas.selecting-goal { cursor: crosshair; }
+.voxel-frame canvas.semantic-marking { cursor: crosshair; }
 
 .panel {
   border: 1px solid var(--border);
@@ -368,6 +393,8 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
   .preview-grid { grid-template-columns: 1fr; }
   .navigation-actions { grid-template-columns: 1fr 1fr; }
   .navigation-actions label { grid-column: 1 / -1; }
+  .semantic-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .semantic-toolbar label:first-child { grid-column: 1 / -1; }
   .status-card { grid-template-columns: 1fr 1fr; }
   .status-card > div:first-child { grid-column: 1 / -1; }
   .drive-panel { min-height: auto; padding: 18px 14px; }

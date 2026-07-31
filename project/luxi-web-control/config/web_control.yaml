@@ -61,3 +61,5 @@ web_control:
     max_cloud_points: 1800
     # Zero loads every valid vertex from the selected saved PLY.
     max_saved_cloud_points: 0
+    semantic_annotation_timeout: 15.0
+    semantic_maps_root: /home/lunar/project/lunar_slam/maps/semantic_maps
