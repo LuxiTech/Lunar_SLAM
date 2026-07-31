@@ -13,31 +13,58 @@ stereo_depth_node:
     # This keeps the color information for RGB point clouds. The packed
     # /stereo_camera/image_pair_mono topic is faster, but it is grayscale-only.
     stereo_pair_topic: ''
+    # Keep mapping on the same reviewed GPU path as the standalone depth test.
+    # Do not let this launch silently fall back to the old CPU-only defaults.
+    depth_backend: vpi_cuda
+    vpi_fallback_to_sgbm: true
+    # The current calibration's positive right P[3] means VPI must match
+    # right->left; stereo_depth_node remaps the result back to the normal
+    # left-camera grid before publishing RGBDImage.
+    matcher_input_order: right_left
+    right_rectification_y_offset_px: 2.0
+    vpi_confidence_threshold: 16384
+    vpi_p1: 8
+    vpi_p2: 96
+    vpi_uniqueness: -1.0
     rectify_images: true
-    processing_scale: 0.5
-    # RViz-only streams: 512x375 at the same rate as the depth node.
-    # Mapping continues to receive the full 1024x750 RGBDImage.
+    # Match the calibrated 1024x750 camera input exactly. CPU reduction comes from the
+    # capture-side full-FOV scaling, bounded queues and compressed previews.
+    processing_scale: 1.0
+    # RViz-only streams remain downscaled and compressed.
+    # Mapping receives the full 1024x750 RGBDImage.
     preview_scale: 0.5
     preview_publish_every_n_frames: 1
+    # CUDA-SGM takes about 0.4 s per 1024x750 frame on this NX. Limit only
+    # RGBD production; camera previews remain independently at 10 Hz.
+    max_processing_fps: 2.5
+    opencv_num_threads: 2
     # /stereo/points is used only by the lightweight RGB cloud viewer. RTAB-Map
     # itself consumes /stereo/rgbd_image, so a coarser debug cloud does not
     # reduce odometry or mapping quality but avoids flooding RViz/DDS.
-    point_cloud_step: 6
+    # Four times denser than the former RViz-only cloud while staying bounded
+    # enough for the NX and the host DDS link.
+    point_cloud_step: 4
     baseline_m: 0.0
     # 0.5 m is near the stereo pair's useful lower range at 1024x750.
     # Use 128 disparities so near objects are not clipped, then filter very
     # close/noisy points before they enter RTAB-Map.
     max_disparity: 128
-    block_size: 9
-    uniqueness_ratio: 20
-    speckle_size: 220
-    speckle_range: 3
-    disp12_max_diff: 1
+    # 3-way is the best density/latency setting on the NX. The implementation
+    # also supports hh4/hh for offline high-quality experiments.
+    sgbm_mode: 3way
+    block_size: 7
+    uniqueness_ratio: 10
+    speckle_size: 80
+    speckle_range: 4
+    disp12_max_diff: 2
     median_blur_size: 3
-    texture_filter_min_gradient: 4.0
+    # Enhance matching texture after rectification without inventing depth.
+    clahe_clip_limit: 0.0
+    clahe_tile_grid_size: 8
+    texture_filter_min_gradient: 2.0
     depth_edge_filter_max_delta_m: 0.10
-    depth_neighbor_filter_min_count: 3
-    depth_neighbor_filter_max_delta_m: 0.07
+    depth_neighbor_filter_min_count: 2
+    depth_neighbor_filter_max_delta_m: 0.10
     min_depth_m: 0.45
     max_depth_m: 4.5
 
@@ -56,7 +83,7 @@ rgb_cloud_accumulator_node:
     # Publish each incoming cloud for responsive visualization, but keep the
     # full accumulated message compact enough to render at camera rate.
     publish_every_n_clouds: 1
-    max_voxels: 25000
+    max_voxels: 16000
 
 rgbd_odometry:
   ros__parameters:
@@ -80,8 +107,8 @@ rgbd_odometry:
     approx_sync_max_interval: 0.01
     # Preserve enough history to absorb bursty DDS delivery from the camera
     # driver and rectification thread.
-    topic_queue_size: 8
-    sync_queue_size: 8
+    topic_queue_size: 2
+    sync_queue_size: 2
     qos: 1
     qos_camera_info: 1
     qos_imu: 2
@@ -92,20 +119,37 @@ rgbd_odometry:
     # parameters intentionally prefer continuous tracking/low latency over
     # extracting the maximum number of features from every 1024x750 frame.
     Odom/Strategy: '0'
-    Odom/GuessMotion: 'false'
-    Odom/ResetCountdown: '1'
-    # The 2x2 sampled 1024x750 stream has fewer stereo features than the
+    # Kalman filtering reduces the small frame-to-frame pose jitter shown by
+    # the camera TF when the rig is stationary. Motion prediction uses a
+    # short history instead of the last noisy increment alone.
+    Odom/FilteringStrategy: '1'
+    Odom/GuessMotion: 'true'
+    Odom/GuessSmoothingDelay: '0.20'
+    # A single weak/blurred frame should not reset the map. Keep the last
+    # valid visual pose and resume tracking when texture returns.
+    Odom/ResetCountdown: '0'
+    # The 1024x750 stream has fewer stereo features than the
     # original sensor resolution. Keep this low enough to avoid odometry
     # dropouts in weakly textured indoor scenes; increase it later if drift is
     # more problematic than tracking continuity.
     Odom/FillInfoData: 'true'
-    Vis/MinInliers: '8'
-    Vis/MaxFeatures: '600'
+    # Reject weak matches when the rig is stationary. The former value (8)
+    # accepted noisy stereo correspondences as real motion, causing the
+    # odom/map pose to creep in RTAB-Map's GUI.
+    Vis/MinInliers: '20'
+    # 800 features is sufficient at 1024x750 while keeping odometry below
+    # the 200 ms stereo-depth period on the NX.
+    Vis/MaxFeatures: '800'
     Vis/FeatureType: '8'
-    Vis/CorType: '1'
+    # OdometryF2M supports feature matching (0). Type 1 is rejected by this
+    # backend and silently falls back to 0 while emitting a warning.
+    Vis/CorType: '0'
     Vis/Iterations: '100'
     Vis/BundleAdjustment: '0'
-    Vis/PnPReprojError: '4'
+    # Do global bundle adjustment offline after saving a map. Running local BA
+    # on every frame was the largest source of motion-time UI lag.
+    OdomF2M/BundleAdjustment: '0'
+    Vis/PnPReprojError: '2'
 
 rtabmap:
   ros__parameters:
@@ -118,6 +162,7 @@ rtabmap:
     publish_tf: true
     subscribe_stereo: false
     subscribe_depth: false
+    subscribe_rgb: false
     subscribe_rgbd: true
     rgbd_cameras: 1
     subscribe_odom: true
@@ -126,8 +171,8 @@ rtabmap:
     subscribe_imu: false
     approx_sync: true
     approx_sync_max_interval: 0.01
-    topic_queue_size: 8
-    sync_queue_size: 8
+    topic_queue_size: 2
+    sync_queue_size: 2
     # The RGBD frame and /odom are approximately synchronized below, therefore
     # no long TF wait is required in the mapping callback.
     wait_for_transform: 0.2
@@ -146,13 +191,16 @@ rtabmap:
     delete_db_on_start: true
     Mem/IncrementalMemory: 'true'
     Mem/InitWMWithAllNodes: 'false'
-    Rtabmap/DetectionRate: '4'
+    # Match the measured ~2.5 Hz RGBD rate, avoiding queued map work while
+    # accepting every fresh depth frame. Smaller thresholds yield continuity.
+    Rtabmap/DetectionRate: '2.5'
     Rtabmap/TimeThr: '0'
-    RGBD/LinearUpdate: '0.02'
-    RGBD/AngularUpdate: '0.03'
+    RGBD/LinearUpdate: '0.04'
+    RGBD/AngularUpdate: '0.05'
     RGBD/OptimizeFromGraphEnd: 'false'
-    Vis/MinInliers: '8'
-    Vis/MaxFeatures: '600'
+    # Avoid weak loop closures bending a map while the camera is still.
+    Vis/MinInliers: '20'
+    Vis/MaxFeatures: '800'
     Mem/SaveDepth16Format: 'true'
     RGBD/CreateOccupancyGrid: 'true'
     Grid/Sensor: '1'
@@ -164,19 +212,21 @@ rtabmap:
     Grid/MaxObstacleHeight: '2.0'
     Grid/RangeMin: '0.45'
     Grid/RangeMax: '4.5'
-    Grid/NoiseFilteringRadius: '0.08'
-    Grid/NoiseFilteringMinNeighbors: '4'
+    Grid/NoiseFilteringRadius: '0.05'
+    Grid/NoiseFilteringMinNeighbors: '2'
 
 rtabmap_viz:
   ros__parameters:
     frame_id: base_link
     subscribe_stereo: false
-    subscribe_rgbd: true
-    rgbd_cameras: 1
+    # GUI receives mapData + graph from rtabmap. Do not process every raw
+    # RGB-D frame a second time just to render a live cloud; that work belongs
+    # to odometry and mapping, and caused the visible motion lag.
+    subscribe_rgbd: false
+    # The GUI already receives RTAB-Map's graph/mapData. Subscribing to odom
+    # as well makes the Qt renderer redraw for every pose update without
+    # improving the map, costing a full NX CPU core.
+    subscribe_odom: false
     subscribe_odom_info: false
-    approx_sync: true
-    approx_sync_max_interval: 0.01
-    topic_queue_size: 8
-    sync_queue_size: 8
-    qos_image: 1
-    qos_camera_info: 1
+    topic_queue_size: 2
+    sync_queue_size: 2

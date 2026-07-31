@@ -1,7 +1,8 @@
 yesense_pub:
   ros__parameters:
-    # Stable alias created by /etc/udev/rules.d/99-imu-usb.rules.
-    serial_port: /dev/imu-usb
+    # Stable udev alias for the H30 USB CDC device (VID:PID 1a86:55d4,
+    # serial 5C2C063825). See config/99-h30-imu.rules.
+    serial_port: /dev/H30-imu
     baud_rate: 921600
     frame_id: imu_link
     driver_type: ros_serial

@@ -75,9 +75,7 @@ humble_system_packages=(
   rtabmap_ros rtabmap_rviz_plugins rtabmap_slam rtabmap_sync rtabmap_util
   rtabmap_viz
 )
-colcon --log-base log_humble build --symlink-install \
-  --build-base build_humble \
-  --install-base install_humble \
+colcon build --symlink-install \
   --packages-select serial yesense_interface yesense_std_ros2 \
   hikrobot_camera_driver stereo_depth hik_bringup \
   --packages-ignore "${humble_system_packages[@]}" \
@@ -87,6 +85,6 @@ colcon --log-base log_humble build --symlink-install \
 echo
 echo "Build complete. Activate it with:"
 echo "  source /opt/ros/humble/setup.bash"
-echo "  source ${workspace_dir}/install_humble/setup.bash"
+echo "  source ${workspace_dir}/install/setup.bash"
 echo "Then test the camera:"
 echo "  ros2 launch hik_bringup camera_only.launch.py"

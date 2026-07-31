@@ -14,6 +14,13 @@ find_package(ament_index_cpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
+# JetPack 6 / VPI 3 installs an exported CMake target named `vpi`.  This is
+# intentionally a required dependency: the default depth backend below is the
+# CUDA SGM implementation, while OpenCV SGBM remains available at runtime as a
+# fallback backend.
+find_package(vpi CONFIG REQUIRED
+  PATHS /opt/nvidia/vpi3/lib/aarch64-linux-gnu/cmake/vpi
+  NO_DEFAULT_PATH)
 find_package(rosidl_default_runtime REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -28,6 +35,7 @@ target_include_directories(stereo_depth_node PRIVATE
 
 target_link_libraries(stereo_depth_node
   ${OpenCV_LIBRARIES}
+  vpi
   rclcpp::rclcpp
   cv_bridge::cv_bridge
   rtabmap_msgs::rtabmap_msgs__rosidl_typesupport_cpp

@@ -1,0 +1,4 @@
+# WheelTec / Yesense H30 on the CH9102-compatible USB CDC interface.
+# Match the individual adapter, make it usable by the nvidia ROS account,
+# and keep ModemManager from probing it as a cellular modem.
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", ATTRS{serial}=="5C2C063825", OWNER:="nvidia", GROUP:="dialout", MODE:="0660", ENV{ID_MM_DEVICE_IGNORE}:="1", SYMLINK+="H30-imu"

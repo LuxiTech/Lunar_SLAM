@@ -74,9 +74,15 @@ public:
         }
 
         auto image_qos = rclcpp::SensorDataQoS().keep_last(2);
+        // RViz's compressed image transport on Humble requests Reliable QoS.
+        // Keep exactly one preview frame so a slow renderer always receives the
+        // newest frame instead of accumulating display latency.
+        auto rviz_compressed_qos = rclcpp::QoS(1).reliable().durability_volatile();
         auto info_qos = rclcpp::QoS(5).reliable().durability_volatile();
         rviz_preview_scale_ = std::clamp(
             declare_parameter<double>("rviz_preview_scale", 0.25), 0.1, 1.0);
+        capture_scale_ = std::clamp(
+            declare_parameter<double>("capture_scale", 1.0), 0.25, 1.0);
 
         left_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
@@ -112,22 +118,22 @@ public:
         left_preview_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/stereo/preview/left_color",
-            image_qos
+            rviz_compressed_qos
         );
         right_preview_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/stereo/preview/right_color",
-            image_qos
+            rviz_compressed_qos
         );
         left_preview_compressed_pub_ =
         create_publisher<sensor_msgs::msg::CompressedImage>(
             "/stereo/preview/left_color/compressed",
-            image_qos
+            rviz_compressed_qos
         );
         right_preview_compressed_pub_ =
         create_publisher<sensor_msgs::msg::CompressedImage>(
             "/stereo/preview/right_color/compressed",
-            image_qos
+            rviz_compressed_qos
         );
 
 
@@ -210,6 +216,18 @@ private:
             return;
         }
 
+        // Hardware decimation is unsupported with the active UserSet. Scale
+        // directly after capture so all ROS, depth and SLAM stages receive a
+        // smaller full-field image.
+        if (capture_scale_ < 0.999) {
+            cv::Mat left_scaled;
+            cv::Mat right_scaled;
+            cv::resize(left, left_scaled, cv::Size(), capture_scale_, capture_scale_, cv::INTER_AREA);
+            cv::resize(right, right_scaled, cv::Size(), capture_scale_, capture_scale_, cv::INTER_AREA);
+            left = std::move(left_scaled);
+            right = std::move(right_scaled);
+        }
+
         // Prefer the SDK host timestamp captured with the frame instead of
         // stamping after Bayer conversion.  Keep one common stamp for the two
         // externally-triggered images so downstream stereo nodes can still pair
@@ -258,16 +276,12 @@ private:
         pair_msg->header.frame_id = "left_camera_optical_frame";
 
         sensor_msgs::msg::CameraInfo left_info = left_info_manager_->getCameraInfo();
-        warnIfCalibrationSizeMismatch("left", left_info, left.cols, left.rows);
+        scaleCameraInfoToImage("left", left_info, left.cols, left.rows);
         left_info.header = left_msg->header;
-        left_info.width = static_cast<uint32_t>(left.cols);
-        left_info.height = static_cast<uint32_t>(left.rows);
 
         sensor_msgs::msg::CameraInfo right_info = right_info_manager_->getCameraInfo();
-        warnIfCalibrationSizeMismatch("right", right_info, right.cols, right.rows);
+        scaleCameraInfoToImage("right", right_info, right.cols, right.rows);
         right_info.header = right_msg->header;
-        right_info.width = static_cast<uint32_t>(right.cols);
-        right_info.height = static_cast<uint32_t>(right.rows);
 
 
 
@@ -336,13 +350,15 @@ private:
     }
 
 
-    void warnIfCalibrationSizeMismatch(
+    void scaleCameraInfoToImage(
         const char* camera_name,
-        const sensor_msgs::msg::CameraInfo& info,
+        sensor_msgs::msg::CameraInfo& info,
         int image_width,
         int image_height)
     {
         if (info.width == 0 || info.height == 0) {
+            info.width = static_cast<uint32_t>(image_width);
+            info.height = static_cast<uint32_t>(image_height);
             return;
         }
 
@@ -351,16 +367,42 @@ private:
             return;
         }
 
-        RCLCPP_WARN_THROTTLE(
+        const uint32_t calibration_width = info.width;
+        const uint32_t calibration_height = info.height;
+        const double scale_x = static_cast<double>(image_width) / calibration_width;
+        const double scale_y = static_cast<double>(image_height) / calibration_height;
+        // Decimation preserves the optical centre and field of view.  Scale
+        // the intrinsic and projection matrices so rectification/depth use
+        // the same camera model at the hardware output resolution.
+        info.k[0] *= scale_x;
+        info.k[2] *= scale_x;
+        info.k[4] *= scale_y;
+        info.k[5] *= scale_y;
+        info.p[0] *= scale_x;
+        info.p[1] *= scale_x;
+        info.p[2] *= scale_x;
+        info.p[3] *= scale_x;
+        info.p[4] *= scale_y;
+        info.p[5] *= scale_y;
+        info.p[6] *= scale_y;
+        info.p[7] *= scale_y;
+        info.width = static_cast<uint32_t>(image_width);
+        info.height = static_cast<uint32_t>(image_height);
+        info.binning_x = 0;
+        info.binning_y = 0;
+
+        RCLCPP_INFO_THROTTLE(
             get_logger(),
             *get_clock(),
             5000,
-            "%s camera calibration size is %ux%u, but image size is %dx%d. Check ROI and calibration YAML.",
+            "%s calibration scaled from %ux%u to %dx%d (x=%.3f y=%.3f).",
             camera_name,
-            info.width,
-            info.height,
+            calibration_width,
+            calibration_height,
             image_width,
-            image_height);
+            image_height,
+            scale_x,
+            scale_y);
     }
 
     rclcpp::Time makeCommonFrameStamp(int64_t left_host_ts, int64_t right_host_ts) const
@@ -484,6 +526,7 @@ private:
     >::SharedPtr right_preview_compressed_pub_;
 
     double rviz_preview_scale_{0.25};
+    double capture_scale_{1.0};
 
     std::shared_ptr<camera_info_manager::CameraInfoManager> left_info_manager_;
     std::shared_ptr<camera_info_manager::CameraInfoManager> right_info_manager_;

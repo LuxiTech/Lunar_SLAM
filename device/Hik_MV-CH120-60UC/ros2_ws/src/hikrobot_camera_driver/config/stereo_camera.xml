@@ -27,6 +27,8 @@
   value="23.8" 
   />
   
+  <!-- Hardware decimation is unavailable with the current camera UserSet.
+       Full-FOV scaling is performed by stereo_node after capture instead. -->
   <image 
   pixel_format="Default" 
   width="0" height="0" 
@@ -37,7 +39,7 @@
   decimation_horizontal="1" 
   decimation_vertical="1"
   swap_red_blue="true" 
-  override_white_balance="false"
+  override_white_balance="true"
   auto_white_balance="false" 
   />
 
