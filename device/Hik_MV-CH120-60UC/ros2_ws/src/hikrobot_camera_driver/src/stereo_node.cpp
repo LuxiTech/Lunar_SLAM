@@ -216,6 +216,9 @@ private:
             return;
         }
 
+        const int raw_width = left.cols;
+        const int raw_height = left.rows;
+
         // Hardware decimation is unsupported with the active UserSet. Scale
         // directly after capture so all ROS, depth and SLAM stages receive a
         // smaller full-field image.
@@ -226,6 +229,13 @@ private:
             cv::resize(right, right_scaled, cv::Size(), capture_scale_, capture_scale_, cv::INTER_AREA);
             left = std::move(left_scaled);
             right = std::move(right_scaled);
+        }
+        if (!output_resolution_logged_) {
+            RCLCPP_INFO(
+                get_logger(),
+                "ROS image stream: SDK raw=%dx%d -> published=%dx%d (capture_scale=%.2f)",
+                raw_width, raw_height, left.cols, left.rows, capture_scale_);
+            output_resolution_logged_ = true;
         }
 
         // Prefer the SDK host timestamp captured with the frame instead of
@@ -261,20 +271,6 @@ private:
         right_msg->header.stamp = stamp;
         right_msg->header.frame_id = "right_camera_optical_frame";
 
-        // Pack the synchronized grayscale pair into one DDS sample.  The
-        // depth node can split it without risking one-sided image loss, and
-        // the payload is one third of two BGR images.
-        cv::Mat left_gray;
-        cv::Mat right_gray;
-        cv::Mat stereo_pair;
-        cv::cvtColor(left, left_gray, cv::COLOR_BGR2GRAY);
-        cv::cvtColor(right, right_gray, cv::COLOR_BGR2GRAY);
-        cv::hconcat(left_gray, right_gray, stereo_pair);
-        auto pair_msg = cv_bridge::CvImage(
-            std_msgs::msg::Header(), "mono8", stereo_pair).toImageMsg();
-        pair_msg->header.stamp = stamp;
-        pair_msg->header.frame_id = "left_camera_optical_frame";
-
         sensor_msgs::msg::CameraInfo left_info = left_info_manager_->getCameraInfo();
         scaleCameraInfoToImage("left", left_info, left.cols, left.rows);
         left_info.header = left_msg->header;
@@ -302,7 +298,21 @@ private:
             right_info
         );
 
-        stereo_pair_pub_->publish(*pair_msg);
+        if (stereo_pair_pub_->get_subscription_count() > 0) {
+            // Generate the packed stream only when a consumer asks for it.
+            // The normal RGB-D pipeline subscribes to left/right directly.
+            cv::Mat left_gray;
+            cv::Mat right_gray;
+            cv::Mat stereo_pair;
+            cv::cvtColor(left, left_gray, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(right, right_gray, cv::COLOR_BGR2GRAY);
+            cv::hconcat(left_gray, right_gray, stereo_pair);
+            auto pair_msg = cv_bridge::CvImage(
+                std_msgs::msg::Header(), "mono8", stereo_pair).toImageMsg();
+            pair_msg->header.stamp = stamp;
+            pair_msg->header.frame_id = "left_camera_optical_frame";
+            stereo_pair_pub_->publish(*pair_msg);
+        }
         publishRvizPreviews(left, right, left_msg->header);
 
     }
@@ -311,9 +321,19 @@ private:
         const cv::Mat &left, const cv::Mat &right,
         const std_msgs::msg::Header &header)
     {
-        // These streams are only for remote RViz.  Keep full-resolution
-        // images local for stereo depth, while sending compact previews over
-        // Wi-Fi so the display does not build up multi-second DDS queues.
+        const bool publish_left_raw = left_preview_pub_->get_subscription_count() > 0;
+        const bool publish_right_raw = right_preview_pub_->get_subscription_count() > 0;
+        const bool publish_left_compressed =
+            left_preview_compressed_pub_->get_subscription_count() > 0;
+        const bool publish_right_compressed =
+            right_preview_compressed_pub_->get_subscription_count() > 0;
+        if (!publish_left_raw && !publish_right_raw &&
+            !publish_left_compressed && !publish_right_compressed) {
+            return;
+        }
+
+        // These streams are only for RViz. Keep them entirely out of the
+        // camera path when RViz is displaying the point cloud only.
         cv::Mat left_preview;
         cv::Mat right_preview;
         if (rviz_preview_scale_ < 0.999) {
@@ -325,28 +345,36 @@ private:
             left_preview = left;
             right_preview = right;
         }
-        left_preview_pub_->publish(
-            *cv_bridge::CvImage(header, "bgr8", left_preview).toImageMsg());
-        right_preview_pub_->publish(
-            *cv_bridge::CvImage(header, "bgr8", right_preview).toImageMsg());
+        if (publish_left_raw) {
+            left_preview_pub_->publish(
+                *cv_bridge::CvImage(header, "bgr8", left_preview).toImageMsg());
+        }
+        if (publish_right_raw) {
+            right_preview_pub_->publish(
+                *cv_bridge::CvImage(header, "bgr8", right_preview).toImageMsg());
+        }
 
-        const std::vector<int> jpeg_parameters{cv::IMWRITE_JPEG_QUALITY, 80};
-        std::vector<uchar> left_jpeg;
-        std::vector<uchar> right_jpeg;
-        cv::imencode(".jpg", left_preview, left_jpeg, jpeg_parameters);
-        cv::imencode(".jpg", right_preview, right_jpeg, jpeg_parameters);
-
-        auto left_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
-        left_compressed->header = header;
-        left_compressed->format = "bgr8; jpeg compressed bgr8";
-        left_compressed->data = std::move(left_jpeg);
-        left_preview_compressed_pub_->publish(std::move(left_compressed));
-
-        auto right_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
-        right_compressed->header = header;
-        right_compressed->format = "bgr8; jpeg compressed bgr8";
-        right_compressed->data = std::move(right_jpeg);
-        right_preview_compressed_pub_->publish(std::move(right_compressed));
+        if (publish_left_compressed || publish_right_compressed) {
+            const std::vector<int> jpeg_parameters{cv::IMWRITE_JPEG_QUALITY, 80};
+            if (publish_left_compressed) {
+                std::vector<uchar> left_jpeg;
+                cv::imencode(".jpg", left_preview, left_jpeg, jpeg_parameters);
+                auto left_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
+                left_compressed->header = header;
+                left_compressed->format = "bgr8; jpeg compressed bgr8";
+                left_compressed->data = std::move(left_jpeg);
+                left_preview_compressed_pub_->publish(std::move(left_compressed));
+            }
+            if (publish_right_compressed) {
+                std::vector<uchar> right_jpeg;
+                cv::imencode(".jpg", right_preview, right_jpeg, jpeg_parameters);
+                auto right_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
+                right_compressed->header = header;
+                right_compressed->format = "bgr8; jpeg compressed bgr8";
+                right_compressed->data = std::move(right_jpeg);
+                right_preview_compressed_pub_->publish(std::move(right_compressed));
+            }
+        }
     }
 
 
@@ -527,6 +555,7 @@ private:
 
     double rviz_preview_scale_{0.25};
     double capture_scale_{1.0};
+    bool output_resolution_logged_{false};
 
     std::shared_ptr<camera_info_manager::CameraInfoManager> left_info_manager_;
     std::shared_ptr<camera_info_manager::CameraInfoManager> right_info_manager_;

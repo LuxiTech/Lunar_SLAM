@@ -74,6 +74,9 @@ def generate_launch_description():
     clear_db_on_exit = LaunchConfiguration('clear_db_on_exit')
     rgbd_remappings = [
         ('rgbd_image', '/stereo/rgbd_image'),
+        # rtabmap_odom and rtabmap subscribe to the relative topic "imu".
+        # The H30 driver intentionally publishes the standard global topic.
+        ('imu', '/imu/data'),
     ]
     rtabmap_remappings = rgbd_remappings + [
         ('odom', '/odom'),
@@ -104,8 +107,8 @@ def generate_launch_description():
             'use_rtabmap_viz', default_value='false',
             description='Start the Qt RTAB-Map GUI in lightweight map/graph mode'),
         DeclareLaunchArgument(
-            'use_debug_cloud', default_value='false',
-            description='Publish the extra /luxi/cloud_map_accumulated debug cloud (not needed by RTAB-Map GUI)'),
+            'use_debug_cloud', default_value='true',
+            description='Publish the low-latency /luxi/cloud_map_accumulated RViz cloud alongside RTAB-Map'),
         DeclareLaunchArgument(
             'use_status_monitor', default_value='true',
             description='Print RTAB-Map node/odom/mapData status while mapping'),

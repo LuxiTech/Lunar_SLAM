@@ -85,6 +85,11 @@ public:
         // camera frames before rectification and SGBM.
         max_processing_fps_ = std::max(0.0, declare_parameter<double>(
             "max_processing_fps", 0.0));
+        // The live depth and point-cloud outputs may run at the camera rate,
+        // while the considerably heavier RGBD message sent to RTAB-Map is
+        // independently bounded. This keeps RViz responsive on the NX.
+        max_rgbd_publish_fps_ = std::max(0.0, declare_parameter<double>(
+            "max_rgbd_publish_fps", 0.0));
         opencv_num_threads_ = std::max(0, static_cast<int>(declare_parameter<int>(
             "opencv_num_threads", 0)));
         if (opencv_num_threads_ > 0) {
@@ -224,8 +229,8 @@ public:
         RCLCPP_INFO(get_logger(), "Stereo preprocessing: CLAHE=%s clip_limit=%.2f tile_grid=%d",
                     clahe_clip_limit_ > 0.0 ? "enabled" : "disabled",
                     clahe_clip_limit_, clahe_tile_grid_size_);
-        RCLCPP_INFO(get_logger(), "Performance parameters: processing_scale=%.2f max_fps=%.2f OpenCV_threads=%d point_cloud_step=%d preview=%.2f/%d SGBM_mode=%s",
-                    processing_scale_, max_processing_fps_, opencv_num_threads_, point_cloud_step_,
+        RCLCPP_INFO(get_logger(), "Performance parameters: processing_scale=%.2f max_fps=%.2f rgbd_max_fps=%.2f OpenCV_threads=%d point_cloud_step=%d preview=%.2f/%d SGBM_mode=%s",
+                    processing_scale_, max_processing_fps_, max_rgbd_publish_fps_, opencv_num_threads_, point_cloud_step_,
                     preview_scale_, preview_publish_every_n_frames_, sgbm_mode_.c_str());
     }
 
@@ -388,7 +393,7 @@ private:
         if (max_processing_fps_ > 0.0 &&
             last_processing_started_ != std::chrono::steady_clock::time_point{} &&
             std::chrono::duration<double>(processing_now - last_processing_started_).count() <
-                (1.0 / max_processing_fps_)) {
+                (0.9 / max_processing_fps_)) {
             return;
         }
         last_processing_started_ = processing_now;
@@ -507,9 +512,6 @@ private:
                 disparity_float = remapRightDisparityToLeft(disparity_float);
             }
 
-            cv::Mat disparity_8u;
-            cv::normalize(disparity_float, disparity_8u, 0, 255, cv::NORM_MINMAX, CV_8U);
-
             cv::Mat depth;
             const double fx = (left_info->p[0] != 0.0 ? left_info->p[0] : left_info->k[0]) * scale_x;
             const double fy = (left_info->p[5] != 0.0 ? left_info->p[5] : left_info->k[4]) * scale_y;
@@ -548,38 +550,76 @@ private:
             if (!right_info->header.frame_id.empty()) {
                 right_rect_header.frame_id = right_info->header.frame_id;
             }
-            auto left_rect_msg = cv_bridge::CvImage(left_rect_header, "mono8", left_gray).toImageMsg();
-            auto right_rect_msg = cv_bridge::CvImage(right_rect_header, "mono8", right_gray).toImageMsg();
-            auto left_color_rect_msg = cv_bridge::CvImage(left_rect_header, "bgr8", left_color).toImageMsg();
-            auto right_color_rect_msg = cv_bridge::CvImage(right_rect_header, "bgr8", right_color).toImageMsg();
-            left_rect_pub_->publish(*left_rect_msg);
-            right_rect_pub_->publish(*right_rect_msg);
-            left_rect_color_pub_->publish(*left_color_rect_msg);
-            right_rect_color_pub_->publish(*right_color_rect_msg);
-
             const auto left_rect_info = makeRectifiedCameraInfo(
                 *left_info, left_rect_header, processing_size, scale_x, scale_y);
             auto right_rect_info = makeRectifiedCameraInfo(
                 *right_info, right_rect_header, processing_size, scale_x, scale_y);
             right_rect_info.p[6] += right_rectification_y_offset_px_;
             right_rect_info.k[5] += right_rectification_y_offset_px_;
-            left_rect_info_pub_->publish(left_rect_info);
-            right_rect_info_pub_->publish(right_rect_info);
+            const auto rgbd_publish_now = std::chrono::steady_clock::now();
+            const bool rgbd_rate_limited =
+                max_rgbd_publish_fps_ > 0.0 &&
+                last_rgbd_publish_ != std::chrono::steady_clock::time_point{} &&
+                std::chrono::duration<double>(rgbd_publish_now - last_rgbd_publish_).count() <
+                    (1.0 / max_rgbd_publish_fps_);
+            const bool publish_rgbd = rgbd_pub_->get_subscription_count() > 0 && !rgbd_rate_limited;
+            const bool publish_preview =
+                preview_color_pub_->get_subscription_count() > 0 ||
+                preview_depth_pub_->get_subscription_count() > 0 ||
+                preview_color_compressed_pub_->get_subscription_count() > 0 ||
+                preview_depth_compressed_pub_->get_subscription_count() > 0;
 
-            auto disparity_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "mono8", disparity_8u).toImageMsg();
-            disparity_msg->header.stamp = left_header.stamp;
-            disparity_msg->header.frame_id = frame_id;
-            disparity_pub_->publish(*disparity_msg);
+            if (left_rect_pub_->get_subscription_count() > 0) {
+                left_rect_pub_->publish(*cv_bridge::CvImage(
+                    left_rect_header, "mono8", left_gray).toImageMsg());
+            }
+            if (right_rect_pub_->get_subscription_count() > 0) {
+                right_rect_pub_->publish(*cv_bridge::CvImage(
+                    right_rect_header, "mono8", right_gray).toImageMsg());
+            }
+            if (left_rect_info_pub_->get_subscription_count() > 0 || publish_rgbd) {
+                left_rect_info_pub_->publish(left_rect_info);
+            }
+            if (right_rect_info_pub_->get_subscription_count() > 0 || publish_rgbd) {
+                right_rect_info_pub_->publish(right_rect_info);
+            }
 
-            auto depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth).toImageMsg();
-            depth_msg->header.stamp = left_header.stamp;
-            depth_msg->header.frame_id = frame_id;
-            depth_pub_->publish(*depth_msg);
+            sensor_msgs::msg::Image::SharedPtr left_color_rect_msg;
+            if (left_rect_color_pub_->get_subscription_count() > 0 || publish_rgbd) {
+                left_color_rect_msg = cv_bridge::CvImage(
+                    left_rect_header, "bgr8", left_color).toImageMsg();
+                if (left_rect_color_pub_->get_subscription_count() > 0) {
+                    left_rect_color_pub_->publish(*left_color_rect_msg);
+                }
+            }
+            if (right_rect_color_pub_->get_subscription_count() > 0) {
+                right_rect_color_pub_->publish(*cv_bridge::CvImage(
+                    right_rect_header, "bgr8", right_color).toImageMsg());
+            }
 
-            // Avoid copying multi-megabyte messages if this standalone depth
-            // pipeline has no RTAB-Map consumer. The first RTAB-Map
-            // subscription immediately re-enables this path.
-            if (rgbd_pub_->get_subscription_count() > 0) {
+            sensor_msgs::msg::Image::SharedPtr depth_msg;
+            if (depth_pub_->get_subscription_count() > 0 || publish_rgbd) {
+                depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth).toImageMsg();
+                depth_msg->header.stamp = left_header.stamp;
+                depth_msg->header.frame_id = frame_id;
+                if (depth_pub_->get_subscription_count() > 0) {
+                    depth_pub_->publish(*depth_msg);
+                }
+            }
+            if (disparity_pub_->get_subscription_count() > 0) {
+                cv::Mat disparity_8u;
+                cv::normalize(disparity_float, disparity_8u, 0, 255, cv::NORM_MINMAX, CV_8U);
+                auto disparity_msg = cv_bridge::CvImage(
+                    std_msgs::msg::Header(), "mono8", disparity_8u).toImageMsg();
+                disparity_msg->header.stamp = left_header.stamp;
+                disparity_msg->header.frame_id = frame_id;
+                disparity_pub_->publish(*disparity_msg);
+            }
+
+            // Avoid constructing unused image messages: on the NX this saves
+            // enough memory bandwidth for the live point cloud to follow the
+            // 10 Hz camera stream while RTAB-Map stays rate-limited.
+            if (publish_rgbd) {
                 rtabmap_msgs::msg::RGBDImage rgbd_msg;
                 rgbd_msg.header = left_rect_header;
                 rgbd_msg.rgb_camera_info = left_rect_info;
@@ -587,15 +627,13 @@ private:
                 rgbd_msg.rgb = *left_color_rect_msg;
                 rgbd_msg.depth = *depth_msg;
                 rgbd_pub_->publish(rgbd_msg);
+                last_rgbd_publish_ = rgbd_publish_now;
             }
 
             if (point_cloud_pub_->get_subscription_count() > 0) {
                 publishPointCloud(depth, left_color, fx, fy, cx, cy, left_header.stamp, frame_id);
             }
-            if (preview_color_pub_->get_subscription_count() > 0 ||
-                preview_depth_pub_->get_subscription_count() > 0 ||
-                preview_color_compressed_pub_->get_subscription_count() > 0 ||
-                preview_depth_compressed_pub_->get_subscription_count() > 0) {
+            if (publish_preview) {
                 publishPreview(left_color, depth, left_rect_header);
             }
 
@@ -923,6 +961,19 @@ private:
             }
         }
         point_cloud_pub_->publish(cloud);
+
+        const auto now = get_clock()->now();
+        if (live_cloud_window_started_.nanoseconds() == 0) {
+            live_cloud_window_started_ = now;
+        }
+        ++live_cloud_window_count_;
+        const double elapsed = (now - live_cloud_window_started_).seconds();
+        if (elapsed >= 2.0) {
+            RCLCPP_INFO(get_logger(), "Live point-cloud publish rate: %.2f Hz",
+                        static_cast<double>(live_cloud_window_count_) / elapsed);
+            live_cloud_window_started_ = now;
+            live_cloud_window_count_ = 0;
+        }
     }
 
     void publishPreview(
@@ -1128,6 +1179,7 @@ private:
     bool use_stereo_pair_{false};
     double processing_scale_{0.5};
     double max_processing_fps_{0.0};
+    double max_rgbd_publish_fps_{0.0};
     int opencv_num_threads_{0};
     double preview_scale_{0.5};
     int preview_publish_every_n_frames_{2};
@@ -1141,6 +1193,9 @@ private:
     rclcpp::Time last_right_image_stamp_{};
     int64_t last_processed_stamp_ns_{-1};
     std::chrono::steady_clock::time_point last_processing_started_{};
+    std::chrono::steady_clock::time_point last_rgbd_publish_{};
+    rclcpp::Time live_cloud_window_started_{0, 0, RCL_ROS_TIME};
+    std::size_t live_cloud_window_count_{0};
     cv::Ptr<cv::StereoSGBM> stereo_;
     VPIStream vpi_stream_{nullptr};
     VPIPayload vpi_payload_{nullptr};

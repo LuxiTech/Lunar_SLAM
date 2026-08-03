@@ -43,6 +43,7 @@ TEST_F(SensorAdapterTest, RelaysAllCanonicalSensorMessages)
     {"depth_output_topic", "/adapter_test/output/depth"},
     {"camera_info_output_topic", "/adapter_test/output/camera_info"},
     {"imu_output_topic", "/adapter_test/output/imu"},
+    {"imu_orientation_output_topic", "/adapter_test/output/imu_orientation"},
     {"compressed_color_output_topic", "/adapter_test/output/compressed_color"},
     {"enable_imu", true},
   };
@@ -65,6 +66,7 @@ TEST_F(SensorAdapterTest, RelaysAllCanonicalSensorMessages)
   std::atomic<int> depth_count{0};
   std::atomic<int> info_count{0};
   std::atomic<int> imu_count{0};
+  std::atomic<int> orientation_imu_count{0};
   std::atomic<int> compressed_color_count{0};
   auto color_output = test_node->create_subscription<sensor_msgs::msg::Image>(
     "/adapter_test/output/color", qos,
@@ -78,6 +80,9 @@ TEST_F(SensorAdapterTest, RelaysAllCanonicalSensorMessages)
   auto imu_output = test_node->create_subscription<sensor_msgs::msg::Imu>(
     "/adapter_test/output/imu", qos,
     [&imu_count](sensor_msgs::msg::Imu::ConstSharedPtr) { ++imu_count; });
+  auto orientation_imu_output = test_node->create_subscription<sensor_msgs::msg::Imu>(
+    "/adapter_test/output/imu_orientation", qos,
+    [&orientation_imu_count](sensor_msgs::msg::Imu::ConstSharedPtr) { ++orientation_imu_count; });
   auto compressed_color_output = test_node->create_subscription<sensor_msgs::msg::CompressedImage>(
     "/adapter_test/output/compressed_color", qos,
     [&compressed_color_count](sensor_msgs::msg::CompressedImage::ConstSharedPtr) {
@@ -106,6 +111,7 @@ TEST_F(SensorAdapterTest, RelaysAllCanonicalSensorMessages)
   const auto deadline = std::chrono::steady_clock::now() + 3s;
   while (std::chrono::steady_clock::now() < deadline &&
     (color_count == 0 || depth_count == 0 || info_count == 0 || imu_count == 0 ||
+    orientation_imu_count == 0 ||
     compressed_color_count == 0))
   {
     color_input->publish(image);
@@ -120,6 +126,7 @@ TEST_F(SensorAdapterTest, RelaysAllCanonicalSensorMessages)
   EXPECT_GT(depth_count, 0);
   EXPECT_GT(info_count, 0);
   EXPECT_GT(imu_count, 0);
+  EXPECT_GT(orientation_imu_count, 0);
   EXPECT_GT(compressed_color_count, 0);
   executor.remove_node(test_node);
   executor.remove_node(adapter);

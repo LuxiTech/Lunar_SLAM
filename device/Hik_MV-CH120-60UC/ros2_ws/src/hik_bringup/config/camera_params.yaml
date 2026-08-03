@@ -7,6 +7,5 @@ stereo_node:
     # Keep one explicit parameter: the Humble parameter-file parser rejects an
     # otherwise empty ros__parameters map.
     rviz_preview_scale: 0.25
-    # Full-FOV 2048x1500 -> 1024x750, exactly matching the reviewed 2026-07-31
-    # stereo calibration. RViz previews remain independently downscaled.
+    # Full-FOV 2048x1500 -> calibrated 1024x750 image stream.
     capture_scale: 0.5

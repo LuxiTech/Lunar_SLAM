@@ -162,6 +162,11 @@ private:
                 auto [it, inserted] = map_.insert({key, point});
                 if (inserted) {
                     insertion_order_.push_back(key);
+                    // A newly inserted voxel already satisfies the real-time
+                    // display mode's one-observation stability threshold.
+                    if (stable_min_observations_ == 1) {
+                        ++stable_voxels_;
+                    }
                     ++accepted;
                 } else {
                     // Keep a light running average so repeated measurements

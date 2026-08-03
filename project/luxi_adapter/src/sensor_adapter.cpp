@@ -49,6 +49,8 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
   const auto imu_output = require_topic(
     "imu_output_topic",
     declare_parameter<std::string>("imu_output_topic", "/sensors/imu/data_raw"));
+  const auto orientation_imu_output = declare_parameter<std::string>(
+    "imu_orientation_output_topic", "");
   const auto compressed_color_output = require_topic(
     "compressed_color_output_topic",
     declare_parameter<std::string>(
@@ -81,9 +83,20 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
 
   if (enable_imu) {
     raw_imu_publisher_ = create_publisher<sensor_msgs::msg::Imu>(imu_output, qos);
+    if (!orientation_imu_output.empty()) {
+      orientation_imu_publisher_ = create_publisher<sensor_msgs::msg::Imu>(
+        require_topic("imu_orientation_output_topic", orientation_imu_output), qos);
+    }
     raw_imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
       imu_input, qos,
-      [this](sensor_msgs::msg::Imu::ConstSharedPtr message) { raw_imu_publisher_->publish(*message); });
+      [this](sensor_msgs::msg::Imu::ConstSharedPtr message) {
+        if (raw_imu_publisher_->get_subscription_count() > 0) {
+          raw_imu_publisher_->publish(*message);
+        }
+        if (orientation_imu_publisher_ && orientation_imu_publisher_->get_subscription_count() > 0) {
+          orientation_imu_publisher_->publish(*message);
+        }
+      });
   }
 
   RCLCPP_INFO(
@@ -91,7 +104,7 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
     "Hardware inputs are adapted to color=%s depth=%s camera_info=%s preview=%s%s",
     color_output.c_str(), depth_output.c_str(), camera_info_output.c_str(),
     compressed_color_output.c_str(),
-    enable_imu ? " and raw IMU=/sensors/imu/data_raw" : "; IMU adaptation is disabled");
+    enable_imu ? " and IMU relay is enabled" : "; IMU adaptation is disabled");
 }
 
 }  // namespace luxi_adapter

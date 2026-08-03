@@ -27,28 +27,28 @@ stereo_depth_node:
     vpi_p2: 96
     vpi_uniqueness: -1.0
     rectify_images: true
-    # Match the calibrated 1024x750 camera input exactly. CPU reduction comes from the
-    # capture-side full-FOV scaling, bounded queues and compressed previews.
-    processing_scale: 1.0
-    # RViz-only streams remain downscaled and compressed.
-    # Mapping receives the full 1024x750 RGBDImage.
+    # Real-time point-cloud mode: keep the calibrated 1024x750 camera stream,
+    # then run CUDA-SGM at
+    # 512x375. This retains substantially more depth detail than the former
+    # 384x281 profile while keeping the live cloud close to the 10 Hz camera.
+    processing_scale: 0.5
+    # RViz-only streams remain downscaled and compressed. Mapping receives
+    # the same 512x375 depth geometry, with CameraInfo scaled consistently.
     preview_scale: 0.5
     preview_publish_every_n_frames: 1
-    # CUDA-SGM takes about 0.4 s per 1024x750 frame on this NX. Limit only
-    # RGBD production; camera previews remain independently at 10 Hz.
-    max_processing_fps: 2.5
+    # The hardware trigger is fixed at 10 Hz. Do not apply a second software
+    # limiter, as USB timestamp jitter can otherwise discard valid 10 Hz frames.
+    max_processing_fps: 0.0
+    # Keep visual odometry and map insertion bounded to 5 Hz. Depth and the
+    # RViz point cloud still publish at 10 Hz, avoiding a map-compute backlog.
+    max_rgbd_publish_fps: 5.0
     opencv_num_threads: 2
-    # /stereo/points is used only by the lightweight RGB cloud viewer. RTAB-Map
-    # itself consumes /stereo/rgbd_image, so a coarser debug cloud does not
-    # reduce odometry or mapping quality but avoids flooding RViz/DDS.
-    # Four times denser than the former RViz-only cloud while staying bounded
-    # enough for the NX and the host DDS link.
+    # Keep the live RViz cloud compact enough to publish every camera frame.
     point_cloud_step: 4
     baseline_m: 0.0
-    # 0.5 m is near the stereo pair's useful lower range at 1024x750.
-    # Use 128 disparities so near objects are not clipped, then filter very
-    # close/noisy points before they enter RTAB-Map.
-    max_disparity: 128
+    # 64 px at the 512x375 matching scale preserves the former full-resolution
+    # 128 px near-depth range after scaling, without doubling CUDA-SGM cost.
+    max_disparity: 64
     # 3-way is the best density/latency setting on the NX. The implementation
     # also supports hh4/hh for offline high-quality experiments.
     sgbm_mode: 3way
@@ -78,25 +78,22 @@ rgb_cloud_accumulator_node:
     voxel_size: 0.05
     min_sensor_range_m: 0.45
     max_sensor_range_m: 4.5
-    stable_min_observations: 2
+    stable_min_observations: 1
     input_stride: 1
     # Publish each incoming cloud for responsive visualization, but keep the
     # full accumulated message compact enough to render at camera rate.
     publish_every_n_clouds: 1
-    max_voxels: 16000
+    max_voxels: 12000
 
 rgbd_odometry:
   ros__parameters:
     frame_id: base_link
     odom_frame_id: odom
     publish_tf: false
-    # H30 is currently configured in IMU mode: orientation is intentionally
-    # absent (all-zero quaternion). Do not feed that invalid orientation to
-    # RTAB-Map's visual odometry. The calibrated IMU TF and driver remain
-    # available, and these can be switched to true after a valid orientation
-    # source/estimator is enabled.
-    subscribe_imu: false
-    wait_imu_to_init: false
+    # H30 AHRS now publishes a valid quaternion at 200 Hz. The calibrated
+    # left_camera_optical_frame -> imu_link transform is static, so initialize
+    # visual odometry from IMU attitude before accepting RGB-D frames.
+    wait_imu_to_init: true
     always_check_imu_tf: false
     subscribe_rgbd: true
     rgbd_cameras: 1
@@ -168,7 +165,8 @@ rtabmap:
     subscribe_odom: true
     # Keep the diagnostic message out of the image synchronizer.
     subscribe_odom_info: false
-    subscribe_imu: false
+    # Preserve AHRS gravity orientation with the sensor data stored in the map.
+    subscribe_imu: true
     approx_sync: true
     approx_sync_max_interval: 0.01
     topic_queue_size: 2
