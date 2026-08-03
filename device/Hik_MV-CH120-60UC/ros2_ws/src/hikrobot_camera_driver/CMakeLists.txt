@@ -25,10 +25,9 @@ find_package(std_msgs REQUIRED)
 
 find_package(cv_bridge REQUIRED)
 find_package(ament_index_cpp REQUIRED)
-find_package(tinyxml2 REQUIRED)
 find_package(camera_info_manager REQUIRED)
-
-find_package(rosidl_typesupport_cpp REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(TINYXML2 REQUIRED IMPORTED_TARGET tinyxml2)
 
 
 
@@ -44,17 +43,30 @@ find_package(OpenCV REQUIRED)
 # Hikrobot MVS SDK
 # ==========================
 
-set(MVS_ROOT "/opt/MVS")
+set(MVS_ROOT "/opt/MVS" CACHE PATH "Root directory of the Hikrobot MVS SDK")
 
+# MVS installs its libraries below a directory named after the CPU
+# architecture.  The previous project only searched lib/64, which is an x86
+# layout and cannot work on this Jetson/aarch64 machine.
+find_path(MVS_INCLUDE_DIR
+    NAMES MvCameraControl.h
+    HINTS "${MVS_ROOT}/include")
 
-include_directories(
-    ${MVS_ROOT}/include
-)
+find_library(MVS_CAMERA_CONTROL_LIBRARY
+    NAMES MvCameraControl
+    HINTS
+        "${MVS_ROOT}/lib/${CMAKE_SYSTEM_PROCESSOR}"
+        "${MVS_ROOT}/lib/aarch64"
+        "${MVS_ROOT}/lib/64")
 
+if(NOT MVS_INCLUDE_DIR OR NOT MVS_CAMERA_CONTROL_LIBRARY)
+    message(FATAL_ERROR
+        "Hikrobot MVS development SDK was not found below ${MVS_ROOT}. "
+        "Install the MVS SDK matching this architecture (including "
+        "MvCameraControl.h), or configure -DMVS_ROOT=/path/to/MVS.")
+endif()
 
-link_directories(
-    ${MVS_ROOT}/lib/64
-)
+get_filename_component(MVS_LIBRARY_DIR "${MVS_CAMERA_CONTROL_LIBRARY}" DIRECTORY)
 
 
 
@@ -80,21 +92,8 @@ target_include_directories(
     PRIVATE
 
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-
+    ${MVS_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
-
-
-    # ROS2 Lyrical headers
-
-    /opt/ros/lyrical/include
-
-    /opt/ros/lyrical/include/rclcpp
-
-    /opt/ros/lyrical/include/sensor_msgs
-
-    /opt/ros/lyrical/include/std_msgs
-
-    /opt/ros/lyrical/include/cv_bridge
 )
 
 
@@ -107,7 +106,7 @@ target_link_libraries(
     stereo_node
 
     # Hikrobot SDK
-    MvCameraControl
+    ${MVS_CAMERA_CONTROL_LIBRARY}
 
 
     # OpenCV
@@ -119,12 +118,27 @@ target_link_libraries(
 
     cv_bridge::cv_bridge
     ament_index_cpp::ament_index_cpp
-    tinyxml2::tinyxml2
+    PkgConfig::TINYXML2
     camera_info_manager::camera_info_manager
 
 
     pthread
 )
+
+ament_target_dependencies(stereo_node
+    rclcpp
+    sensor_msgs
+    std_msgs
+    cv_bridge
+    ament_index_cpp
+    camera_info_manager)
+
+# The MVS control library dlopens companion libraries from the same SDK
+# directory.  Keep this path on the executable so a normal ROS launch does
+# not depend on a globally exported LD_LIBRARY_PATH.
+set_target_properties(stereo_node PROPERTIES
+    BUILD_RPATH "${MVS_LIBRARY_DIR}"
+    INSTALL_RPATH "${MVS_LIBRARY_DIR}")
 
 
 # ==========================

@@ -10,28 +10,68 @@ stereo_depth_node:
     # /stereo_camera/image_pair_mono topic is grayscale-only.
     stereo_pair_topic: ''
 
-    # Stereo matching parameters (tune these first for better depth quality)
+    # Orin NX full hardware stereo: OFA performs eSGM, PVA performs the
+    # confidence/median stage and VIC performs block-linear conversion. CUDA-SGM
+    # and OpenCV SGBM remain selectable fallbacks.
+    depth_backend: vpi_ofa_pva_vic
+    vpi_fallback_to_sgbm: true
+    # The current calibration has positive P[3] on cam1, so valid disparities
+    # are right-minus-left. VPI CUDA-SGM searches positive disparity only.
+    # The node remaps its result back onto the normal left-camera image grid.
+    matcher_input_order: right_left
+    # Measured on the current mechanically changed rig after rectification:
+    # shift the right image down by 2 px to reduce vertical residual from
+    # 2.46 px to 0.58 px. Recalibrate if this mechanical assembly changes.
+    right_rectification_y_offset_px: 2.0
+    # VPI returns Q10.5 disparity. The OFA+PVA+VIC path uses its neural
+    # confidence stage; 3 eSGM passes preserve thin edges and low-texture detail.
+    # Reject low-confidence matches before CPU post-filtering. This
+    # removes the dark/low-texture speckle that made the old grey depth preview
+    # hard to interpret, while keeping a dense indoor map.
+    vpi_confidence_threshold: 16384
+    vpi_p1: 8
+    vpi_p2: 81
+    vpi_uniqueness: -1.0
+    vpi_ofa_window_size: 5
+    # One OFA eSGM pass keeps the calibrated 1024x750 depth stream at the
+    # 10 Hz camera rate on Orin NX. Two passes were measured at only ~6.5 Hz.
+    vpi_ofa_num_passes: 1
+    vpi_ofa_apply_cpu_postfilters: false
+
+    # OpenCV SGBM parameters (used only when depth_backend: sgbm, or if VPI
+    # initialization/runtime fails and vpi_fallback_to_sgbm is true).
     # Use the right projection matrix to derive baseline automatically.
     # The current calibration gives about 0.100523 m.
     baseline_m: 0.0
     max_disparity: 128
-    block_size: 9
+    block_size: 7
     pre_filter_size: 9
     pre_filter_cap: 31
-    uniqueness_ratio: 20
-    speckle_size: 220
-    speckle_range: 3
-    disp12_max_diff: 1
+    uniqueness_ratio: 10
+    speckle_size: 80
+    speckle_range: 4
+    disp12_max_diff: 2
     median_blur_size: 3
-    texture_filter_min_gradient: 4.0
+    texture_filter_min_gradient: 2.0
     depth_edge_filter_max_delta_m: 0.10
-    depth_neighbor_filter_min_count: 3
-    depth_neighbor_filter_max_delta_m: 0.07
+    depth_neighbor_filter_min_count: 2
+    depth_neighbor_filter_max_delta_m: 0.10
+    # Millimetre uint16 depth halves DDS bandwidth at 1024x750. Stereo depth
+    # uncertainty is far larger than 1 mm, so this does not reduce usable precision.
+    depth_output_encoding: 16UC1
 
     rectify_images: true
-    # 0.5 processes 1024x750 instead of 2048x1500 for much higher throughput.
-    # Use 0.75 for more detail, or 1.0 for full-resolution accuracy.
-    processing_scale: 0.5
-    point_cloud_step: 3
+    # Match the 1024x750 ROS camera stream exactly. Capture-side scaling already
+    # reduces NX load while preserving the full field of view.
+    processing_scale: 1.0
+    # The GPU-SGM full-resolution pipeline follows the 10 Hz hardware trigger.
+    max_processing_fps: 0.0
+    # Rectification and post-filters remain on CPU. Two workers prevent those
+    # tasks from monopolizing the NX while VPI runs matching on the GPU.
+    opencv_num_threads: 4
+    # Publish a coloured depth view for every computed depth frame. It is
+    # intentionally separate from the 10 Hz camera-only RViz previews.
+    preview_publish_every_n_frames: 1
+    point_cloud_step: 4
     min_depth_m: 0.45
     max_depth_m: 4.5

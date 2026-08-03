@@ -2,8 +2,9 @@
 
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
+#include "sensor_msgs/msg/compressed_image.hpp"
 
-#include "cv_bridge/cv_bridge.hpp"
+#include "cv_bridge/cv_bridge.h"
 
 #include "opencv2/opencv.hpp"
 
@@ -12,10 +13,12 @@
 #include "hikrobot_camera_driver/StereoCamera.hpp"
 #include "hikrobot_camera_driver/CameraConfig.hpp"
 
-#include <ament_index_cpp/get_package_share_path.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 class StereoCameraNode : public rclcpp::Node
 {
@@ -27,9 +30,9 @@ public:
     Node("stereo_node")
     {
 
-        const std::string default_config = (
-            ament_index_cpp::get_package_share_path("hikrobot_camera_driver") /
-            "config/stereo_camera.xml").string();
+        const std::string package_share =
+            ament_index_cpp::get_package_share_directory("hikrobot_camera_driver");
+        const std::string default_config = package_share + "/config/stereo_camera.xml";
         const std::string config_file = declare_parameter<std::string>("config_file", default_config);
         StereoCameraConfig config;
         std::string config_error;
@@ -49,26 +52,18 @@ public:
 
         const std::string left_calib_file = declare_parameter<std::string>(
             "left_camera_info_file",
-            (ament_index_cpp::get_package_share_path("hikrobot_camera_driver") / "config/stereo_left.yaml").string());
+            package_share + "/config/stereo_left.yaml");
         const std::string right_calib_file = declare_parameter<std::string>(
             "right_camera_info_file",
-            (ament_index_cpp::get_package_share_path("hikrobot_camera_driver") / "config/stereo_right.yaml").string());
+            package_share + "/config/stereo_right.yaml");
 
         left_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(
-            this->get_node_base_interface(),
-            this->get_node_services_interface(),
-            this->get_node_logging_interface(),
+            this,
             "mvch120_stereo/left",
-            "",
-            rclcpp::SystemDefaultsQoS(),
             "");
         right_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(
-            this->get_node_base_interface(),
-            this->get_node_services_interface(),
-            this->get_node_logging_interface(),
+            this,
             "mvch120_stereo/right",
-            "",
-            rclcpp::SystemDefaultsQoS(),
             "");
 
         if (!left_info_manager_->loadCameraInfo("file://" + left_calib_file)) {
@@ -78,36 +73,67 @@ public:
             RCLCPP_WARN(get_logger(), "Failed to load right camera info from %s", right_calib_file.c_str());
         }
 
+        auto image_qos = rclcpp::SensorDataQoS().keep_last(2);
+        // RViz's compressed image transport on Humble requests Reliable QoS.
+        // Keep exactly one preview frame so a slow renderer always receives the
+        // newest frame instead of accumulating display latency.
+        auto rviz_compressed_qos = rclcpp::QoS(1).reliable().durability_volatile();
+        auto info_qos = rclcpp::QoS(5).reliable().durability_volatile();
+        rviz_preview_scale_ = std::clamp(
+            declare_parameter<double>("rviz_preview_scale", 0.25), 0.1, 1.0);
+        capture_scale_ = std::clamp(
+            declare_parameter<double>("capture_scale", 1.0), 0.25, 1.0);
+
         left_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/left_camera/image",
-            10
+            image_qos
         );
 
 
         right_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/right_camera/image",
-            10
+            image_qos
         );
 
         left_info_pub_ =
         create_publisher<sensor_msgs::msg::CameraInfo>(
             "/left_camera/camera_info",
-            10
+            info_qos
         );
 
 
         right_info_pub_ =
         create_publisher<sensor_msgs::msg::CameraInfo>(
             "/right_camera/camera_info",
-            10
+            info_qos
         );
 
         stereo_pair_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/stereo_camera/image_pair_mono",
-            2
+            image_qos
+        );
+        left_preview_pub_ =
+        create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/left_color",
+            rviz_compressed_qos
+        );
+        right_preview_pub_ =
+        create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/right_color",
+            rviz_compressed_qos
+        );
+        left_preview_compressed_pub_ =
+        create_publisher<sensor_msgs::msg::CompressedImage>(
+            "/stereo/preview/left_color/compressed",
+            rviz_compressed_qos
+        );
+        right_preview_compressed_pub_ =
+        create_publisher<sensor_msgs::msg::CompressedImage>(
+            "/stereo/preview/right_color/compressed",
+            rviz_compressed_qos
         );
 
 
@@ -190,6 +216,28 @@ private:
             return;
         }
 
+        const int raw_width = left.cols;
+        const int raw_height = left.rows;
+
+        // Hardware decimation is unsupported with the active UserSet. Scale
+        // directly after capture so all ROS, depth and SLAM stages receive a
+        // smaller full-field image.
+        if (capture_scale_ < 0.999) {
+            cv::Mat left_scaled;
+            cv::Mat right_scaled;
+            cv::resize(left, left_scaled, cv::Size(), capture_scale_, capture_scale_, cv::INTER_AREA);
+            cv::resize(right, right_scaled, cv::Size(), capture_scale_, capture_scale_, cv::INTER_AREA);
+            left = std::move(left_scaled);
+            right = std::move(right_scaled);
+        }
+        if (!output_resolution_logged_) {
+            RCLCPP_INFO(
+                get_logger(),
+                "ROS image stream: SDK raw=%dx%d -> published=%dx%d (capture_scale=%.2f)",
+                raw_width, raw_height, left.cols, left.rows, capture_scale_);
+            output_resolution_logged_ = true;
+        }
+
         // Prefer the SDK host timestamp captured with the frame instead of
         // stamping after Bayer conversion.  Keep one common stamp for the two
         // externally-triggered images so downstream stereo nodes can still pair
@@ -223,31 +271,13 @@ private:
         right_msg->header.stamp = stamp;
         right_msg->header.frame_id = "right_camera_optical_frame";
 
-        // Pack the synchronized grayscale pair into one DDS sample.  The
-        // depth node can split it without risking one-sided image loss, and
-        // the payload is one third of two BGR images.
-        cv::Mat left_gray;
-        cv::Mat right_gray;
-        cv::Mat stereo_pair;
-        cv::cvtColor(left, left_gray, cv::COLOR_BGR2GRAY);
-        cv::cvtColor(right, right_gray, cv::COLOR_BGR2GRAY);
-        cv::hconcat(left_gray, right_gray, stereo_pair);
-        auto pair_msg = cv_bridge::CvImage(
-            std_msgs::msg::Header(), "mono8", stereo_pair).toImageMsg();
-        pair_msg->header.stamp = stamp;
-        pair_msg->header.frame_id = "left_camera_optical_frame";
-
         sensor_msgs::msg::CameraInfo left_info = left_info_manager_->getCameraInfo();
-        warnIfCalibrationSizeMismatch("left", left_info, left.cols, left.rows);
+        scaleCameraInfoToImage("left", left_info, left.cols, left.rows);
         left_info.header = left_msg->header;
-        left_info.width = static_cast<uint32_t>(left.cols);
-        left_info.height = static_cast<uint32_t>(left.rows);
 
         sensor_msgs::msg::CameraInfo right_info = right_info_manager_->getCameraInfo();
-        warnIfCalibrationSizeMismatch("right", right_info, right.cols, right.rows);
+        scaleCameraInfoToImage("right", right_info, right.cols, right.rows);
         right_info.header = right_msg->header;
-        right_info.width = static_cast<uint32_t>(right.cols);
-        right_info.height = static_cast<uint32_t>(right.rows);
 
 
 
@@ -268,18 +298,95 @@ private:
             right_info
         );
 
-        stereo_pair_pub_->publish(*pair_msg);
+        if (stereo_pair_pub_->get_subscription_count() > 0) {
+            // Generate the packed stream only when a consumer asks for it.
+            // The normal RGB-D pipeline subscribes to left/right directly.
+            cv::Mat left_gray;
+            cv::Mat right_gray;
+            cv::Mat stereo_pair;
+            cv::cvtColor(left, left_gray, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(right, right_gray, cv::COLOR_BGR2GRAY);
+            cv::hconcat(left_gray, right_gray, stereo_pair);
+            auto pair_msg = cv_bridge::CvImage(
+                std_msgs::msg::Header(), "mono8", stereo_pair).toImageMsg();
+            pair_msg->header.stamp = stamp;
+            pair_msg->header.frame_id = "left_camera_optical_frame";
+            stereo_pair_pub_->publish(*pair_msg);
+        }
+        publishRvizPreviews(left, right, left_msg->header);
 
     }
 
+    void publishRvizPreviews(
+        const cv::Mat &left, const cv::Mat &right,
+        const std_msgs::msg::Header &header)
+    {
+        const bool publish_left_raw = left_preview_pub_->get_subscription_count() > 0;
+        const bool publish_right_raw = right_preview_pub_->get_subscription_count() > 0;
+        const bool publish_left_compressed =
+            left_preview_compressed_pub_->get_subscription_count() > 0;
+        const bool publish_right_compressed =
+            right_preview_compressed_pub_->get_subscription_count() > 0;
+        if (!publish_left_raw && !publish_right_raw &&
+            !publish_left_compressed && !publish_right_compressed) {
+            return;
+        }
 
-    void warnIfCalibrationSizeMismatch(
+        // These streams are only for RViz. Keep them entirely out of the
+        // camera path when RViz is displaying the point cloud only.
+        cv::Mat left_preview;
+        cv::Mat right_preview;
+        if (rviz_preview_scale_ < 0.999) {
+            cv::resize(left, left_preview, cv::Size(), rviz_preview_scale_,
+                       rviz_preview_scale_, cv::INTER_AREA);
+            cv::resize(right, right_preview, cv::Size(), rviz_preview_scale_,
+                       rviz_preview_scale_, cv::INTER_AREA);
+        } else {
+            left_preview = left;
+            right_preview = right;
+        }
+        if (publish_left_raw) {
+            left_preview_pub_->publish(
+                *cv_bridge::CvImage(header, "bgr8", left_preview).toImageMsg());
+        }
+        if (publish_right_raw) {
+            right_preview_pub_->publish(
+                *cv_bridge::CvImage(header, "bgr8", right_preview).toImageMsg());
+        }
+
+        if (publish_left_compressed || publish_right_compressed) {
+            const std::vector<int> jpeg_parameters{cv::IMWRITE_JPEG_QUALITY, 80};
+            if (publish_left_compressed) {
+                std::vector<uchar> left_jpeg;
+                cv::imencode(".jpg", left_preview, left_jpeg, jpeg_parameters);
+                auto left_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
+                left_compressed->header = header;
+                left_compressed->format = "bgr8; jpeg compressed bgr8";
+                left_compressed->data = std::move(left_jpeg);
+                left_preview_compressed_pub_->publish(std::move(left_compressed));
+            }
+            if (publish_right_compressed) {
+                std::vector<uchar> right_jpeg;
+                cv::imencode(".jpg", right_preview, right_jpeg, jpeg_parameters);
+                auto right_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
+                right_compressed->header = header;
+                right_compressed->format = "bgr8; jpeg compressed bgr8";
+                right_compressed->data = std::move(right_jpeg);
+                right_preview_compressed_pub_->publish(std::move(right_compressed));
+            }
+        }
+    }
+
+
+    void scaleCameraInfoToImage(
         const char* camera_name,
-        const sensor_msgs::msg::CameraInfo& info,
+        sensor_msgs::msg::CameraInfo& info,
         int image_width,
         int image_height)
     {
         if (info.width == 0 || info.height == 0) {
+            info.width = static_cast<uint32_t>(image_width);
+            info.height = static_cast<uint32_t>(image_height);
             return;
         }
 
@@ -288,16 +395,42 @@ private:
             return;
         }
 
-        RCLCPP_WARN_THROTTLE(
+        const uint32_t calibration_width = info.width;
+        const uint32_t calibration_height = info.height;
+        const double scale_x = static_cast<double>(image_width) / calibration_width;
+        const double scale_y = static_cast<double>(image_height) / calibration_height;
+        // Decimation preserves the optical centre and field of view.  Scale
+        // the intrinsic and projection matrices so rectification/depth use
+        // the same camera model at the hardware output resolution.
+        info.k[0] *= scale_x;
+        info.k[2] *= scale_x;
+        info.k[4] *= scale_y;
+        info.k[5] *= scale_y;
+        info.p[0] *= scale_x;
+        info.p[1] *= scale_x;
+        info.p[2] *= scale_x;
+        info.p[3] *= scale_x;
+        info.p[4] *= scale_y;
+        info.p[5] *= scale_y;
+        info.p[6] *= scale_y;
+        info.p[7] *= scale_y;
+        info.width = static_cast<uint32_t>(image_width);
+        info.height = static_cast<uint32_t>(image_height);
+        info.binning_x = 0;
+        info.binning_y = 0;
+
+        RCLCPP_INFO_THROTTLE(
             get_logger(),
             *get_clock(),
             5000,
-            "%s camera calibration size is %ux%u, but image size is %dx%d. Check ROI and calibration YAML.",
+            "%s calibration scaled from %ux%u to %dx%d (x=%.3f y=%.3f).",
             camera_name,
-            info.width,
-            info.height,
+            calibration_width,
+            calibration_height,
             image_width,
-            image_height);
+            image_height,
+            scale_x,
+            scale_y);
     }
 
     rclcpp::Time makeCommonFrameStamp(int64_t left_host_ts, int64_t right_host_ts) const
@@ -403,6 +536,26 @@ private:
     rclcpp::Publisher<
         sensor_msgs::msg::Image
     >::SharedPtr stereo_pair_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::Image
+    >::SharedPtr left_preview_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::Image
+    >::SharedPtr right_preview_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::CompressedImage
+    >::SharedPtr left_preview_compressed_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::CompressedImage
+    >::SharedPtr right_preview_compressed_pub_;
+
+    double rviz_preview_scale_{0.25};
+    double capture_scale_{1.0};
+    bool output_resolution_logged_{false};
 
     std::shared_ptr<camera_info_manager::CameraInfoManager> left_info_manager_;
     std::shared_ptr<camera_info_manager::CameraInfoManager> right_info_manager_;

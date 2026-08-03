@@ -14,9 +14,11 @@
   <exec_depend>hikrobot_camera_driver</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>stereo_depth</exec_depend>
   <exec_depend>yesense_std_ros2</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
   <exec_depend>rtabmap_odom</exec_depend>
   <exec_depend>rtabmap_slam</exec_depend>
   <exec_depend>rtabmap_msgs</exec_depend>

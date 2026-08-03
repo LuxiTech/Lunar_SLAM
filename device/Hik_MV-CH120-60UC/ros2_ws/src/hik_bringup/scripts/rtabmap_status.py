@@ -105,9 +105,18 @@ def main():
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        # SIGINT may arrive between leaving spin() and destroying the node.
+        # Treat that as the same normal Ctrl-C shutdown, rather than printing
+        # a traceback after an otherwise clean mapping session.
+        try:
+            node.destroy_node()
+        except (KeyboardInterrupt, ExternalShutdownException, RCLError):
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except (KeyboardInterrupt, ExternalShutdownException, RCLError):
+            pass
 
 
 if __name__ == '__main__':

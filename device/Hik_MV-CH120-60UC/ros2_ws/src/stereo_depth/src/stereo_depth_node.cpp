@@ -1,22 +1,30 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <rtabmap_msgs/msg/rgbd_image.hpp>
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
+#include <vpi/OpenCVInterop.hpp>
+#include <vpi/Status.h>
+#include <vpi/Stream.h>
+#include <vpi/algo/ConvertImageFormat.h>
+#include <vpi/algo/StereoDisparity.h>
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -38,6 +46,27 @@ public:
         use_stereo_pair_ = !stereo_pair_topic.empty();
 
         baseline_m_ = declare_parameter<double>("baseline_m", 0.0);
+        depth_backend_ = declare_parameter<std::string>("depth_backend", "sgbm");
+        vpi_fallback_to_sgbm_ = declare_parameter<bool>("vpi_fallback_to_sgbm", true);
+        matcher_input_order_ = declare_parameter<std::string>("matcher_input_order", "left_right");
+        right_rectification_y_offset_px_ = std::clamp(
+            declare_parameter<double>("right_rectification_y_offset_px", 0.0), -20.0, 20.0);
+        vpi_confidence_threshold_ = std::clamp(
+            static_cast<int>(declare_parameter<int>("vpi_confidence_threshold", 0)), 0, 65535);
+        vpi_p1_ = std::clamp(
+            static_cast<int>(declare_parameter<int>("vpi_p1", 3)), 1, 255);
+        vpi_p2_ = std::clamp(
+            static_cast<int>(declare_parameter<int>("vpi_p2", 48)), vpi_p1_, 255);
+        vpi_uniqueness_ = static_cast<float>(declare_parameter<double>("vpi_uniqueness", -1.0));
+        vpi_ofa_window_size_ = std::clamp(
+            static_cast<int>(declare_parameter<int>("vpi_ofa_window_size", 5)), 1, 7);
+        if ((vpi_ofa_window_size_ % 2) == 0) {
+            --vpi_ofa_window_size_;
+        }
+        vpi_ofa_num_passes_ = std::clamp(
+            static_cast<int>(declare_parameter<int>("vpi_ofa_num_passes", 3)), 1, 3);
+        vpi_ofa_apply_cpu_postfilters_ = declare_parameter<bool>(
+            "vpi_ofa_apply_cpu_postfilters", false);
         max_disparity_ = declare_parameter<int>("max_disparity", 96);
         block_size_ = declare_parameter<int>("block_size", 9);
         pre_filter_size_ = declare_parameter<int>("pre_filter_size", 9);
@@ -49,21 +78,59 @@ public:
         median_blur_size_ = declare_parameter<int>("median_blur_size", 5);
         texture_filter_min_gradient_ = declare_parameter<double>(
             "texture_filter_min_gradient", 4.0);
+        clahe_clip_limit_ = std::max(0.0, declare_parameter<double>(
+            "clahe_clip_limit", 0.0));
+        clahe_tile_grid_size_ = std::clamp(static_cast<int>(declare_parameter<int>(
+            "clahe_tile_grid_size", 8)), 2, 32);
         depth_neighbor_filter_min_count_ = declare_parameter<int>(
             "depth_neighbor_filter_min_count", 3);
         depth_neighbor_filter_max_delta_m_ = declare_parameter<double>(
             "depth_neighbor_filter_max_delta_m", 0.08);
+        sgbm_mode_ = declare_parameter<std::string>("sgbm_mode", "3way");
         rectify_images_ = declare_parameter<bool>("rectify_images", true);
         processing_scale_ = std::clamp(
             declare_parameter<double>("processing_scale", 0.5), 0.25, 1.0);
+        // Keep each depth frame at the configured resolution/quality, while
+        // bounding average CPU cost on embedded hardware by dropping excess
+        // camera frames before rectification and SGBM.
+        max_processing_fps_ = std::max(0.0, declare_parameter<double>(
+            "max_processing_fps", 0.0));
+        // The live depth and point-cloud outputs may run at the camera rate,
+        // while the considerably heavier RGBD message sent to RTAB-Map is
+        // independently bounded. This keeps RViz responsive on the NX.
+        max_rgbd_publish_fps_ = std::max(0.0, declare_parameter<double>(
+            "max_rgbd_publish_fps", 0.0));
+        opencv_num_threads_ = std::max(0, static_cast<int>(declare_parameter<int>(
+            "opencv_num_threads", 0)));
+        if (opencv_num_threads_ > 0) {
+            cv::setNumThreads(opencv_num_threads_);
+        }
+        // Preview topics are deliberately independent of the RGBD mapping
+        // stream. RViz can render these small images smoothly without adding
+        // a second full-resolution DDS consumer to the camera pipeline.
+        preview_scale_ = std::clamp(
+            declare_parameter<double>("preview_scale", 0.5), 0.1, 1.0);
+        preview_publish_every_n_frames_ = std::max(
+            1, static_cast<int>(declare_parameter<int>("preview_publish_every_n_frames", 2)));
         point_cloud_step_ = std::max(
             1, static_cast<int>(declare_parameter<int>("point_cloud_step", 4)));
         min_depth_m_ = declare_parameter<double>("min_depth_m", 0.2);
         max_depth_m_ = declare_parameter<double>("max_depth_m", 10.0);
         depth_edge_filter_max_delta_m_ = declare_parameter<double>(
             "depth_edge_filter_max_delta_m", 0.15);
+        depth_output_encoding_ = declare_parameter<std::string>(
+            "depth_output_encoding", "16UC1");
+        if (depth_output_encoding_ != "16UC1" && depth_output_encoding_ != "32FC1") {
+            RCLCPP_WARN(get_logger(), "Unknown depth_output_encoding='%s'; using 16UC1",
+                        depth_output_encoding_.c_str());
+            depth_output_encoding_ = "16UC1";
+        }
 
         max_disparity_ = std::max(16, ((max_disparity_ + 15) / 16) * 16);
+        // VPI CUDA supports disparity ranges up to 256 pixels. Keep this
+        // validation local so a malformed YAML cannot make the node fail after
+        // the camera pipeline is already running.
+        max_disparity_ = std::min(max_disparity_, 256);
         block_size_ = std::max(3, block_size_ | 1);
         if (median_blur_size_ < 3) {
             median_blur_size_ = 0;
@@ -79,7 +146,24 @@ public:
         stereo_->setSpeckleWindowSize(speckle_size_);
         stereo_->setSpeckleRange(speckle_range_);
         stereo_->setDisp12MaxDiff(disp12_max_diff_);
-        stereo_->setMode(cv::StereoSGBM::MODE_SGBM_3WAY);
+        if (sgbm_mode_ == "hh4") {
+            stereo_->setMode(cv::StereoSGBM::MODE_HH4);
+        } else if (sgbm_mode_ == "hh") {
+            stereo_->setMode(cv::StereoSGBM::MODE_HH);
+        } else {
+            sgbm_mode_ = "3way";
+            stereo_->setMode(cv::StereoSGBM::MODE_SGBM_3WAY);
+        }
+        if (depth_backend_ != "vpi_cuda" && depth_backend_ != "vpi_ofa_pva_vic" &&
+            depth_backend_ != "sgbm") {
+            RCLCPP_WARN(get_logger(), "Unknown depth_backend='%s'; using vpi_cuda", depth_backend_.c_str());
+            depth_backend_ = "vpi_cuda";
+        }
+        if (matcher_input_order_ != "left_right" && matcher_input_order_ != "right_left") {
+            RCLCPP_WARN(get_logger(), "Unknown matcher_input_order='%s'; using left_right",
+                        matcher_input_order_.c_str());
+            matcher_input_order_ = "left_right";
+        }
 
         // Keep a few samples because left and right are independent DDS topics.
         // The timestamp pairing cache below selects matching frames and prevents
@@ -88,7 +172,7 @@ public:
 
         if (use_stereo_pair_) {
             stereo_pair_sub_ = create_subscription<sensor_msgs::msg::Image>(
-                stereo_pair_topic, rclcpp::QoS(2),
+                stereo_pair_topic, sensor_qos,
                 std::bind(&StereoDepthNode::stereoPairCb, this, std::placeholders::_1));
         } else {
             left_image_sub_ = create_subscription<sensor_msgs::msg::Image>(
@@ -105,23 +189,38 @@ public:
             right_info_topic, sensor_qos,
             std::bind(&StereoDepthNode::rightInfoCb, this, std::placeholders::_1));
 
-        disparity_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/disparity", 10);
-        depth_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/depth", 10);
-        point_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/stereo/points", 10);
-        left_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/left/image_rect", 10);
-        right_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/right/image_rect", 10);
+        auto output_sensor_qos = rclcpp::SensorDataQoS().keep_last(2);
+        auto rgbd_qos = rclcpp::QoS(2).reliable().durability_volatile();
+        auto camera_info_qos = rclcpp::QoS(5).reliable().durability_volatile();
+
+        disparity_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/disparity", output_sensor_qos);
+        depth_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/depth", output_sensor_qos);
+        point_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/stereo/points", output_sensor_qos);
+        left_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/left/image_rect", output_sensor_qos);
+        right_rect_pub_ = create_publisher<sensor_msgs::msg::Image>("/stereo/right/image_rect", output_sensor_qos);
         left_rect_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
-            "/stereo/left/image_rect_color", 10);
+            "/stereo/left/image_rect_color", output_sensor_qos);
         right_rect_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
-            "/stereo/right/image_rect_color", 10);
+            "/stereo/right/image_rect_color", output_sensor_qos);
+        preview_color_pub_ = create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/left_rectified_color", output_sensor_qos);
+        preview_depth_pub_ = create_publisher<sensor_msgs::msg::Image>(
+            "/stereo/preview/depth_visual", output_sensor_qos);
+        // RViz on the host consumes these direct JPEG streams.  Keeping them
+        // separate from the raw preview topics prevents Wi-Fi/DDS queues from
+        // making the displayed image lag behind the live stereo pipeline.
+        preview_color_compressed_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
+            "/stereo/preview/left_rectified_color/compressed", output_sensor_qos);
+        preview_depth_compressed_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
+            "/stereo/preview/depth_visual/compressed", output_sensor_qos);
         // These CameraInfo messages describe the rectified/scaled images above.
         // They are required by standard stereo consumers such as RTAB-Map.
         left_rect_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
-            "/stereo/left/camera_info", 10);
+            "/stereo/left/camera_info", camera_info_qos);
         right_rect_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
-            "/stereo/right/camera_info", 10);
+            "/stereo/right/camera_info", camera_info_qos);
         rgbd_pub_ = create_publisher<rtabmap_msgs::msg::RGBDImage>(
-            "/stereo/rgbd_image", 10);
+            "/stereo/rgbd_image", rgbd_qos);
 
         processing_running_.store(true);
         processing_thread_ = std::thread(&StereoDepthNode::processingLoop, this);
@@ -135,12 +234,24 @@ public:
                     baseline_m_ > 0.0 ? std::to_string(baseline_m_).c_str() : "auto-from-calibration",
                     max_disparity_, block_size_, pre_filter_size_, pre_filter_cap_,
                     uniqueness_ratio_, speckle_size_, speckle_range_, disp12_max_diff_);
+        RCLCPP_INFO(get_logger(), "Depth backend: %s (VPI fallback_to_sgbm=%s, confidence=%d, p1=%d, p2=%d, uniqueness=%.2f, OFA window=%d passes=%d)",
+                    depth_backend_.c_str(), vpi_fallback_to_sgbm_ ? "true" : "false",
+                    vpi_confidence_threshold_, vpi_p1_, vpi_p2_, vpi_uniqueness_,
+                    vpi_ofa_window_size_, vpi_ofa_num_passes_);
+        RCLCPP_INFO(get_logger(), "Stereo matcher input order: %s", matcher_input_order_.c_str());
+        RCLCPP_INFO(get_logger(), "Right rectification vertical offset: %.2f px",
+                    right_rectification_y_offset_px_);
         RCLCPP_INFO(get_logger(), "Depth filters: median_blur=%d texture_min_gradient=%.2f edge_delta=%.3f neighbor_count=%d neighbor_delta=%.3f",
                     median_blur_size_, texture_filter_min_gradient_,
                     depth_edge_filter_max_delta_m_, depth_neighbor_filter_min_count_,
                     depth_neighbor_filter_max_delta_m_);
-        RCLCPP_INFO(get_logger(), "Performance parameters: processing_scale=%.2f point_cloud_step=%d SGBM_mode=3WAY",
-                    processing_scale_, point_cloud_step_);
+        RCLCPP_INFO(get_logger(), "Depth output encoding: %s", depth_output_encoding_.c_str());
+        RCLCPP_INFO(get_logger(), "Stereo preprocessing: CLAHE=%s clip_limit=%.2f tile_grid=%d",
+                    clahe_clip_limit_ > 0.0 ? "enabled" : "disabled",
+                    clahe_clip_limit_, clahe_tile_grid_size_);
+        RCLCPP_INFO(get_logger(), "Performance parameters: processing_scale=%.2f max_fps=%.2f rgbd_max_fps=%.2f OpenCV_threads=%d point_cloud_step=%d preview=%.2f/%d SGBM_mode=%s",
+                    processing_scale_, max_processing_fps_, max_rgbd_publish_fps_, opencv_num_threads_, point_cloud_step_,
+                    preview_scale_, preview_publish_every_n_frames_, sgbm_mode_.c_str());
     }
 
     ~StereoDepthNode() override
@@ -150,6 +261,7 @@ public:
         if (processing_thread_.joinable()) {
             processing_thread_.join();
         }
+        destroyVpi();
     }
 
 private:
@@ -275,7 +387,15 @@ private:
         const auto right_header = use_stereo_pair_ ? stereo_pair->header : right_image->header;
         const rclcpp::Time frame_stamp(left_header.stamp);
         const int64_t frame_stamp_ns = frame_stamp.nanoseconds();
-        if (frame_stamp_ns == last_processed_stamp_ns_) {
+        // DDS can deliver an older matched left/right pair after a newer pair
+        // when the ARM processor is under load.  Forwarding it makes RTAB-Map
+        // see duplicate/reversed stamps and reset odometry.  For online SLAM,
+        // dropping stale work is preferable to adding latency.
+        if (frame_stamp_ns <= last_processed_stamp_ns_) {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Dropping stale stereo pair stamp=%s (last=%ld)",
+                formatTime(frame_stamp).c_str(), static_cast<long>(last_processed_stamp_ns_));
             return;
         }
 
@@ -286,7 +406,17 @@ private:
                                  "Skipping unsynchronized stereo pair (delta=%.3f ms)", stamp_delta_ms);
             return;
         }
+        // Mark this frame handled even when it is rate-limited. Otherwise a
+        // later CameraInfo callback could process the same stale pair again.
         last_processed_stamp_ns_ = frame_stamp_ns;
+        const auto processing_now = std::chrono::steady_clock::now();
+        if (max_processing_fps_ > 0.0 &&
+            last_processing_started_ != std::chrono::steady_clock::time_point{} &&
+            std::chrono::duration<double>(processing_now - last_processing_started_).count() <
+                (0.9 / max_processing_fps_)) {
+            return;
+        }
+        last_processing_started_ = processing_now;
 
         try {
             const auto process_started = std::chrono::steady_clock::now();
@@ -308,8 +438,6 @@ private:
                 const int single_width = packed.cols / 2;
                 left_gray_raw = packed(cv::Rect(0, 0, single_width, packed.rows));
                 right_gray_raw = packed(cv::Rect(single_width, 0, single_width, packed.rows));
-                cv::cvtColor(left_gray_raw, left_color_raw, cv::COLOR_GRAY2BGR);
-                cv::cvtColor(right_gray_raw, right_color_raw, cv::COLOR_GRAY2BGR);
                 source_size = left_gray_raw.size();
             } else {
                 left_cv = cv_bridge::toCvShare(left_image, "bgr8");
@@ -332,33 +460,137 @@ private:
             const double scale_x = static_cast<double>(processing_size.width) / source_size.width;
             const double scale_y = static_cast<double>(processing_size.height) / source_size.height;
 
+            const auto rgbd_publish_now = std::chrono::steady_clock::now();
+            const bool rgbd_rate_limited =
+                max_rgbd_publish_fps_ > 0.0 &&
+                last_rgbd_publish_ != std::chrono::steady_clock::time_point{} &&
+                std::chrono::duration<double>(rgbd_publish_now - last_rgbd_publish_).count() <
+                    (1.0 / max_rgbd_publish_fps_);
+            const bool publish_rgbd = rgbd_pub_->get_subscription_count() > 0 && !rgbd_rate_limited;
+            // Snapshot all subscriber state once per frame. Image transport
+            // can switch raw/compressed subscriptions while RViz starts; using
+            // the same snapshot for preparation and publication prevents an
+            // empty image from being published during that transition.
+            const bool publish_preview_color_raw =
+                preview_color_pub_->get_subscription_count() > 0;
+            const bool publish_preview_color_compressed =
+                preview_color_compressed_pub_->get_subscription_count() > 0;
+            const bool publish_preview_depth_raw =
+                preview_depth_pub_->get_subscription_count() > 0;
+            const bool publish_preview_depth_compressed =
+                preview_depth_compressed_pub_->get_subscription_count() > 0;
+            const bool publish_preview_color =
+                publish_preview_color_raw || publish_preview_color_compressed;
+            const bool publish_preview_depth =
+                publish_preview_depth_raw || publish_preview_depth_compressed;
+            const bool publish_preview = publish_preview_color || publish_preview_depth;
+            const bool publish_left_rect_color =
+                left_rect_color_pub_->get_subscription_count() > 0;
+            const bool publish_right_rect_color =
+                right_rect_color_pub_->get_subscription_count() > 0;
+            const bool publish_point_cloud = point_cloud_pub_->get_subscription_count() > 0;
+            const bool need_left_color =
+                publish_rgbd || publish_preview_color ||
+                publish_point_cloud || publish_left_rect_color;
+            const bool need_right_color = publish_right_rect_color;
+
             cv::Mat left_gray, right_gray, left_color, right_color;
             if (rectify_images_) {
                 ensureRectificationMaps(*left_info, *right_info, processing_size, scale_x, scale_y);
                 cv::remap(left_gray_raw, left_gray, left_map_x_, left_map_y_, cv::INTER_LINEAR);
                 cv::remap(right_gray_raw, right_gray, right_map_x_, right_map_y_, cv::INTER_LINEAR);
-                cv::remap(left_color_raw, left_color, left_map_x_, left_map_y_, cv::INTER_LINEAR);
-                cv::remap(right_color_raw, right_color, right_map_x_, right_map_y_, cv::INTER_LINEAR);
+                if (need_left_color && !use_stereo_pair_) {
+                    cv::remap(left_color_raw, left_color, left_map_x_, left_map_y_, cv::INTER_LINEAR);
+                }
+                if (need_right_color && !use_stereo_pair_) {
+                    cv::remap(right_color_raw, right_color, right_map_x_, right_map_y_, cv::INTER_LINEAR);
+                }
             } else if (processing_size != source_size) {
                 cv::resize(left_gray_raw, left_gray, processing_size, 0.0, 0.0, cv::INTER_AREA);
                 cv::resize(right_gray_raw, right_gray, processing_size, 0.0, 0.0, cv::INTER_AREA);
-                cv::resize(left_color_raw, left_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
-                cv::resize(right_color_raw, right_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
+                if (need_left_color && !use_stereo_pair_) {
+                    cv::resize(left_color_raw, left_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
+                }
+                if (need_right_color && !use_stereo_pair_) {
+                    cv::resize(right_color_raw, right_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
+                }
             } else {
                 left_gray = left_gray_raw;
                 right_gray = right_gray_raw;
-                left_color = left_color_raw;
-                right_color = right_color_raw;
+                if (need_left_color && !use_stereo_pair_) {
+                    left_color = left_color_raw;
+                }
+                if (need_right_color && !use_stereo_pair_) {
+                    right_color = right_color_raw;
+                }
             }
 
-            cv::Mat disparity;
-            stereo_->compute(left_gray, right_gray, disparity);
-            if (median_blur_size_ >= 3) {
-                cv::medianBlur(disparity, disparity, median_blur_size_);
+            if (std::abs(right_rectification_y_offset_px_) > 0.001) {
+                const cv::Mat translate_right = (cv::Mat_<double>(2, 3) <<
+                    1.0, 0.0, 0.0,
+                    0.0, 1.0, right_rectification_y_offset_px_);
+                cv::warpAffine(right_gray, right_gray, translate_right, right_gray.size(),
+                               cv::INTER_LINEAR, cv::BORDER_CONSTANT);
+                if (need_right_color && !use_stereo_pair_) {
+                    cv::warpAffine(right_color, right_color, translate_right, right_color.size(),
+                                   cv::INTER_LINEAR, cv::BORDER_CONSTANT);
+                }
             }
 
-            cv::Mat disparity_8u;
-            cv::normalize(disparity, disparity_8u, 0, 255, cv::NORM_MINMAX, CV_8U);
+            // The packed stream is mono8, so rectifying a temporary 3-channel
+            // copy would perform the same interpolation three times. Rectify
+            // once in mono and expand afterwards; the published BGR pixels are
+            // identical while the NX moves substantially less image data.
+            if (use_stereo_pair_) {
+                if (need_left_color) {
+                    cv::cvtColor(left_gray, left_color, cv::COLOR_GRAY2BGR);
+                }
+                if (need_right_color) {
+                    cv::cvtColor(right_gray, right_color, cv::COLOR_GRAY2BGR);
+                }
+            }
+
+            // After the cameras are rectified, enhance the same local contrast
+            // on both grayscale images before SGBM. This recovers useful
+            // texture in the downscaled stream without filling depth holes or
+            // changing the calibrated image geometry.
+            if (clahe_clip_limit_ > 0.0) {
+                const auto clahe = cv::createCLAHE(
+                    clahe_clip_limit_,
+                    cv::Size(clahe_tile_grid_size_, clahe_tile_grid_size_));
+                clahe->apply(left_gray, left_gray);
+                clahe->apply(right_gray, right_gray);
+            }
+
+            cv::Mat disparity_float;
+            bool used_vpi = false;
+            const bool right_first = matcher_input_order_ == "right_left";
+            const cv::Mat &matcher_left = right_first ? right_gray : left_gray;
+            const cv::Mat &matcher_right = right_first ? left_gray : right_gray;
+            if (isVpiBackend()) {
+                used_vpi = computeVpiDisparity(matcher_left, matcher_right, disparity_float);
+                if (!used_vpi && !vpi_fallback_to_sgbm_) {
+                    RCLCPP_ERROR_THROTTLE(
+                        get_logger(), *get_clock(), 2000,
+                        "VPI stereo backend failed and SGBM fallback is disabled");
+                    return;
+                }
+            }
+            if (!used_vpi) {
+                cv::Mat sgbm_disparity;
+                stereo_->compute(matcher_left, matcher_right, sgbm_disparity);
+                if (median_blur_size_ >= 3) {
+                    cv::medianBlur(sgbm_disparity, sgbm_disparity, median_blur_size_);
+                }
+                sgbm_disparity.convertTo(disparity_float, CV_32F, 1.0 / 16.0);
+                if (isVpiBackend()) {
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                                         "Using OpenCV SGBM fallback because VPI stereo did not complete");
+                }
+            }
+            if (right_first) {
+                disparity_float = remapRightDisparityToLeft(disparity_float);
+            }
 
             cv::Mat depth;
             const double fx = (left_info->p[0] != 0.0 ? left_info->p[0] : left_info->k[0]) * scale_x;
@@ -374,17 +606,21 @@ private:
                                      "Invalid calibration: fx=%.3f fy=%.3f baseline=%.6f", fx, fy, baseline);
                 return;
             }
-            cv::Mat disparity_float;
-            disparity.convertTo(disparity_float, CV_32F, 1.0 / 16.0);
             cv::divide(fx * baseline, disparity_float, depth);
             const cv::Mat valid_mask =
                 (disparity_float > 0.5f) &
                 (depth >= static_cast<float>(min_depth_m_)) &
                 (depth <= static_cast<float>(max_depth_m_));
             depth.setTo(0.0f, ~valid_mask);
-            filterLowTextureDepth(depth, left_gray);
-            filterDepthEdges(depth);
-            filterDepthNeighborhood(depth);
+            // OFA+PVA+VIC already applies a hardware median stage and its
+            // confidence network. Re-running the CPU rejection filters costs
+            // roughly one camera period and unnecessarily removes valid depth.
+            // CUDA/SGBM keep the conservative filters used by their profile.
+            if (!isVpiOfaPvaVic() || vpi_ofa_apply_cpu_postfilters_) {
+                filterLowTextureDepth(depth, left_gray);
+                filterDepthEdges(depth);
+                filterDepthNeighborhood(depth);
+            }
 
             const auto frame_id = left_header.frame_id.empty()
                 ? std::string("left_camera_optical_frame") : left_header.frame_id;
@@ -400,43 +636,88 @@ private:
             if (!right_info->header.frame_id.empty()) {
                 right_rect_header.frame_id = right_info->header.frame_id;
             }
-            auto left_rect_msg = cv_bridge::CvImage(left_rect_header, "mono8", left_gray).toImageMsg();
-            auto right_rect_msg = cv_bridge::CvImage(right_rect_header, "mono8", right_gray).toImageMsg();
-            auto left_color_rect_msg = cv_bridge::CvImage(left_rect_header, "bgr8", left_color).toImageMsg();
-            auto right_color_rect_msg = cv_bridge::CvImage(right_rect_header, "bgr8", right_color).toImageMsg();
-            left_rect_pub_->publish(*left_rect_msg);
-            right_rect_pub_->publish(*right_rect_msg);
-            left_rect_color_pub_->publish(*left_color_rect_msg);
-            right_rect_color_pub_->publish(*right_color_rect_msg);
-
             const auto left_rect_info = makeRectifiedCameraInfo(
                 *left_info, left_rect_header, processing_size, scale_x, scale_y);
-            const auto right_rect_info = makeRectifiedCameraInfo(
+            auto right_rect_info = makeRectifiedCameraInfo(
                 *right_info, right_rect_header, processing_size, scale_x, scale_y);
-            left_rect_info_pub_->publish(left_rect_info);
-            right_rect_info_pub_->publish(right_rect_info);
+            right_rect_info.p[6] += right_rectification_y_offset_px_;
+            right_rect_info.k[5] += right_rectification_y_offset_px_;
+            if (left_rect_pub_->get_subscription_count() > 0) {
+                left_rect_pub_->publish(*cv_bridge::CvImage(
+                    left_rect_header, "mono8", left_gray).toImageMsg());
+            }
+            if (right_rect_pub_->get_subscription_count() > 0) {
+                right_rect_pub_->publish(*cv_bridge::CvImage(
+                    right_rect_header, "mono8", right_gray).toImageMsg());
+            }
+            if (left_rect_info_pub_->get_subscription_count() > 0 || publish_rgbd) {
+                left_rect_info_pub_->publish(left_rect_info);
+            }
+            if (right_rect_info_pub_->get_subscription_count() > 0 || publish_rgbd) {
+                right_rect_info_pub_->publish(right_rect_info);
+            }
 
-            auto disparity_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "mono8", disparity_8u).toImageMsg();
-            disparity_msg->header.stamp = left_header.stamp;
-            disparity_msg->header.frame_id = frame_id;
-            disparity_pub_->publish(*disparity_msg);
+            sensor_msgs::msg::Image::SharedPtr left_color_rect_msg;
+            if (publish_left_rect_color || publish_rgbd) {
+                left_color_rect_msg = cv_bridge::CvImage(
+                    left_rect_header, "bgr8", left_color).toImageMsg();
+                if (publish_left_rect_color) {
+                    left_rect_color_pub_->publish(*left_color_rect_msg);
+                }
+            }
+            if (publish_right_rect_color) {
+                right_rect_color_pub_->publish(*cv_bridge::CvImage(
+                    right_rect_header, "bgr8", right_color).toImageMsg());
+            }
 
-            auto depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth).toImageMsg();
-            depth_msg->header.stamp = left_header.stamp;
-            depth_msg->header.frame_id = frame_id;
-            depth_pub_->publish(*depth_msg);
+            sensor_msgs::msg::Image::SharedPtr depth_msg;
+            if (depth_pub_->get_subscription_count() > 0 || publish_rgbd) {
+                if (depth_output_encoding_ == "16UC1") {
+                    cv::Mat depth_mm;
+                    depth.convertTo(depth_mm, CV_16UC1, 1000.0);
+                    depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "16UC1", depth_mm).toImageMsg();
+                } else {
+                    depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth).toImageMsg();
+                }
+                depth_msg->header.stamp = left_header.stamp;
+                depth_msg->header.frame_id = frame_id;
+                if (depth_pub_->get_subscription_count() > 0) {
+                    depth_pub_->publish(*depth_msg);
+                }
+            }
+            if (disparity_pub_->get_subscription_count() > 0) {
+                cv::Mat disparity_8u;
+                cv::normalize(disparity_float, disparity_8u, 0, 255, cv::NORM_MINMAX, CV_8U);
+                auto disparity_msg = cv_bridge::CvImage(
+                    std_msgs::msg::Header(), "mono8", disparity_8u).toImageMsg();
+                disparity_msg->header.stamp = left_header.stamp;
+                disparity_msg->header.frame_id = frame_id;
+                disparity_pub_->publish(*disparity_msg);
+            }
 
-            // A single RGBDImage is atomically timestamped: it avoids a
-            // second message_filters synchronization stage in RTAB-Map.
-            rtabmap_msgs::msg::RGBDImage rgbd_msg;
-            rgbd_msg.header = left_rect_header;
-            rgbd_msg.rgb_camera_info = left_rect_info;
-            rgbd_msg.depth_camera_info = left_rect_info;
-            rgbd_msg.rgb = *left_color_rect_msg;
-            rgbd_msg.depth = *depth_msg;
-            rgbd_pub_->publish(rgbd_msg);
+            // Avoid constructing unused image messages: on the NX this saves
+            // enough memory bandwidth for the live point cloud to follow the
+            // 10 Hz camera stream while RTAB-Map stays rate-limited.
+            if (publish_rgbd) {
+                rtabmap_msgs::msg::RGBDImage rgbd_msg;
+                rgbd_msg.header = left_rect_header;
+                rgbd_msg.rgb_camera_info = left_rect_info;
+                rgbd_msg.depth_camera_info = left_rect_info;
+                rgbd_msg.rgb = *left_color_rect_msg;
+                rgbd_msg.depth = *depth_msg;
+                rgbd_pub_->publish(rgbd_msg);
+                last_rgbd_publish_ = rgbd_publish_now;
+            }
 
-            publishPointCloud(depth, left_color, fx, fy, cx, cy, left_header.stamp, frame_id);
+            if (publish_point_cloud) {
+                publishPointCloud(depth, left_color, fx, fy, cx, cy, left_header.stamp, frame_id);
+            }
+            if (publish_preview) {
+                publishPreview(
+                    left_color, depth, left_rect_header,
+                    publish_preview_color_raw, publish_preview_color_compressed,
+                    publish_preview_depth_raw, publish_preview_depth_compressed);
+            }
 
             const int valid_pixels = static_cast<int>(cv::countNonZero(depth > 0));
             const double process_ms = std::chrono::duration<double, std::milli>(
@@ -445,10 +726,253 @@ private:
                                  "Processed frame: left=%s right=%s disparity=%dx%d valid_depth_pixels=%d processing=%.1f ms",
                                  formatTime(frame_stamp).c_str(),
                                  formatTime(right_stamp).c_str(),
-                                 disparity.cols, disparity.rows, valid_pixels, process_ms);
+                                 disparity_float.cols, disparity_float.rows, valid_pixels, process_ms);
         } catch (const std::exception &e) {
             RCLCPP_WARN(get_logger(), "Stereo depth processing failed: %s", e.what());
         }
+    }
+
+    bool checkVpiStatus(VPIStatus status, const char *operation)
+    {
+        if (status == VPI_SUCCESS) {
+            return true;
+        }
+        char message[VPI_MAX_STATUS_MESSAGE_LENGTH] = {};
+        vpiGetLastStatusMessage(message, sizeof(message));
+        RCLCPP_ERROR_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "VPI stereo %s failed: %s (%s)", operation,
+            vpiStatusGetName(status), message);
+        return false;
+    }
+
+    bool isVpiOfaPvaVic() const
+    {
+        return depth_backend_ == "vpi_ofa_pva_vic";
+    }
+
+    bool isVpiBackend() const
+    {
+        return depth_backend_ == "vpi_cuda" || isVpiOfaPvaVic();
+    }
+
+    uint64_t vpiBackendFlags() const
+    {
+        return isVpiOfaPvaVic()
+            ? (VPI_BACKEND_OFA | VPI_BACKEND_PVA | VPI_BACKEND_VIC)
+            : VPI_BACKEND_CUDA;
+    }
+
+    static cv::Mat remapRightDisparityToLeft(const cv::Mat &right_disparity)
+    {
+        cv::Mat left_disparity = cv::Mat::zeros(right_disparity.size(), CV_32FC1);
+        for (int y = 0; y < right_disparity.rows; ++y) {
+            const float *src = right_disparity.ptr<float>(y);
+            float *dst = left_disparity.ptr<float>(y);
+            for (int x_right = 0; x_right < right_disparity.cols; ++x_right) {
+                const float disparity = src[x_right];
+                if (!std::isfinite(disparity) || disparity <= 0.5f) {
+                    continue;
+                }
+                const int x_left = static_cast<int>(std::lround(x_right - disparity));
+                if (x_left >= 0 && x_left < right_disparity.cols) {
+                    // At occlusions more than one right pixel may project to
+                    // one left pixel. Prefer the nearer (larger disparity).
+                    dst[x_left] = std::max(dst[x_left], disparity);
+                }
+            }
+        }
+        return left_disparity;
+    }
+
+    void destroyVpi()
+    {
+        // The stream owns queued GPU work, so release it before the payload and
+        // its images. This is also safe when partial initialization failed.
+        if (vpi_stream_ != nullptr) {
+            vpiStreamDestroy(vpi_stream_);
+            vpi_stream_ = nullptr;
+        }
+        if (vpi_disparity_ != nullptr) {
+            vpiImageDestroy(vpi_disparity_);
+            vpi_disparity_ = nullptr;
+        }
+        if (vpi_confidence_ != nullptr) {
+            vpiImageDestroy(vpi_confidence_);
+            vpi_confidence_ = nullptr;
+        }
+        if (vpi_stereo_left_ != nullptr) {
+            vpiImageDestroy(vpi_stereo_left_);
+            vpi_stereo_left_ = nullptr;
+        }
+        if (vpi_stereo_right_ != nullptr) {
+            vpiImageDestroy(vpi_stereo_right_);
+            vpi_stereo_right_ = nullptr;
+        }
+        if (vpi_payload_ != nullptr) {
+            vpiPayloadDestroy(vpi_payload_);
+            vpi_payload_ = nullptr;
+        }
+        vpi_size_ = cv::Size();
+    }
+
+    bool ensureVpi(const cv::Size &size)
+    {
+        if (vpi_stream_ != nullptr && vpi_payload_ != nullptr &&
+            vpi_disparity_ != nullptr && vpi_size_ == size) {
+            return true;
+        }
+
+        destroyVpi();
+        VPIStereoDisparityEstimatorCreationParams create_params{};
+        if (!checkVpiStatus(vpiInitStereoDisparityEstimatorCreationParams(&create_params),
+                            "parameter initialization")) {
+            return false;
+        }
+        create_params.maxDisparity = max_disparity_;
+        const bool ofa_pva_vic = isVpiOfaPvaVic();
+        const uint64_t backend_flags = vpiBackendFlags();
+        const VPIImageFormat input_format = ofa_pva_vic
+            ? VPI_IMAGE_FORMAT_Y8_ER_BL : VPI_IMAGE_FORMAT_U8;
+
+        if (!checkVpiStatus(vpiStreamCreate(0, &vpi_stream_), "stream creation") ||
+            !checkVpiStatus(vpiCreateStereoDisparityEstimator(
+                                backend_flags, size.width, size.height, input_format,
+                                &create_params, &vpi_payload_),
+                            "payload creation") ||
+            !checkVpiStatus(vpiImageCreate(
+                                size.width, size.height, VPI_IMAGE_FORMAT_S16, 0,
+                                &vpi_disparity_),
+                            "output allocation") ||
+            (ofa_pva_vic && !checkVpiStatus(vpiImageCreate(
+                                size.width, size.height, VPI_IMAGE_FORMAT_Y8_ER_BL, 0,
+                                &vpi_stereo_left_),
+                            "left OFA input allocation")) ||
+            (ofa_pva_vic && !checkVpiStatus(vpiImageCreate(
+                                size.width, size.height, VPI_IMAGE_FORMAT_Y8_ER_BL, 0,
+                                &vpi_stereo_right_),
+                            "right OFA input allocation")) ||
+            (ofa_pva_vic && !checkVpiStatus(vpiImageCreate(
+                                size.width, size.height, VPI_IMAGE_FORMAT_U16, 0,
+                                &vpi_confidence_),
+                            "confidence allocation")) ||
+            !checkVpiStatus(vpiInitStereoDisparityEstimatorParams(&vpi_params_),
+                            "submit parameter initialization")) {
+            destroyVpi();
+            return false;
+        }
+
+        vpi_params_.maxDisparity = max_disparity_;
+        vpi_params_.confidenceThreshold = vpi_confidence_threshold_;
+        vpi_params_.p1 = vpi_p1_;
+        vpi_params_.p2 = ofa_pva_vic
+            ? std::min(vpi_p2_, 89 - vpi_p1_)
+            : vpi_p2_;
+        vpi_params_.uniqueness = vpi_uniqueness_;
+        if (ofa_pva_vic) {
+            vpi_params_.windowSize = vpi_ofa_window_size_;
+            vpi_params_.numPasses = vpi_ofa_num_passes_;
+            vpi_params_.confidenceType = VPI_STEREO_CONFIDENCE_INFERENCE;
+        }
+        vpi_size_ = size;
+        RCLCPP_INFO(get_logger(), "Initialized VPI %s for %dx%d, max_disparity=%d",
+                    ofa_pva_vic ? "OFA+PVA+VIC SGM" : "CUDA-SGM",
+                    size.width, size.height, max_disparity_);
+        return true;
+    }
+
+    bool computeVpiDisparity(
+        const cv::Mat &left_gray, const cv::Mat &right_gray, cv::Mat &disparity_float)
+    {
+        if (left_gray.empty() || right_gray.empty() || left_gray.type() != CV_8UC1 ||
+            right_gray.type() != CV_8UC1 || left_gray.size() != right_gray.size() ||
+            !ensureVpi(left_gray.size())) {
+            return false;
+        }
+
+        VPIImage left_image = nullptr;
+        VPIImage right_image = nullptr;
+        const auto release_inputs = [&left_image, &right_image]() {
+            if (left_image != nullptr) {
+                vpiImageDestroy(left_image);
+            }
+            if (right_image != nullptr) {
+                vpiImageDestroy(right_image);
+            }
+        };
+
+        const bool ofa_pva_vic = isVpiOfaPvaVic();
+        const VPIImageFormat wrapper_format = ofa_pva_vic
+            ? VPI_IMAGE_FORMAT_Y8_ER : VPI_IMAGE_FORMAT_U8;
+        const uint64_t backend_flags = vpiBackendFlags();
+        if (!checkVpiStatus(vpiImageCreateWrapperOpenCVMat(
+                                left_gray, wrapper_format, 0, &left_image),
+            "left image wrapping") ||
+            !checkVpiStatus(vpiImageCreateWrapperOpenCVMat(
+                                right_gray, wrapper_format, 0, &right_image),
+                            "right image wrapping")) {
+            release_inputs();
+            return false;
+        }
+
+        bool submitted = false;
+        if (ofa_pva_vic) {
+            VPIConvertImageFormatParams conversion{};
+            submitted =
+                checkVpiStatus(vpiInitConvertImageFormatParams(&conversion),
+                               "OFA conversion parameter initialization") &&
+                checkVpiStatus(vpiSubmitConvertImageFormat(
+                                   vpi_stream_, VPI_BACKEND_VIC, left_image,
+                                   vpi_stereo_left_, &conversion),
+                               "left OFA input conversion") &&
+                checkVpiStatus(vpiSubmitConvertImageFormat(
+                                   vpi_stream_, VPI_BACKEND_VIC, right_image,
+                                   vpi_stereo_right_, &conversion),
+                               "right OFA input conversion") &&
+                checkVpiStatus(vpiSubmitStereoDisparityEstimator(
+                                   vpi_stream_, backend_flags, vpi_payload_, vpi_stereo_left_,
+                                   vpi_stereo_right_, vpi_disparity_, vpi_confidence_, &vpi_params_),
+                               "OFA+PVA+VIC submission");
+        } else {
+            submitted = checkVpiStatus(vpiSubmitStereoDisparityEstimator(
+                vpi_stream_, backend_flags, vpi_payload_, left_image, right_image,
+                vpi_disparity_, nullptr, &vpi_params_), "CUDA submission");
+        }
+        if (!submitted || !checkVpiStatus(vpiStreamSync(vpi_stream_), "synchronization")) {
+            release_inputs();
+            return false;
+        }
+
+        VPIImageData data{};
+        if (!checkVpiStatus(vpiImageLockData(
+                                vpi_disparity_, VPI_LOCK_READ,
+                                VPI_IMAGE_BUFFER_HOST_PITCH_LINEAR, &data),
+                            "output lock")) {
+            release_inputs();
+            return false;
+        }
+        cv::Mat disparity_q10_5;
+        const bool exported = checkVpiStatus(
+            vpiImageDataExportOpenCVMat(data, &disparity_q10_5), "output conversion");
+        if (exported) {
+            // Exported Mat aliases the locked VPI image, so clone before unlock.
+            disparity_q10_5 = disparity_q10_5.clone();
+        }
+        const bool unlocked = checkVpiStatus(vpiImageUnlock(vpi_disparity_), "output unlock");
+        release_inputs();
+        if (!exported || !unlocked || disparity_q10_5.empty()) {
+            return false;
+        }
+
+        // OFA+PVA+VIC already applies the configured hardware median filter.
+        // Applying OpenCV medianBlur again softens valid depth discontinuities
+        // without improving confidence, so reserve it for CUDA/SGBM only.
+        if (median_blur_size_ >= 3 && !ofa_pva_vic) {
+            cv::medianBlur(disparity_q10_5, disparity_q10_5, median_blur_size_);
+        }
+        // VPI stereo disparity is Q10.5 (one pixel is 32 integer units).
+        disparity_q10_5.convertTo(disparity_float, CV_32F, 1.0 / 32.0);
+        return true;
     }
 
     static cv::Mat cameraMatrix(const std::array<double, 9> &values)
@@ -602,6 +1126,97 @@ private:
             }
         }
         point_cloud_pub_->publish(cloud);
+
+        const auto now = get_clock()->now();
+        if (live_cloud_window_started_.nanoseconds() == 0) {
+            live_cloud_window_started_ = now;
+        }
+        ++live_cloud_window_count_;
+        const double elapsed = (now - live_cloud_window_started_).seconds();
+        if (elapsed >= 2.0) {
+            RCLCPP_INFO(get_logger(), "Live point-cloud publish rate: %.2f Hz",
+                        static_cast<double>(live_cloud_window_count_) / elapsed);
+            live_cloud_window_started_ = now;
+            live_cloud_window_count_ = 0;
+        }
+    }
+
+    void publishPreview(
+        const cv::Mat &color, const cv::Mat &depth,
+        const std_msgs::msg::Header &header,
+        const bool color_raw, const bool color_compressed,
+        const bool depth_raw, const bool depth_compressed)
+    {
+        ++preview_frame_count_;
+        if ((preview_frame_count_ % preview_publish_every_n_frames_) != 0) {
+            return;
+        }
+
+        cv::Mat preview_color;
+        if ((color_raw || color_compressed) && !color.empty()) {
+            if (preview_scale_ < 0.999) {
+                cv::resize(
+                    color, preview_color, cv::Size(), preview_scale_, preview_scale_,
+                    cv::INTER_AREA);
+            } else {
+                preview_color = color;
+            }
+            if (color_raw) {
+                preview_color_pub_->publish(
+                    *cv_bridge::CvImage(header, "bgr8", preview_color).toImageMsg());
+            }
+        }
+
+        cv::Mat depth_visual;
+        if (depth_raw || depth_compressed) {
+            cv::Mat preview_depth;
+            if (preview_scale_ < 0.999) {
+                cv::resize(
+                    depth, preview_depth, cv::Size(), preview_scale_, preview_scale_,
+                    cv::INTER_NEAREST);
+            } else {
+                preview_depth = depth;
+            }
+
+            // Visual-only inverse-depth colour map. Invalid pixels remain black;
+            // near surfaces are warm and far surfaces are cool.
+            cv::Mat depth_visual_mono;
+            const double span = std::max(0.001, max_depth_m_ - min_depth_m_);
+            preview_depth.convertTo(
+                depth_visual_mono, CV_8U, -255.0 / span,
+                255.0 * max_depth_m_ / span);
+            depth_visual_mono.setTo(0, preview_depth <= 0.0f);
+            cv::applyColorMap(depth_visual_mono, depth_visual, cv::COLORMAP_TURBO);
+            depth_visual.setTo(cv::Scalar(0, 0, 0), preview_depth <= 0.0f);
+            if (depth_raw) {
+                preview_depth_pub_->publish(
+                    *cv_bridge::CvImage(header, "bgr8", depth_visual).toImageMsg());
+            }
+        }
+
+        if (color_compressed || depth_compressed) {
+            const std::vector<int> jpeg_params{cv::IMWRITE_JPEG_QUALITY, 80};
+            if (color_compressed && !preview_color.empty()) {
+                std::vector<uint8_t> color_jpeg;
+                if (cv::imencode(".jpg", preview_color, color_jpeg, jpeg_params)) {
+                    sensor_msgs::msg::CompressedImage compressed;
+                    compressed.header = header;
+                    compressed.format = "bgr8; jpeg compressed bgr8";
+                    compressed.data = std::move(color_jpeg);
+                    preview_color_compressed_pub_->publish(std::move(compressed));
+                }
+            }
+            if (depth_compressed && !depth_visual.empty()) {
+                std::vector<uint8_t> depth_jpeg;
+                if (cv::imencode(".jpg", depth_visual, depth_jpeg, jpeg_params)) {
+                    sensor_msgs::msg::CompressedImage compressed;
+                    compressed.header = header;
+                    compressed.format = "bgr8; jpeg compressed bgr8";
+                    compressed.data = std::move(depth_jpeg);
+                    preview_depth_compressed_pub_->publish(std::move(compressed));
+                }
+            }
+        }
     }
 
     void filterDepthEdges(cv::Mat &depth) const
@@ -705,6 +1320,10 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_rect_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_rect_color_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_rect_color_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr preview_color_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr preview_depth_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr preview_color_compressed_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr preview_depth_compressed_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr left_rect_info_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr right_rect_info_pub_;
     rclcpp::Publisher<rtabmap_msgs::msg::RGBDImage>::SharedPtr rgbd_pub_;
@@ -721,6 +1340,17 @@ private:
     sensor_msgs::msg::CameraInfo::SharedPtr last_left_info_;
     sensor_msgs::msg::CameraInfo::SharedPtr last_right_info_;
     double baseline_m_{0.0};
+    std::string depth_backend_{"sgbm"};
+    bool vpi_fallback_to_sgbm_{true};
+    std::string matcher_input_order_{"left_right"};
+    double right_rectification_y_offset_px_{0.0};
+    int vpi_confidence_threshold_{0};
+    int vpi_p1_{3};
+    int vpi_p2_{48};
+    float vpi_uniqueness_{-1.0f};
+    int vpi_ofa_window_size_{5};
+    int vpi_ofa_num_passes_{3};
+    bool vpi_ofa_apply_cpu_postfilters_{false};
     int max_disparity_{96};
     int block_size_{9};
     int pre_filter_size_{9};
@@ -731,20 +1361,42 @@ private:
     int disp12_max_diff_{1};
     int median_blur_size_{5};
     double texture_filter_min_gradient_{4.0};
+    double clahe_clip_limit_{0.0};
+    int clahe_tile_grid_size_{8};
     int depth_neighbor_filter_min_count_{3};
     double depth_neighbor_filter_max_delta_m_{0.08};
+    std::string sgbm_mode_{"3way"};
     bool rectify_images_{true};
     bool use_stereo_pair_{false};
     double processing_scale_{0.5};
+    double max_processing_fps_{0.0};
+    double max_rgbd_publish_fps_{0.0};
+    int opencv_num_threads_{0};
+    double preview_scale_{0.5};
+    int preview_publish_every_n_frames_{2};
+    std::size_t preview_frame_count_{0};
     int point_cloud_step_{4};
     double min_depth_m_{0.2};
     double max_depth_m_{10.0};
     double depth_edge_filter_max_delta_m_{0.15};
+    std::string depth_output_encoding_{"16UC1"};
     bool received_any_message_{false};
     rclcpp::Time last_left_image_stamp_{};
     rclcpp::Time last_right_image_stamp_{};
     int64_t last_processed_stamp_ns_{-1};
+    std::chrono::steady_clock::time_point last_processing_started_{};
+    std::chrono::steady_clock::time_point last_rgbd_publish_{};
+    rclcpp::Time live_cloud_window_started_{0, 0, RCL_ROS_TIME};
+    std::size_t live_cloud_window_count_{0};
     cv::Ptr<cv::StereoSGBM> stereo_;
+    VPIStream vpi_stream_{nullptr};
+    VPIPayload vpi_payload_{nullptr};
+    VPIImage vpi_disparity_{nullptr};
+    VPIImage vpi_confidence_{nullptr};
+    VPIImage vpi_stereo_left_{nullptr};
+    VPIImage vpi_stereo_right_{nullptr};
+    VPIStereoDisparityEstimatorParams vpi_params_{};
+    cv::Size vpi_size_;
     cv::Mat left_map_x_;
     cv::Mat left_map_y_;
     cv::Mat right_map_x_;

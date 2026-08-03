@@ -1,21 +1,39 @@
-# EVK 事件相机模块
+# EVK4 事件相机模块
 
-本目录集中管理 Prophesee EVK4 HD 事件相机相关内容。
-
-```text
-src/evk
-├── event_camera_msgs       # 事件相机 ROS 消息定义
-├── metavision_driver       # 基于 MetaVision/OpenEB 的底层 ROS 驱动
-├── evk4_driver             # 本工作空间的 EVK4 HD 封装功能包
-├── openeb_vendor           # OpenEB vendor 包，当前默认忽略源码构建
-├── event_camera_codecs     # 事件消息解码工具，当前默认忽略
-└── event_camera_renderer   # 事件可视化工具，当前默认忽略
-```
-
-当前主链路为：
+本目录只保留本项目对 Prophesee EVK4 HD 的 ROS 2 封装代码：
 
 ```text
-event_camera_msgs -> metavision_driver -> evk4_driver
+device/evk
+└── ros2_ws
+    └── evk4_driver
 ```
 
-`evk4_driver` 是后续开发主要入口；上游包尽量保持原样，便于以后同步更新。
+MetaVision/OpenEB SDK 以及上游 ROS 事件相机依赖不随本仓库上传，使用时按需从官方或上游仓库下载。
+
+## SDK 与依赖下载地址
+
+```text
+MetaVision/OpenEB:
+https://github.com/prophesee-ai/openeb
+
+ROS event_camera_msgs:
+https://github.com/ros-event-camera/event_camera_msgs.git
+
+ROS metavision_driver:
+https://github.com/ros-event-camera/metavision_driver.git
+
+ROS event_camera_renderer:
+https://github.com/ros-event-camera/event_camera_renderer.git
+
+ROS event_camera_codecs:
+https://github.com/ros-event-camera/event_camera_codecs.git
+
+ROS openeb_vendor:
+https://github.com/ros-event-camera/openeb_vendor.git
+```
+
+建议将这些依赖放在同一个 ROS 2 workspace 中，再与 `device/evk/ros2_ws/evk4_driver` 一起构建。
+
+当前 Ubuntu 22.04 / ROS 2 Humble 的准备、构建和启动命令见
+[`ros2_ws/README_humble.md`](ros2_ws/README_humble.md)。旧的 Lyrical 本地
+vendor 目录不能直接复用。

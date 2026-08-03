@@ -38,12 +38,12 @@ Visualization Manager:
       Name: Left Camera
       Normalize Range: false
       Topic:
-        Depth: 10
+        Depth: 1
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Transport Override: raw
-        Value: /left_camera/image
+        Reliability Policy: Best Effort
+        Transport Override: compressed
+        Value: /stereo/preview/left_color
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -53,17 +53,66 @@ Visualization Manager:
       Name: Right Camera
       Normalize Range: false
       Topic:
-        Depth: 10
+        Depth: 1
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Transport Override: raw
-        Value: /right_camera/image
+        Reliability Policy: Best Effort
+        Transport Override: compressed
+        Value: /stereo/preview/right_color
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 4.5
+      Median window: 5
+      Min Value: 0.45
+      Name: VPI CUDA-SGM Depth (color)
+      Normalize Range: false
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Transport Override: compressed
+        Value: /stereo/preview/depth_visual
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: rgb
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: VPI CUDA-SGM Point Cloud (enable when needed)
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 2
+      Size (m): 0.01
+      Style: Points
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        Filter size: 1
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /stereo/points
+      Use Fixed Frame: true
+      Use rainbow: false
       Value: true
   Enabled: true
   Global Options:
     Background Color: 32; 32; 32
-    Fixed Frame: map
+    Fixed Frame: left_camera_optical_frame
     Frame Rate: 25
   Name: root
   Tools:

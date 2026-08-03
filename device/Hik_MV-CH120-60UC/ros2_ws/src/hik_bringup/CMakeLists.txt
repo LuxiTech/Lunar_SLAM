@@ -10,6 +10,9 @@ install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/odom_tf_republisher.py
   scripts/rtabmap_status.py
+  scripts/sgbm_depth_probe.py
+  scripts/rviz_depth_click_probe.py
+  scripts/install_h30_udev_rule.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

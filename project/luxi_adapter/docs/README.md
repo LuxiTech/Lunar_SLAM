@@ -38,6 +38,36 @@ launch file named `<profile>.launch.py`, set that name in the YAML file, and
 make it publish the same contract. Do not add hardware-specific topic names to
 `luxi_rtab_map`, `luxi_web_control`, or navigation packages.
 
+## Hik stereo + H30 profile
+
+The Hik profile preserves the calibrated sensor pipeline: rectified left colour,
+depth and CameraInfo are all 512x375, while the camera driver itself publishes
+1024x750 images. The H30 AHRS orientation is already valid, so it is relayed
+unchanged to both canonical IMU topics without a second filter.
+
+Start the hardware pipeline first. It deliberately contains no RTAB-Map node,
+so Lunar SLAM is the only mapping backend:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/lunar_slam/device/Hik_MV-CH120-60UC/ros2_ws/install/setup.bash
+ros2 launch hik_bringup hik_sensor_only.launch.py
+```
+
+Then start the adapter in a second terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/lunar_slam/install/setup.bash
+ros2 launch luxi_adapter sensor_bringup.launch.py \
+  config:=~/lunar_slam/install/luxi_adapter/share/luxi_adapter/config/hik_sensor_bringup.yaml
+```
+
+The adapter relays `/stereo/left/image_rect_color`, `/stereo/depth`,
+`/stereo/left/camera_info`, `/imu/data` and the Hik JPEG preview into the
+hardware-independent `/sensors/*` contract. It preserves timestamps and frame
+IDs; it does not start a second camera, IMU driver or TF publisher.
+
 ## D435i hardware acceptance
 
 Run the automated adapter test before connecting hardware:

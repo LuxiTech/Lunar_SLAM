@@ -301,37 +301,23 @@ bool StereoCamera::grab(
         return false;
     }
 
-    // Each SDK handle owns an independent queue. A delayed callback can
-    // retrieve frame N from one queue and frame N+1 from the other even though
-    // both cameras share Line0. Replace the older candidate until both host
-    // capture timestamps belong to the same trigger period.
-    constexpr double kMaxPairDeltaMs = 8.0;
-    constexpr int kMaxRealignAttempts = 6;
-    for (int attempt = 0; attempt < kMaxRealignAttempts; ++attempt) {
-        const double delta_ms = hostTimestampDeltaMs(left_host_ts, right_host_ts);
-        if (delta_ms < 0.0 || delta_ms <= kMaxPairDeltaMs) {
-            return true;
-        }
-
-        const bool left_is_older = left_host_ts < right_host_ts;
-        const bool replaced = left_is_older
-            ? left_camera_.grab(left, left_ts, left_host_ts)
-            : right_camera_.grab(right, right_ts, right_host_ts);
-        if (!replaced) {
-            std::cerr << "Stereo realignment failed while replacing "
-                      << (left_is_older ? "left" : "right") << " frame" << std::endl;
-            return false;
+    // The cameras share a hardware trigger, therefore the first frame obtained
+    // concurrently from both SDK queues is the correct stereo pair. USB host
+    // arrival timestamps describe transfer scheduling, not exposure time: on
+    // this dual-USB setup they may differ by tens of milliseconds even for the
+    // same trigger edge. Retrying based on that host-time difference discarded
+    // valid frames and reduced a 10 Hz stream to about 5 Hz.
+    const double host_delta_ms = hostTimestampDeltaMs(left_host_ts, right_host_ts);
+    if (host_delta_ms > 30.0) {
+        static unsigned int delayed_delivery_count = 0;
+        ++delayed_delivery_count;
+        if (delayed_delivery_count <= 5 || delayed_delivery_count % 100 == 0) {
+            std::cerr << "Stereo USB delivery skew=" << host_delta_ms
+                      << " ms; keeping the concurrently acquired hardware-trigger pair"
+                      << std::endl;
         }
     }
-
-    static unsigned int pair_mismatch_count = 0;
-    ++pair_mismatch_count;
-    if (pair_mismatch_count <= 5 || pair_mismatch_count % 30 == 0) {
-        std::cerr << "Stereo frame pairing failed: host delta="
-                  << hostTimestampDeltaMs(left_host_ts, right_host_ts)
-                  << " ms after " << kMaxRealignAttempts << " retries" << std::endl;
-    }
-    return false;
+    return true;
 
 }
 

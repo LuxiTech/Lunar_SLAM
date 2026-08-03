@@ -1,4 +1,5 @@
 import os
+import platform
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -6,6 +7,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
+    TimerAction,
     UnsetEnvironmentVariable,
 )
 from launch.conditions import IfCondition
@@ -26,6 +28,12 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('use_rviz')
     use_imu = LaunchConfiguration('use_imu')
     imu_params = LaunchConfiguration('imu_params')
+    mvs_root = os.environ.get('MVS_ROOT', '/opt/MVS')
+    mvs_arch = 'aarch64' if platform.machine() in ('aarch64', 'arm64') else '64'
+    mvs_library_path = os.path.join(mvs_root, 'lib', mvs_arch)
+    mvs_environment = {
+        'LD_LIBRARY_PATH': mvs_library_path + os.pathsep + os.environ.get('LD_LIBRARY_PATH', ''),
+    }
 
     return LaunchDescription([
         SetEnvironmentVariable('QT_QPA_PLATFORM', 'xcb'),
@@ -63,13 +71,21 @@ def generate_launch_description():
             name='stereo_node',
             output='screen',
             parameters=[camera_params],
+            additional_env=mvs_environment,
         ),
-        Node(
-            package='stereo_depth',
-            executable='stereo_depth_node',
-            name='stereo_depth_node',
-            output='screen',
-            parameters=[stereo_proc_params],
+        # The MVS SDK needs a few seconds to open and synchronize both U3V
+        # cameras.  Starting the OpenCV depth process concurrently can abort
+        # the camera process on this ARM64 MVS runtime, so let the camera own
+        # the initialization window first.
+        TimerAction(
+            period=5.0,
+            actions=[Node(
+                package='stereo_depth',
+                executable='stereo_depth_node',
+                name='stereo_depth_node',
+                output='screen',
+                parameters=[stereo_proc_params],
+            )],
         ),
         Node(
             package='rviz2',

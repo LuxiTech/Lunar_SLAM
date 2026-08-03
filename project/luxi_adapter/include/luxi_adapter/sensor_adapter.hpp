@@ -27,6 +27,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_color_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr raw_imu_publisher_;
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr orientation_imu_publisher_;
 
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr color_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_subscription_;
