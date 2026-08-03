@@ -107,8 +107,8 @@ def generate_launch_description():
             'use_rtabmap_viz', default_value='false',
             description='Start the Qt RTAB-Map GUI in lightweight map/graph mode'),
         DeclareLaunchArgument(
-            'use_debug_cloud', default_value='true',
-            description='Publish the low-latency /luxi/cloud_map_accumulated RViz cloud alongside RTAB-Map'),
+            'use_debug_cloud', default_value='false',
+            description='Optionally publish the redundant /luxi/cloud_map_accumulated debug cloud'),
         DeclareLaunchArgument(
             'use_status_monitor', default_value='true',
             description='Print RTAB-Map node/odom/mapData status while mapping'),

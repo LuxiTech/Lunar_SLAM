@@ -9,13 +9,13 @@ stereo_depth_node:
     right_image_topic: /right_camera/image
     left_info_topic: /left_camera/camera_info
     right_info_topic: /right_camera/camera_info
-    # Empty means use /left_camera/image and /right_camera/image directly.
-    # This keeps the color information for RGB point clouds. The packed
-    # /stereo_camera/image_pair_mono topic is faster, but it is grayscale-only.
-    stereo_pair_topic: ''
-    # Keep mapping on the same reviewed GPU path as the standalone depth test.
-    # Do not let this launch silently fall back to the old CPU-only defaults.
-    depth_backend: vpi_cuda
+    # Use the packed hardware-triggered mono pair for real-time mapping. This
+    # avoids transporting two BGR images into the depth node; RTAB-Map receives
+    # grayscale RGB-D while the separate camera preview remains in colour.
+    stereo_pair_topic: /stereo_camera/image_pair_mono
+    # Keep mapping on Orin's dedicated vision engines: OFA eSGM, PVA confidence
+    # processing and VIC block-linear conversion. CUDA-SGM/SGBM remain fallbacks.
+    depth_backend: vpi_ofa_pva_vic
     vpi_fallback_to_sgbm: true
     # The current calibration's positive right P[3] means VPI must match
     # right->left; stereo_depth_node remaps the result back to the normal
@@ -24,31 +24,33 @@ stereo_depth_node:
     right_rectification_y_offset_px: 2.0
     vpi_confidence_threshold: 16384
     vpi_p1: 8
-    vpi_p2: 96
+    vpi_p2: 81
     vpi_uniqueness: -1.0
+    vpi_ofa_window_size: 5
+    # Keep live depth at the 10 Hz trigger rate; one OFA pass measured ~81 ms
+    # per calibrated 1024x750 frame, while two passes exceeded 130 ms.
+    vpi_ofa_num_passes: 1
+    vpi_ofa_apply_cpu_postfilters: false
     rectify_images: true
-    # Real-time point-cloud mode: keep the calibrated 1024x750 camera stream,
-    # then run CUDA-SGM at
-    # 512x375. This retains substantially more depth detail than the former
-    # 384x281 profile while keeping the live cloud close to the 10 Hz camera.
-    processing_scale: 0.5
-    # RViz-only streams remain downscaled and compressed. Mapping receives
-    # the same 512x375 depth geometry, with CameraInfo scaled consistently.
+    # Run CUDA-SGM at the calibrated ROS image resolution. The camera stream
+    # is 1024x750 after capture-side scaling, so depth and color stay aligned.
+    processing_scale: 1.0
+    # RViz-only streams remain downscaled and compressed; mapping receives
+    # the full 1024x750 depth geometry, with CameraInfo kept consistent.
     preview_scale: 0.5
     preview_publish_every_n_frames: 1
     # The hardware trigger is fixed at 10 Hz. Do not apply a second software
     # limiter, as USB timestamp jitter can otherwise discard valid 10 Hz frames.
     max_processing_fps: 0.0
-    # Keep visual odometry and map insertion bounded to 5 Hz. Depth and the
-    # RViz point cloud still publish at 10 Hz, avoiding a map-compute backlog.
-    max_rgbd_publish_fps: 5.0
-    opencv_num_threads: 2
+    # RTAB-Map inserts at 2.5 Hz, so send RGB-D at the same rate. This avoids
+    # duplicating full-resolution colour/depth copies while live depth remains
+    # close to the 10 Hz camera trigger.
+    max_rgbd_publish_fps: 2.5
+    opencv_num_threads: 4
     # Keep the live RViz cloud compact enough to publish every camera frame.
     point_cloud_step: 4
     baseline_m: 0.0
-    # 64 px at the 512x375 matching scale preserves the former full-resolution
-    # 128 px near-depth range after scaling, without doubling CUDA-SGM cost.
-    max_disparity: 64
+    max_disparity: 128
     # 3-way is the best density/latency setting on the NX. The implementation
     # also supports hh4/hh for offline high-quality experiments.
     sgbm_mode: 3way
@@ -65,6 +67,7 @@ stereo_depth_node:
     depth_edge_filter_max_delta_m: 0.10
     depth_neighbor_filter_min_count: 2
     depth_neighbor_filter_max_delta_m: 0.10
+    depth_output_encoding: 16UC1
     min_depth_m: 0.45
     max_depth_m: 4.5
 
@@ -203,7 +206,10 @@ rtabmap:
     RGBD/CreateOccupancyGrid: 'true'
     Grid/Sensor: '1'
     Grid/3D: 'false'
-    Grid/DepthDecimation: '1'
+    # With a 1024x750 RGB-D input, sample every second depth pixel only for
+    # RTAB-Map's occupancy grid. This matches the prior 512x375 map density
+    # while leaving the live /stereo/depth image at full resolution.
+    Grid/DepthDecimation: '2'
     Grid/CellSize: '0.03'
     Grid/NormalsSegmentation: 'false'
     Grid/MaxGroundHeight: '0.25'

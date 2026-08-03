@@ -139,7 +139,7 @@ Visualization Manager:
       Max Value: 8
       Median window: 5
       Min Value: 0.25
-      Name: VPI CUDA-SGM depth (colour)
+      Name: VPI OFA-SGM depth (colour)
       Normalize Range: false
       Topic:
         Depth: 1
@@ -161,13 +161,13 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
       Min Color: 0; 0; 0
       Min Intensity: 0
-      Name: Debug live stereo point cloud
+      Name: Real-time stereo point cloud
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 2
@@ -176,13 +176,13 @@ Visualization Manager:
       Topic:
         Depth: 1
         Durability Policy: Volatile
-        Filter size: 10
+        Filter size: 2
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /stereo/points
       Use Fixed Frame: true
       Use rainbow: false
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -334,7 +334,9 @@ Visualization Manager:
     # an older timestamp between map updates. Keeping this RViz layout in map
     # avoids a stale map->odom lookup filling RViz's message filter queue.
     Fixed Frame: map
-    Frame Rate: 30
+    # The camera is 10 Hz and RTAB-Map updates at 2.5 Hz. Rendering the same
+    # scene at 30 Hz only burns GPU cycles on the Jetson without adding data.
+    Frame Rate: 10
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact

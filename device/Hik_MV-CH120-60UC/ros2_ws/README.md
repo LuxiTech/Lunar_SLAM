@@ -1,122 +1,149 @@
-# 海康 MV-CH120-60UC 双目与 RTAB-Map 工作区
+# 海康双目 + H30 IMU + RTAB-Map
 
-面向 **Jetson Orin NX / Ubuntu 22.04 / ROS 2 Humble / ARM64** 的海康双目相机工作区。它提供硬件同步的双目采集、CUDA-SGM 深度、H30 IMU 数据、RViz 可视化和 RTAB-Map 建图。
+面向 **Jetson Orin NX、Ubuntu 22.04、ROS 2 Humble、ARM64** 的实时双目建图工作区。
 
-标定基准分辨率为 **1024×750、10 Hz**。实时建图模式下，相机以 2048×1500 采集并完整视场缩放到 **1024×750**；驱动会同步缩放 `CameraInfo`，GPU 深度匹配使用 **512×375**，比此前 384×281 多 78% 的深度像素。
+系统使用两台 MV-CH120-60UC 硬件触发相机、H30 IMU、NVIDIA VPI 立体匹配和 RTAB-Map。当前标定与运行基准为 **1024×750、10 Hz**。
 
-## 目录与能力
+> 运行时相机保留完整视场：相机先输出 2048×1500，再以 `INTER_AREA` 二次下采样为 1024×750；不裁剪、不缩放视角。双目标定文件同样是 1024×750，因此图像、深度和 `CameraInfo` 始终一致。
 
-| 路径 | 职责 |
-| --- | --- |
-| `src/hikrobot_camera_driver` | 海康 MVS 双相机驱动、硬件触发与下采样 |
-| `src/stereo_depth` | 校正、VPI CUDA-SGM / SGBM、深度、点云、RGBD 打包 |
-| `src/hik_bringup` | 参数、标定、IMU、RViz、RTAB-Map 启动入口 |
-| `scripts/bootstrap_humble.sh` | 安装 Humble 依赖并构建本工作区 |
-| `build/`、`install/`、`log/` | colcon 生成目录，不提交、不手动编辑 |
-
-> 仅使用 Humble 的 `install/` 覆盖层。不要混入旧的 Lyrical 环境，也不要恢复 `build_humble/`、`install_humble/` 或 `log_humble/`。
-
-## 算法与数据流
+## 1. 系统与算法
 
 ```text
-两台 MV-CH120-60UC（外部硬件触发）
-                 │  /left_camera/*、/right_camera/*
-                 ▼
-           stereo_node
-  Bayer 转 BGR + 2048×1500 → 1024×750 + 缩放后的 CameraInfo
-                 │
-                 ▼
-        stereo_depth_node
-  去畸变 / 极线校正 → 右图 2 px 补偿
-  → VPI CUDA-SGM（默认）→ 深度置信度与边缘过滤
-  → /stereo/depth、/stereo/points、/stereo/rgbd_image
-                 │                         │
-                 │                         ├── rgbd_odometry
-                 │                         │   视觉 F2M 里程计 → /odom
-                 │                         ▼
-                 └── RViz              RTAB-Map
-                                         位姿图、回环、2D 占据栅格
-                                         → /map、/cloud_map、/mapPath
+两台 MV-CH120-60UC（外部硬件触发，2048×1500）
+                     │
+                     ▼
+stereo_node：Bayer→BGR，全视场 2:1 下采样，发布 1024×750 双目与 CameraInfo
+                     │
+                     ▼
+stereo_depth_node：去畸变 / 极线校正 / 右图垂直 2 px 补偿
+                     │
+                     ├─ VPI OFA eSGM（单遍）→ VIC 格式转换
+                     │     └─ 输出 /stereo/depth、/stereo/points、预览图
+                     │
+                     └─ RGB-D 打包（2.5 Hz）
+                              │
+H30 AHRS ── /imu/data ──► rgbd_odometry ──► /odom ──► RTAB-Map
+                              │                         │
+                              └─ 相机-IMU 标定 TF        └─ /map、/cloud_map、/mapPath
 ```
 
-### 深度设计
+| 模块 | 当前实现 | 目的 |
+| --- | --- | --- |
+| 相机同步 | 外部硬件触发、SDK 公共主机时间戳 | 降低左右帧时间差与视觉延迟 |
+| 立体校正 | 双目标定 + `right_rectification_y_offset_px=2` | 使极线对齐后再匹配 |
+| 默认深度 | VPI `vpi_ofa_pva_vic`、单遍 eSGM | 当前 JetPack 实际由 OFA + VIC 执行，1024×750 接近 10 Hz |
+| 深度回退 | `vpi_cuda`、OpenCV `sgbm` | VPI 排障或画质对比 |
+| 视觉里程计 | RTAB-Map RGB-D F2M + IMU 姿态初始化 | 输出平滑的 `/odom` |
+| 建图 | RTAB-Map 位姿图、回环、2D 占据栅格 | 控制在线计算量，稳定累积地图 |
 
-- 默认后端是 NVIDIA VPI CUDA-SGM，充分利用 Orin NX GPU；VPI 初始化或运行失败时可自动回退到保留的 OpenCV SGBM。匹配在 512×375 进行，深度内参同步缩放，因此不需要为此实时档重新标定。
-- 当前机械结构的标定使有效视差方向为右减左，因此匹配顺序配置为 `right_left`；节点会把结果重新映射回左相机坐标系。
-- 右图在校正后下移 2 px，以消除当前装配的垂直残差。**机械结构变化后必须重新双目标定，不要盲目修改该数值。**
-- 深度图编码为 `32FC1`，单位为米；默认有效范围为 0.45–4.5 m。
+### 性能边界
 
-### 建图设计
+- 单遍 OFA 深度目标为 **10 Hz**；完整建图、实时点云和本机 RViz 同时运行时，实测处理约 **78–93 ms/帧**。
+- RTAB-Map 的 RGB-D 输入与地图插入固定为 **2.5 Hz**。这是有意限频：地图不是视频流，强行提升到 10 Hz 会造成 CPU 积压和更大的显示延迟。
+- `16UC1` 深度单位为毫米，有效范围默认 0.45–4.5 m。暗处、纯白墙或无纹理区域出现黑色无深度是双目匹配的正常表现。
 
-- `rgbd_odometry` 使用视觉 RGB-D F2M 里程计，启用卡尔曼平滑、最近帧策略和 20 内点下限，降低静止漂移及过期帧延迟。
-- RTAB-Map 接收 `/stereo/rgbd_image` 与 `/odom`，以约 2.5 Hz 处理新鲜 RGB-D 帧。默认输出 **2D 占据栅格**（`/map`）；同时可生成全局彩色点云 `/cloud_map`。RViz 的实时点云应使用独立的 `/luxi/cloud_map_accumulated`，其目标频率为 10 Hz。
-- H30 AHRS 输出 `/imu/data`、`/imu/data_extend` 和 `left_camera_optical_frame → imu_link` 静态外参。建图配置会以 AHRS 姿态初始化 RGB-D 视觉里程计，并把同一 IMU 流交给 RTAB-Map 保留重力方向。
+### 完整链路资源基线（2026-08-03）
 
-## 1. 首次安装与构建
+测试配置：Orin NX 处于 `MAXN`；启动 `rtabmap_stereo_imu.launch.py use_imu:=true` 和本机 `rtabmap_rviz.launch.py`；1024×750、单遍 OFA、状态监视和实时 `/stereo/points` 显示开启、冗余调试累积点云关闭。负载连续采样 10–15 秒，帧率分别单独采样，避免多个 ROS CLI 订阅者干扰图像传输。以下是不快速移动相机时的稳态基线，大地图回环时会出现短时峰值。
+
+| 指标 | 实测值 | 说明 |
+| --- | --- | --- |
+| 相机输入 | 9.81 Hz | 外部硬件触发的 ROS 图像发布频率 |
+| 实时深度预览 | 9.15 Hz | 完整建图与本机 RViz 同时运行；底层深度仍为 1024×750 |
+| 实时几何点云 | 约 9.2 Hz | `/stereo/points`，由当前帧真实深度生成；RGB 字段保存校正后的左目灰度 |
+| 视觉里程计 `/odom` | 2.13 Hz | 与 RTAB-Map 的 2.5 Hz RGB-D 输入限频相匹配 |
+| RTAB-Map 插图 | 2.5 Hz | 日志中的 `Rate=0.40s`；地图更新不是视频流 |
+| 板级输入功耗 `VDD_IN` | 平均 11.95 W，峰值 12.37 W | 包含整块 Jetson 载板与外设，不是单一节点功耗 |
+| GPU `GR3D` | 平均 10.6%，峰值 27% | 主要来自 RViz 的实时点云 OpenGL 绘制；无 RViz 时曾实测均值约 2% |
+| OFA / VIC | 平均 44% / 6%，峰值 77% / 24% | 深度计算确实运行在专用视觉硬件上 |
+| PVA0 | 0% | 当前 VPI 立体路径没有可落到 PVA 的算子；强制搬运到 PVA 反而会增加拷贝 |
+| 内存 | 平均约 5.12 GiB / 15.28 GiB | 未使用 Swap |
+| 芯片结温 `tj` | 约 61.8 °C，峰值 62.2 °C | 本次测试未发生热降频 |
+| CPU 总负载 | 平均 174% | 全部建图、IMU、监视和 RViz 进程合计，约占 8 核总能力的 22% |
+
+15 秒稳态采样的主要进程资源如下（`CPU` 按单核 100% 计）：
+
+| 进程 | 平均 CPU | RSS 内存 |
+| --- | ---: | ---: |
+| `rtabmap` | 46.8% | 约 419 MiB |
+| `stereo_depth_node` | 41.4% | 约 302 MiB |
+| `stereo_node` | 32.5% | 约 239 MiB |
+| `rgbd_odometry` | 21.8% | 约 268 MiB |
+| `rviz2` | 14.3% | 约 230 MiB |
+| `yesense_node_publisher` | 8.8% | 约 26 MiB |
+
+恢复实时真实点云显示后，与优化前同机测试相比，GR3D 均值仍由 21.8% 降至 10.6%，CPU 由约 356% 降至 174%，实时深度由 7.25 Hz 提升至 9.15 Hz。关键是按订阅延迟生成颜色/JPEG/点云、先校正单通道打包图再扩展 BGR、将 RViz 刷新率限制为 10 Hz，以及默认关闭重复的 `/luxi/cloud_map_accumulated`。这些修改没有改变深度分辨率、OFA 参数或 RTAB-Map 精度参数。
+
+## 2. 目录
+
+| 路径 | 内容 |
+| --- | --- |
+| `src/hikrobot_camera_driver` | 海康 MVS 双相机驱动、触发与下采样 |
+| `src/stereo_depth` | 校正、VPI/SGBM 深度、点云、RGB-D 打包 |
+| `src/hik_bringup` | 启动文件、参数、标定、IMU 与 RViz 配置 |
+| `src/third_party` | 上游参考源码；常规 Humble 构建使用 `/opt/ros/humble` 的二进制包 |
+| `scripts/bootstrap_humble.sh` | 安装依赖并按 Humble 策略构建 |
+| `build`、`install`、`log` | colcon 生成目录；不手动编辑、不提交 |
+
+顶层 README 是唯一项目说明入口。第三方目录中的上游文档不属于本项目维护范围，保留原样以便追溯。
+
+## 3. 安装与构建
 
 ### 前提
 
-- Ubuntu 22.04（Jammy）与 ROS 2 Humble。
-- ARM64 版海康 MVS 开发包。默认位置 `/opt/MVS`，必须包含头文件：
-
-  ```bash
-  test -f /opt/MVS/include/MvCameraControl.h
-  ```
-
-- 两台相机已在 MVS 中配置正确的用户集、外部触发和曝光。
-
-### 一键安装
+- Ubuntu 22.04 + ROS 2 Humble；不要混入旧 Lyrical 覆盖层。
+- ARM64 海康 MVS 安装在 `/opt/MVS`，并包含 `include/MvCameraControl.h`。
+- 两台相机已写入正确的用户集、外部触发和曝光参数。
 
 ```bash
 cd ~/lunar_slam/device/Hik_MV-CH120-60UC/ros2_ws
+test -f /opt/MVS/include/MvCameraControl.h
 bash scripts/bootstrap_humble.sh
 ```
 
-脚本会安装 ROS 图像、RTAB-Map、RViz 等依赖，并只构建本项目需要的包。仓库中的 `src/third_party` 不参与 Humble 构建。
-
-若 MVS 头文件不在 `/opt/MVS/include`：
+MVS 不在默认路径时：
 
 ```bash
 MVS_INCLUDE_DIR=/实际/MVS/include bash scripts/bootstrap_humble.sh
 ```
 
-### 每个新终端都要加载环境
+每个新终端都先加载：
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/lunar_slam/device/Hik_MV-CH120-60UC/ros2_ws/install/setup.bash
 ```
 
-下文假设工作区已加载。为简洁起见，先定义：
+下文用 `HIK_WS` 表示工作区：
 
 ```bash
 export HIK_WS=~/lunar_slam/device/Hik_MV-CH120-60UC/ros2_ws
-export HIK_SHARE="$(ros2 pkg prefix hik_bringup)/share/hik_bringup"
 ```
 
-## 2. 快速开始
+## 4. 三条常用流程
 
-### 只验证相机
+### A. 验证相机
 
 ```bash
 ros2 launch hik_bringup camera_only.launch.py
 ```
 
-成功标志：日志显示两台相机 `Opened camera`，并能看到以下话题：
+成功标志：两台相机均出现 `Opened camera`，且有 `/left_camera/image`、`/right_camera/image`。
 
-```bash
-ros2 topic list | rg 'left_camera|right_camera'
-```
-
-### 启动双目深度与本机 RViz
+### B. 双目深度与本机 RViz
 
 ```bash
 ros2 launch hik_bringup stereo_camera_bringup.launch.py use_rviz:=true use_imu:=false
 ```
 
-相机启动后，深度节点会延迟约 5 秒启动；这是为了避免 ARM64 MVS 在相机打开阶段与深度节点并发初始化。
+深度节点会在相机后约 5 秒启动，避免 ARM64 MVS 初始化竞争。检查频率：
 
-### 正式建图并保存数据库
+```bash
+ros2 topic hz /left_camera/image
+ros2 topic hz /stereo/depth
+```
+
+### C. IMU 融合建图并保存地图
 
 ```bash
 ros2 launch hik_bringup rtabmap_stereo_imu.launch.py \
@@ -126,7 +153,7 @@ ros2 launch hik_bringup rtabmap_stereo_imu.launch.py \
   clear_db_on_exit:=false
 ```
 
-另开终端打开建图 RViz：
+另开终端打开 RViz：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -134,65 +161,85 @@ source "$HIK_WS/install/setup.bash"
 ros2 launch hik_bringup rtabmap_rviz.launch.py
 ```
 
-按 `Ctrl+C` 结束建图后，数据库保存在 `~/.ros/luxi_stereo_rtabmap.db`。开始新图时使用 `delete_db_on_start:=true`；不希望覆盖已有地图时，请先复制或改用新的 `database_path`。
+`Ctrl+C` 后数据库保存在 `database_path`。默认 `clear_db_on_exit:=true` 仅适合临时测试；要保留地图必须设为 `false`。开始新图会删除同名数据库，重要地图请换路径或先复制。
 
-## 3. 启动入口参考
+## 5. 启动入口
 
-同一时刻只能有一套启动文件打开相机。若看到 `camera is already opened by another process`，先结束已有的 `stereo_node` / 建图启动终端。
+同一时刻只能启动一套会打开相机的启动文件。
 
-| 命令 | 启动节点或用途 | 适用场景 |
-| --- | --- | --- |
-| `ros2 launch hik_bringup camera_only.launch.py` | `stereo_node` | 检查相机、触发与标定文件是否加载 |
-| `ros2 launch hik_bringup camera_view.launch.py` | RViz，`camera_view.rviz` | 已有相机节点时，仅看左右相机图像 |
-| `ros2 launch hik_bringup visualization.launch.py` | RViz，`stereo_view.rviz` | 已有深度节点时，查看 RGB、彩色深度和点云 |
-| `ros2 launch hik_bringup stereo_camera_bringup.launch.py` | 相机 + 深度 + 可选 IMU/RViz | 日常双目深度测试 |
-| `ros2 launch hik_bringup h30_imu.launch.py` | `yesense_pub` | 单独检查 H30 串口和 IMU 数据 |
-| `ros2 launch hik_bringup stereo_imu_calibrated.launch.py use_imu:=true` | 相机 + H30 + 相机到 IMU 静态 TF | 检查相机/IMU 外参与数据链路 |
-| `ros2 launch hik_bringup rtabmap_stereo_imu.launch.py` | 相机、深度、视觉里程计、RTAB-Map | 建图或定位开发 |
-| `ros2 launch hik_bringup rtabmap_rviz.launch.py` | 建图 RViz | 已有 RTAB-Map 节点时显示地图 |
+| 命令 | 用途 |
+| --- | --- |
+| `camera_only.launch.py` | 仅相机与标定加载检查 |
+| `camera_view.launch.py` | 已有相机节点时，仅打开左右图 RViz |
+| `visualization.launch.py` | 已有深度节点时，显示 RGB、深度和点云 |
+| `stereo_camera_bringup.launch.py` | 相机 + 深度 + 可选 IMU/RViz，日常深度测试 |
+| `h30_imu.launch.py` | 单独检查 H30 串口和 IMU 输出 |
+| `stereo_imu_calibrated.launch.py` | 相机 + H30 + 相机到 IMU 静态 TF |
+| `rtabmap_stereo_imu.launch.py` | 完整建图链路 |
+| `rtabmap_rviz.launch.py` | 已有建图链路时打开地图 RViz |
 
-### `stereo_camera_bringup.launch.py` 参数
+常用参数：
 
 ```bash
-# 不打开本机 RViz，适合远程 RViz 或无显示器运行
+# 无显示器/远程显示时，只运行计算链路
 ros2 launch hik_bringup stereo_camera_bringup.launch.py use_rviz:=false
 
-# 同时启动 H30 驱动
-ros2 launch hik_bringup stereo_camera_bringup.launch.py use_imu:=true
-
-# 使用自定义相机或深度参数文件
-ros2 launch hik_bringup stereo_camera_bringup.launch.py \
-  camera_params:="$HIK_SHARE/config/camera_params.yaml" \
-  stereo_proc_params:="$HIK_SHARE/config/stereo_proc.yaml"
-```
-
-### `rtabmap_stereo_imu.launch.py` 参数
-
-```bash
-# 临时测试：Ctrl+C 后自动删除测试数据库（默认行为）
-ros2 launch hik_bringup rtabmap_stereo_imu.launch.py
-
-# 启动 H30 AHRS 融合建图（正常使用此命令）
+# 只临时建图；Ctrl+C 后删除临时数据库
 ros2 launch hik_bringup rtabmap_stereo_imu.launch.py use_imu:=true
 
-# 启动 RTAB-Map 自带 Qt GUI（会额外占用一个 CPU 核）
-ros2 launch hik_bringup rtabmap_stereo_imu.launch.py use_rtabmap_viz:=true
+# 打开 RTAB-Map 自带 Qt GUI（额外占用 CPU，不建议与 RViz 同时使用）
+ros2 launch hik_bringup rtabmap_stereo_imu.launch.py use_imu:=true use_rtabmap_viz:=true
 
-# 默认发布低延迟累积点云；RViz 请订阅 /luxi/cloud_map_accumulated
-ros2 launch hik_bringup rtabmap_stereo_imu.launch.py use_debug_cloud:=true
-
-# 保留数据库，且使用指定路径
-ros2 launch hik_bringup rtabmap_stereo_imu.launch.py \
-  database_path:=~/.ros/room_01.db \
-  delete_db_on_start:=true \
-  clear_db_on_exit:=false
+# 调试时额外开启 LuXi 累积点云（会重复 RTAB-Map 的点云工作）
+ros2 launch hik_bringup rtabmap_stereo_imu.launch.py use_imu:=true use_debug_cloud:=true
 ```
 
-该启动文件会隔离 MVS 自带的旧 `libusb`，避免它与 PCL/RTAB-Map 冲突。因此不要在另一个终端直接手动执行 `rtabmap_viz`；应使用上面的 `use_rtabmap_viz:=true` 或 `rtabmap_rviz.launch.py`。
+## 6. 可视化、话题与测距
 
-## 4. H30 IMU 使用
+### 本机与远程 RViz
 
-H30 的 USB 串口固定为 `/dev/H30-imu`。首次插入设备后，从**源码路径**安装 udev 规则：
+本机直接使用上面的 RViz 启动文件。建图 RViz 固定坐标系为 `map`，默认显示栅格、实时 RGB、深度和 `/stereo/points` 当前帧真实几何点云；重复的 LuXi 累积点云仍默认关闭。
+
+远程主机应只查看 JPEG 预览，不要通过 Wi-Fi 订阅原始图像：
+
+```bash
+export ROS_DOMAIN_ID=0
+export ROS_LOCALHOST_ONLY=0
+ros2 topic hz /stereo/preview/left_color/compressed
+```
+
+在远程 RViz 添加 `Image`，选择 `/stereo/preview/left_color` 或 `/stereo/preview/depth_visual`，传输选 `compressed`，QoS 选 `Best Effort`。
+
+### 核心话题
+
+| 话题 | 说明 |
+| --- | --- |
+| `/left_camera/image`、`/right_camera/image` | 1024×750 原始 ROS 图像 |
+| `/stereo/depth` | `16UC1` 深度图，毫米 |
+| `/stereo/points` | 当前帧实时几何点云，RGB 字段为左目灰度；建图 RViz 默认启用 |
+| `/stereo/preview/*/compressed` | 网络友好的 RGB/深度 JPEG 预览 |
+| `/stereo/rgbd_image` | 提供给 RGB-D 里程计和 RTAB-Map |
+| `/imu/data` | H30 标准 IMU 消息 |
+| `/odom` | RGB-D 视觉里程计 |
+| `/map`、`/cloud_map`、`/mapPath` | RTAB-Map 2D 地图、全局点云、轨迹 |
+
+测距：先启动深度，再运行：
+
+```bash
+ros2 run hik_bringup sgbm_depth_probe.py --ros-args -p duration_sec:=15.0
+```
+
+或在 RViz 临时启用 `Debug live stereo point cloud`，另开终端运行：
+
+```bash
+ros2 run hik_bringup rviz_depth_click_probe.py
+```
+
+选择 **Publish Point** 后点击纹理丰富区域，终端会输出相机光轴深度与直线距离。
+
+## 7. H30 IMU 与标定
+
+H30 固定别名为 `/dev/H30-imu`。首次配置或更换 USB 串口模块后，从源码目录安装规则：
 
 ```bash
 cd "$HIK_WS"
@@ -200,9 +247,7 @@ bash src/hik_bringup/scripts/install_h30_udev_rule.sh
 ls -l /dev/H30-imu
 ```
 
-若未生成别名，重新插拔 H30 后再次检查。该规则匹配当前设备的 VID、PID 与序列号；更换 USB 转串口模块后需要更新 `config/99-h30-imu.rules`。
-
-启动与检查：
+检查 IMU：
 
 ```bash
 ros2 launch hik_bringup h30_imu.launch.py
@@ -210,186 +255,48 @@ ros2 topic hz /imu/data
 ros2 topic echo --once /imu/data
 ```
 
-### 融合状态与启用条件
-
-当前 RTAB-Map 已融合 H30 AHRS：`rgbd_odometry.wait_imu_to_init` 为 `true`，
-`rtabmap.subscribe_imu` 为 `true`，两个节点都显式订阅 `/imu/data`。
-
-2026-08-03 已完成设备端验证：H30 以 921600 baud 稳定发布 **200 Hz**，原始帧含
-采样时间戳 `0x51`、欧拉角 `0x40` 与四元数 `0x41`；四元数范数约为 1，
-`base_link → imu_link` 联合标定 TF 可查询。实际启动时，视觉里程计已用 IMU 姿态初始化，
-RTAB-Map 已成功累积节点和点云。
-
-每次修改 H30 输出配置后，先运行下面的检查：
-
-```bash
-ros2 launch hik_bringup h30_imu.launch.py
-ros2 topic hz /imu/data
-ros2 topic echo --once /imu/data
-```
-
-只有同时满足以下条件才能保持融合模式：
-
-1. `/imu/data` 持续发布，频率建议不低于 100 Hz；
-2. `orientation` 四元数非全零、范数约为 1，角速度与加速度均为有限值；
-3. 时间戳单调递增，且不存在明显晚于 RGB-D 帧的延迟；
-4. `imu_link` 与 `base_link` 的 TF 可查询，机械结构未在联合标定后改变。
-
-满足后再将 `rgbd_odometry.subscribe_imu` 设为 `true`，启用 `wait_imu_to_init`，并在实际移动建图中核对
-里程计没有 IMU 等待、丢 RGB-D 帧或姿态跳变。不能只因联合标定完成就跳过该验证。
-
-相机到 IMU 外参及时间偏移记录于：
+当前相机-IMU 外参与原始 Kalibr 结果分别位于：
 
 ```text
 src/hik_bringup/config/kalibr_cam_imu.yaml
 src/hik_bringup/config/kalibr_dynamic_05_camchain.yaml
 ```
 
-如果机械结构、相机或 IMU 方向改变，先重新完成双目标定和相机-IMU 联合标定，再更新这两个文件与 `stereo_imu_calibrated.launch.py` 中的静态 TF。
+机械结构、相机方向、IMU 方向或分辨率变化后，必须重新双目标定和相机-IMU 联合标定。不要仅修改 `right_rectification_y_offset_px`、基线或 TF 来补偿机械变化。
 
-## 5. 可视化与常用话题
+## 8. 配置修改原则
 
-### 核心话题
-
-| 话题 | 类型 | 说明 |
-| --- | --- | --- |
-| `/left_camera/image`、`/right_camera/image` | `sensor_msgs/Image` | 1024×750 彩色输入；CameraInfo 由同分辨率标定加载 |
-| `/left_camera/camera_info`、`/right_camera/camera_info` | `sensor_msgs/CameraInfo` | 原始输入标定 |
-| `/stereo/left/image_rect_color` | `sensor_msgs/Image` | 左目校正彩色图 |
-| `/stereo/depth` | `sensor_msgs/Image` | `32FC1` 深度图，单位米 |
-| `/stereo/disparity` | `sensor_msgs/Image` | 归一化视差预览 |
-| `/stereo/points` | `sensor_msgs/PointCloud2` | 512×375 VPI-SGM 生成的实时彩色点云 |
-| `/luxi/cloud_map_accumulated` | `sensor_msgs/PointCloud2` | 低延迟、固定在 `odom` 的 RViz 实时累积点云（约 10 Hz） |
-| `/stereo/rgbd_image` | `rtabmap_msgs/RGBDImage` | 提供给视觉里程计与 RTAB-Map |
-| `/stereo/preview/left_color/compressed` | `sensor_msgs/CompressedImage` | 10 Hz 左图 JPEG 预览 |
-| `/stereo/preview/right_color/compressed` | `sensor_msgs/CompressedImage` | 10 Hz 右图 JPEG 预览 |
-| `/stereo/preview/depth_visual/compressed` | `sensor_msgs/CompressedImage` | 彩色深度预览，约 2.5–3 Hz |
-| `/imu/data` | `sensor_msgs/Imu` | H30 标准 IMU 数据 |
-| `/odom` | `nav_msgs/Odometry` | RGB-D 视觉里程计 |
-| `/map`、`/cloud_map`、`/mapPath` | RTAB-Map 输出 | 2D 栅格、全局点云、轨迹 |
-
-### 本机 RViz
-
-双目深度启动时传入 `use_rviz:=true`，或单独执行：
-
-```bash
-ros2 launch hik_bringup visualization.launch.py
-```
-
-建图时另开终端执行：
-
-```bash
-ros2 launch hik_bringup rtabmap_rviz.launch.py
-```
-
-建图 RViz 固定坐标系为 `map`，默认关闭旧时间戳的轨迹与里程计装饰显示，以避免 RViz 消息过滤队列积压。栅格地图仍正常显示。
-
-### 宿主机远程 RViz
-
-设备端和宿主机需在同一网络与相同 ROS 域：
-
-```bash
-export ROS_DOMAIN_ID=0
-export ROS_LOCALHOST_ONLY=0
-```
-
-设备端仅启动计算，不启动本机 RViz：
-
-```bash
-ros2 launch hik_bringup stereo_camera_bringup.launch.py use_rviz:=false use_imu:=false
-```
-
-宿主机只订阅 JPEG 预览，避免通过网络传输原始双目图像：
-
-```bash
-ros2 topic hz /stereo/preview/left_color/compressed
-```
-
-在宿主机 RViz 新建 `Image` 显示项时，选择 `/stereo/preview/left_color`、`/stereo/preview/right_color` 或 `/stereo/preview/depth_visual`，传输方式选 `compressed`，QoS 选 `Best Effort`。不要用 Wi-Fi 直接显示 `/left_camera/image`、`/right_camera/image`。
-
-## 6. 深度质量与测距
-
-### 深度统计
-
-先运行双目深度，再另开终端：
-
-```bash
-ros2 run hik_bringup sgbm_depth_probe.py --ros-args -p duration_sec:=15.0
-```
-
-脚本输出分辨率、有效像素比例、深度中位数及发布频率。脚本名称为历史名称；它测量的是当前 `/stereo/depth`，无论后端是 VPI CUDA-SGM 还是 SGBM 回退。
-
-### 使用 RViz 点击点云测距
-
-1. 启动双目深度和 RViz。
-2. 在 RViz 的 `Debug live stereo point cloud` 显示项中勾选启用。
-3. 新终端运行：
-
-   ```bash
-   ros2 run hik_bringup rviz_depth_click_probe.py
-   ```
-
-4. 在 RViz 工具栏选择 **Publish Point**，点击点云上的纹理丰富位置。
-5. 终端输出 `Z_depth`（相机光轴深度）及 `range`（相机到目标直线距离）。
-
-## 7. 建图操作流程
-
-1. 用“正式建图并保存数据库”命令启动建图。
-2. 等待 `rtabmap_status` 输出 `wm_nodes=1`。静止时节点数保持不变是正常现象。
-3. 缓慢平移相机 0.5–1 m，再缓慢转动约 30°；`wm_nodes` 应随真实运动增长。
-4. 在 RViz 中检查 `/map` 栅格和相机覆盖区域。快速甩动、纯白墙面或无纹理画面会使视觉里程计变差。
-5. `Ctrl+C` 正常停止。只有设置 `clear_db_on_exit:=false` 时，数据库才会保留。
-
-检查状态：
-
-```bash
-ros2 node list
-ros2 topic echo --once /info --qos-reliability best_effort
-ros2 topic info /stereo/rgbd_image -v
-```
-
-## 8. 参数位置与安全修改原则
-
-| 文件 | 修改内容 |
+| 文件 | 修改范围 |
 | --- | --- |
-| `config/camera_params.yaml` | 采集下采样比例、RViz 预览比例 |
-| `config/stereo_proc.yaml` | 日常深度后端、范围与过滤参数 |
-| `config/rtabmap_stereo_imu.yaml` | 建图专用深度、里程计、栅格和 RTAB-Map 参数 |
-| `config/stereo_left.yaml`、`stereo_right.yaml` | 双目标定内参和外参 |
-| `config/kalibr_cam_imu.yaml` | 相机-IMU 外参与时间偏移记录 |
-| `config/h30_imu.yaml` | H30 串口、波特率与话题 |
+| `config/camera_params.yaml` | 采集下采样与相机参数 |
+| `config/stereo_proc.yaml` | 日常深度后端、范围、过滤与预览 |
+| `config/rtabmap_stereo_imu.yaml` | 建图深度、里程计、栅格、RTAB-Map 参数 |
+| `hikrobot_camera_driver/config/stereo_left.yaml`、`stereo_right.yaml` | 双目标定；仅标定后更新 |
+| `config/kalibr_cam_imu.yaml` | 相机-IMU 外参记录 |
+| `config/h30_imu.yaml` | H30 串口与波特率 |
 
-修改标定、`matcher_input_order`、`right_rectification_y_offset_px`、基线或相机分辨率前，先备份配置并重新验证深度。不要用未匹配分辨率的标定文件运行。
+修改深度算法时优先只改 `depth_backend`：`vpi_ofa_pva_vic` 是默认实时模式，`vpi_cuda` 用于 CUDA-SGM 对比，`sgbm` 仅用于回退诊断。不要将 `processing_scale` 改离 1.0，否则会脱离当前 1024×750 标定基准。
 
-## 9. 排障
+## 9. 常见问题
 
-| 现象 | 检查与处理 |
+| 现象 | 处理 |
 | --- | --- |
-| `camera is already opened by another process` | 已有相机节点占用设备。执行 `ros2 node list`，结束旧的 `camera_only`、深度或 RTAB-Map 启动终端后再试。 |
-| `XOpenDisplay Fail` | 无显示器或远程 shell 的常见 MVS 提示。采集正常时可忽略；无显示器运行时使用 `use_rviz:=false`。 |
-| 没有深度图 | 确认两个 `camera_info` 已发布、深度节点已在相机启动约 5 秒后出现，并查看 `Processed frame` 日志。 |
-| VPI 初始化失败 | 检查 JetPack/VPI/CUDA 环境；节点会在允许时回退 SGBM。可临时在参数文件设置 `depth_backend: sgbm` 进行对比。 |
-| RViz 延迟或卡顿 | 实时查看应显示 `/luxi/cloud_map_accumulated`，不要把 RTAB-Map 的全局 `/cloud_map` 当作视频流。图像预览按订阅者惰性生成；未查看图像时不会占用 JPEG 编码资源。 |
-| RViz 出现 `queue is full` | 使用 `rtabmap_rviz.launch.py` 提供的配置，不要把固定坐标系改成 `odom`，不要默认启用 `mapPath` / Visual odometry。 |
-| `libusb_set_option` 或 PCL 符号错误 | MVS 的旧版 `libusb` 与 PCL 冲突。通过 `rtabmap_stereo_imu.launch.py` 启动，不要手动从带 MVS `LD_LIBRARY_PATH` 的终端运行 `rtabmap_viz`。 |
-| `/dev/H30-imu` 不存在 | 运行 udev 安装脚本，重新插拔 H30，并确认规则中的序列号与当前设备一致。 |
-| `ros2 topic echo` 报 `!rclpy.ok()` | ROS 2 守护进程失效：执行 `ros2 daemon stop && ros2 daemon start`，再重试话题命令。 |
-| H30 驱动已打开但 `/imu/data` 没有消息或姿态不可用 | 先停止驱动，直接读取串口确认是否有字节流；若无字节流，物理重插 H30 后复测。确认 921600 baud，并在 H30 中启用数据 ID `0x51` 和四元数 `0x41`；`orientation_covariance[0]` 必须不为 `-1`。 |
+| `camera is already opened by another process` | 已有相机节点在运行。执行 `ros2 node list`，正常结束旧的相机/建图启动终端。 |
+| `XOpenDisplay Fail` | 无显示器或 SSH 的 MVS 提示；采集正常时可忽略。无显示器使用 `use_rviz:=false`。 |
+| 没有深度 | 等待相机后约 5 秒；确认两个 `camera_info` 与 `Processed frame` 日志。 |
+| RViz 卡顿 | 不要把 RTAB-Map `/cloud_map` 当视频流；实时检查用 RGB/深度预览或临时启用一个实时点云显示。 |
+| VPI 初始化失败 | 检查 JetPack 6 / VPI 3；可临时切换 `vpi_cuda` 或 `sgbm` 排查。 |
+| `/dev/H30-imu` 不存在 | 重装 udev 规则、重新插拔设备，并确认 VID/PID/序列号。 |
+| `ros2 topic echo` 报 `!rclpy.ok()` | 执行 `ros2 daemon stop && ros2 daemon start` 后重试。 |
 
 ## 10. 重新构建
 
-修改 C++ 源码、CMake 或 Python 安装入口后：
+修改 C++、CMake、launch 或参数后，使用构建脚本保持第三方包忽略策略一致：
 
 ```bash
 cd "$HIK_WS"
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install \
-  --packages-select hikrobot_camera_driver stereo_depth hik_bringup
+bash scripts/bootstrap_humble.sh
 source install/setup.bash
 ```
 
-纯 YAML、RViz 和 launch 文件在 `--symlink-install` 构建后通常会直接反映；若不确定，执行上面的构建命令。完整依赖重建使用：
-
-```bash
-bash scripts/bootstrap_humble.sh
-```
+纯 YAML 与 RViz 文件在 `--symlink-install` 下通常立即生效；重新启动对应节点即可。若不确定，仍执行上述构建命令。
