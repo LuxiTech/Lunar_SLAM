@@ -2,8 +2,10 @@
 
 set -eo pipefail
 
-maps_directory="/home/lunar/project/lunar_slam/maps/rtab_maps"
-octo_maps_directory="/home/lunar/project/lunar_slam/maps/octo_maps"
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+workspace="${LUXI_WORKSPACE_ROOT:-$(cd "$(dirname "${script_path}")/../../.." && pwd)}"
+maps_directory="${workspace}/maps/rtab_maps"
+octo_maps_directory="${workspace}/maps/octo_maps"
 
 if [[ $# -ge 1 ]]; then
   database_path="$1"
@@ -33,8 +35,12 @@ if [[ ! -f "${database_path}" ]]; then
 fi
 
 source /opt/ros/humble/setup.bash
-source /home/lunar/project/lunar_slam/install/setup.bash
-source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
+if [[ -f "${workspace}/install/setup.bash" ]]; then
+  source "${workspace}/install/setup.bash"
+fi
+if [[ -f "${workspace}/device/D435i/ros2_ws/install/setup.bash" ]]; then
+  source "${workspace}/device/D435i/ros2_ws/install/setup.bash"
+fi
 set -u
 
 mkdir -p "${output_directory}"

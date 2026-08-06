@@ -8,6 +8,10 @@ SuperPoint + LightGlue RGB-D frontend. Accepted frames publish both:
   SuperPoint keypoints, metric 3D points and compressed float descriptors, the
   level-B interface.
 
+The production input is the adapter's atomic `/sensors/rgbd/rgbd_image`
+packet. Its best-effort queue keeps only the newest frame so slower learned
+inference cannot accumulate camera latency.
+
 The package does not run NetVLAD. NetVLAD remains isolated in `luxi_hloc` for
 low-rate global retrieval.
 

@@ -2,6 +2,9 @@ luxi_adapter:
   ros__parameters:
     # Exactly one profile is selected by sensor_bringup.launch.py.
     hardware_profile: d435i
+    input_mode: separate
+    rgbd_output_topic: /sensors/rgbd/rgbd_image
+    maximum_sensor_time_difference: 0.05
 
     # Vendor driver inputs for the selected D435i profile.
     color_input_topic: /camera/camera/color/image_raw
@@ -19,7 +22,8 @@ luxi_adapter:
     enable_imu: true
 
     # Runtime configuration for the D435i profile.
-    d435i_setup: /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
+    # Empty selects device/D435i/ros2_ws/install/setup.bash under the detected workspace.
+    d435i_setup: ""
     rmw_implementation: rmw_cyclonedds_cpp
     ros_domain_id: 0
     d435i_color_profile: 640,480,30

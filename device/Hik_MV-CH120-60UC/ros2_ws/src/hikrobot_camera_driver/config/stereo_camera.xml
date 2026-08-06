@@ -9,11 +9,11 @@
   serial="DB0431802" 
   />
 
-  <!-- Use the trigger selector, Line0 polarity, and source saved in MVS UserSet1. -->
+  <!-- Keep the trigger source stored in UserSet1; it matches the rig wiring. -->
   <acquisition 
   user_set="UserSet1" 
   external_trigger="true" 
-  trigger_source="Default" 
+  trigger_source="Default"
   frame_rate_hz="0.0" />
 
   <!-- Fixed exposure for consistent stereo brightness: 25000 us = 25 ms. -->

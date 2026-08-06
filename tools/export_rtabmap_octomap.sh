@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-workspace="/home/lunar/project/lunar_slam"
+workspace="${LUXI_WORKSPACE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 rtab_maps_directory="${workspace}/maps/rtab_maps"
 octo_maps_directory="${workspace}/maps/octo_maps"
 database_path="${1:-}"
@@ -19,8 +19,12 @@ fi
 output_directory="${2:-${octo_maps_directory}/$(basename "${database_path%.db}")_octomap}"
 set +u
 source /opt/ros/humble/setup.bash
-source "${workspace}/device/D435i/ros2_ws/install/setup.bash"
-source "${workspace}/install/setup.bash"
+if [[ -f "${workspace}/device/D435i/ros2_ws/install/setup.bash" ]]; then
+  source "${workspace}/device/D435i/ros2_ws/install/setup.bash"
+fi
+if [[ -f "${workspace}/install/setup.bash" ]]; then
+  source "${workspace}/install/setup.bash"
+fi
 set -u
 export LD_LIBRARY_PATH="${workspace}/3parts/octomap/install/lib:${LD_LIBRARY_PATH:-}"
 

@@ -3,12 +3,23 @@ luxi_adapter:
     # Use this file explicitly; the default sensor_bringup.yaml remains D435i.
     hardware_profile: hik
 
-    # Hik stereo_depth_node publishes these three messages in the same
-    # 512x375 rectified left-camera geometry.
+    # Consume the stereo node's already synchronized, mapping-rate RGBDImage.
+    # Splitting this packet inside the adapter avoids relaying three 8-10 Hz
+    # full-resolution streams while preserving the original pixels and stamps.
+    input_mode: rgbd
+    rgbd_input_topic: /stereo/rgbd_image
+    rgbd_output_topic: /sensors/rgbd/rgbd_image
+
+    # Kept explicit for diagnostics; input_mode=rgbd does not subscribe to
+    # these full-rate native topics.
     color_input_topic: /stereo/left/image_rect_color
     depth_input_topic: /stereo/depth
     camera_info_input_topic: /stereo/left/camera_info
     compressed_color_input_topic: /stereo/preview/left_rectified_color/compressed
+    # hik.launch.py remaps the stereo node's lazy compressed publisher directly
+    # to the canonical output. Keep the Adapter relay off to avoid a permanent
+    # native subscriber and JPEG work while no web/remote preview is open.
+    enable_compressed_color: false
 
     # H30 publishes a valid AHRS orientation already. Relay it unchanged;
     # do not add a second Madgwick filter.
@@ -19,6 +30,30 @@ luxi_adapter:
     color_output_topic: /sensors/rgbd/color/image_raw
     depth_output_topic: /sensors/rgbd/depth/image_raw
     camera_info_output_topic: /sensors/rgbd/color/camera_info
+    # Live SLAM must consume the newest sensor sample. SensorData/BestEffort
+    # avoids reliable DDS queues retaining multi-megabyte RGB-D frames when
+    # the learned frontend is busy; image pixels and resolution are unchanged.
+    reliable_image_output: false
     compressed_color_output_topic: /sensors/rgbd/color/image_raw/compressed
     imu_output_topic: /sensors/imu/data_raw
     imu_orientation_output_topic: /sensors/imu/data
+
+    # Robot mounting transform. Replace camera_x/y/z with a measured base-to-left-lens
+    # translation before navigation; quaternion values preserve the current optical axes.
+    base_frame: base_link
+    camera_frame: left_camera_optical_frame
+    camera_x: 0.0
+    camera_y: 0.0
+    camera_z: 0.0
+    camera_qx: -0.5
+    camera_qy: 0.5
+    camera_qz: -0.5
+    camera_qw: 0.5
+    imu_frame: imu_link
+    imu_x: -0.06080516708588524
+    imu_y: -0.017371973406354727
+    imu_z: -0.12304891470347533
+    imu_qx: 0.6868459901794202
+    imu_qy: 0.024915427523349555
+    imu_qz: -0.0010234338137173815
+    imu_qw: 0.7263750820540378

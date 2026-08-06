@@ -14,10 +14,26 @@
 
 """Launch the RViz clicked-point obstacle annotation node."""
 
+import os
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _default_output_path() -> str:
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    if configured:
+        workspace = Path(configured).expanduser().resolve()
+    else:
+        workspace = next(
+            candidate
+            for candidate in Path(__file__).resolve().parents
+            if (candidate / "project").is_dir() and (candidate / "maps").is_dir()
+        )
+    return str(workspace / "maps" / "occupancy_maps" / "semantic_obstacles.yaml")
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -29,9 +45,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map_topic", default_value="/rtabmap/map"),
             DeclareLaunchArgument(
                 "output_path",
-                default_value=(
-                    "/home/lunar/project/lunar_slam/maps/occupancy_maps/semantic_obstacles.yaml"
-                ),
+                default_value=_default_output_path(),
             ),
             DeclareLaunchArgument("map_transient_local", default_value="false"),
             Node(

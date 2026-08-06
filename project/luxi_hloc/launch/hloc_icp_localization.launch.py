@@ -1,14 +1,27 @@
 """Start HLoc coarse localization and feed accepted poses to Open3D ICP."""
 
+import os
 from pathlib import Path
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.substitutions import FindPackageShare
 
 
-WORKSPACE = Path("/home/lunar/project/lunar_slam")
+def _workspace_root() -> Path:
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    for start in (Path(__file__).resolve(), Path.cwd().resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / "project").is_dir() and (candidate / "maps").is_dir():
+                return candidate
+    raise RuntimeError("Cannot locate lunar_slam; set LUXI_WORKSPACE_ROOT")
+
+
+WORKSPACE = _workspace_root()
 
 
 def _latest_cloud() -> Path:
@@ -37,10 +50,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("icp_publish_tf", default_value="false"),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
-                    str(
-                        WORKSPACE
-                        / "install/luxi_hloc/share/luxi_hloc/launch/hloc_localization.launch.py"
-                    )
+                    [FindPackageShare("luxi_hloc"), "/launch/hloc_localization.launch.py"]
                 ),
                 launch_arguments={
                     "map_directory": LaunchConfiguration("map_directory"),
@@ -49,11 +59,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
-                    str(
-                        WORKSPACE
-                        / "install/luxi_location/share/luxi_location/launch/"
-                        "icp_localization.launch.py"
-                    )
+                    [FindPackageShare("luxi_location"), "/launch/icp_localization.launch.py"]
                 ),
                 launch_arguments={
                     "map_path": LaunchConfiguration("cloud_path"),

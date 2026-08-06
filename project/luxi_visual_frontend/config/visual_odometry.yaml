@@ -11,6 +11,7 @@ luxi_visual_frontend:
     color_topic: /sensors/rgbd/color/image_raw
     depth_topic: /sensors/rgbd/depth/image_raw
     camera_info_topic: /sensors/rgbd/color/camera_info
+    rgbd_input_topic: /sensors/rgbd/rgbd_image
     odom_topic: /luxi_visual_frontend/odom
     rgbd_features_topic: /luxi_visual_frontend/rgbd_image
     status_topic: /luxi_visual_frontend/status

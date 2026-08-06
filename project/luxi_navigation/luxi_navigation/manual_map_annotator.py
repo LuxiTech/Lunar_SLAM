@@ -39,6 +39,19 @@ import yaml
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
+def _default_output_path() -> str:
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    if configured:
+        workspace = Path(configured).expanduser().resolve()
+    else:
+        workspace = next(
+            candidate
+            for candidate in Path(__file__).resolve().parents
+            if (candidate / "project").is_dir() and (candidate / "maps").is_dir()
+        )
+    return str(workspace / "maps" / "occupancy_maps" / "semantic_obstacles.yaml")
+
+
 @dataclass
 class Obstacle:
     """A named polygon obstacle stored in map coordinates."""
@@ -248,7 +261,7 @@ class ManualMapAnnotator(Node):
         self.declare_parameter("map_id", "")
         self.declare_parameter(
             "output_path",
-            "/home/lunar/project/lunar_slam/maps/occupancy_maps/semantic_obstacles.yaml",
+            _default_output_path(),
         )
         self.declare_parameter("map_topic", "/rtabmap/map")
         self.declare_parameter("clicked_point_topic", "/clicked_point")

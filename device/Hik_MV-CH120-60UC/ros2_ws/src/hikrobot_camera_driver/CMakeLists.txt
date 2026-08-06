@@ -23,7 +23,6 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-find_package(cv_bridge REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(camera_info_manager REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -116,7 +115,6 @@ target_link_libraries(
     # ROS2
     rclcpp::rclcpp
 
-    cv_bridge::cv_bridge
     ament_index_cpp::ament_index_cpp
     PkgConfig::TINYXML2
     camera_info_manager::camera_info_manager
@@ -129,7 +127,6 @@ ament_target_dependencies(stereo_node
     rclcpp
     sensor_msgs
     std_msgs
-    cv_bridge
     ament_index_cpp
     camera_info_manager)
 

@@ -4,6 +4,9 @@
 #include "HikCamera.hpp"
 #include "CameraConfig.hpp"
 
+#include <cstdint>
+#include <optional>
+
 
 class StereoCamera
 {
@@ -32,7 +35,9 @@ public:
         uint64_t& left_ts,
         uint64_t& right_ts,
         int64_t& left_host_ts,
-        int64_t& right_host_ts
+        int64_t& right_host_ts,
+        uint32_t& left_frame_number,
+        uint32_t& right_frame_number
     );
 
 
@@ -49,6 +54,8 @@ private:
     HikCamera left_camera_;
 
     HikCamera right_camera_;
+
+    std::optional<int64_t> frame_number_offset_;
 
 
 };

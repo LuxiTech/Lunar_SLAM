@@ -65,7 +65,7 @@ Visualization Manager:
       Max Value: 4.5
       Median window: 5
       Min Value: 0.45
-      Name: VPI CUDA-SGM Depth (color)
+      Name: VPI OFA eSGM Depth (color)
       Normalize Range: false
       Topic:
         Depth: 1
@@ -93,7 +93,7 @@ Visualization Manager:
       Max Intensity: 4096
       Min Color: 0; 0; 0
       Min Intensity: 0
-      Name: VPI CUDA-SGM Point Cloud (enable when needed)
+      Name: VPI OFA eSGM Point Cloud (enable when needed)
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 2

@@ -26,3 +26,6 @@ __pycache__/
 /3parts/hloc_gpu_python/
 /3parts/hloc_python/
 /3parts/hloc_models/
+
+# Vendor SDK archives are installed locally and exceed remote single-file limits.
+/device/Hik_MV-CH120-60UC/SDK/*.zip

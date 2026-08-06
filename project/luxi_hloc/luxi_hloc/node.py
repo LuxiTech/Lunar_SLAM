@@ -87,6 +87,8 @@ class HlocLocalizerNode(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         parameters = {name: self.get_parameter(name).value for name in defaults}
+        if not parameters["map_directory"]:
+            raise RuntimeError("The map_directory parameter is required")
         map_directory = Path(parameters["map_directory"])
         if not map_directory.is_dir():
             raise RuntimeError(f"HLoc map directory does not exist: {map_directory}")

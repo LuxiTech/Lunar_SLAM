@@ -1,6 +1,7 @@
 """Run the existing HLoc/ICP localization chain with ground-supported 3D A*."""
 
 import os
+from pathlib import Path
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
@@ -10,8 +11,19 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
+def _workspace_root() -> Path:
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    for start in (Path(__file__).resolve(), Path.cwd().resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / "project").is_dir() and (candidate / "maps").is_dir():
+                return candidate
+    raise RuntimeError("Cannot locate lunar_slam; set LUXI_WORKSPACE_ROOT")
+
+
 def generate_launch_description() -> LaunchDescription:
-    octomap_library_path = "/home/lunar/project/lunar_slam/3parts/octomap/install/lib"
+    octomap_library_path = str(_workspace_root() / "3parts" / "octomap" / "install" / "lib")
     library_path = os.pathsep.join(
         part for part in (octomap_library_path, os.environ.get("LD_LIBRARY_PATH", "")) if part
     )

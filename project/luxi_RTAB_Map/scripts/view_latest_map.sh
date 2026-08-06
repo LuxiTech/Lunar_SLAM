@@ -3,7 +3,9 @@
 # Open an RTAB-Map database without requiring users to manually type mapNNN.
 set -euo pipefail
 
-maps_directory="/home/lunar/project/lunar_slam/maps/rtab_maps"
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+workspace="${LUXI_WORKSPACE_ROOT:-$(cd "$(dirname "${script_path}")/../../.." && pwd)}"
+maps_directory="${workspace}/maps/rtab_maps"
 
 if [[ "${1:-}" == "--print-path" ]]; then
   print_path_only=true
@@ -35,10 +37,14 @@ if pgrep -f '/rtabmap_slam/lib/rtabmap_slam/rtabmap' >/dev/null; then
 fi
 
 source /opt/ros/humble/setup.bash
-source /home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/setup.bash
-source /home/lunar/project/lunar_slam/install/setup.bash
+if [[ -f "${workspace}/device/D435i/ros2_ws/install/setup.bash" ]]; then
+  source "${workspace}/device/D435i/ros2_ws/install/setup.bash"
+fi
+if [[ -f "${workspace}/install/setup.bash" ]]; then
+  source "${workspace}/install/setup.bash"
+fi
 
-viewer="/home/lunar/project/lunar_slam/device/D435i/ros2_ws/install/rtabmap/bin/rtabmap-databaseViewer"
+viewer="${workspace}/device/D435i/ros2_ws/install/rtabmap/bin/rtabmap-databaseViewer"
 if [[ ! -x "${viewer}" ]]; then
   viewer="$(command -v rtabmap-databaseViewer || true)"
 fi

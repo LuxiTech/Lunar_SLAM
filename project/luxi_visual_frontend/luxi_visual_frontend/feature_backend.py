@@ -14,9 +14,21 @@ class NeuralFeatures:
     """SuperPoint features in original image coordinates."""
 
     keypoints: np.ndarray
-    descriptors: np.ndarray
+    descriptors: np.ndarray | None
     scores: np.ndarray
     image_size: np.ndarray
+    device_data: dict[str, Any] | None = None
+
+    def descriptor_array(self) -> np.ndarray:
+        """Materialize RTAB descriptors only when a message is published."""
+        if self.descriptors is not None:
+            return np.asarray(self.descriptors, dtype=np.float32)
+        if self.device_data is None:
+            raise RuntimeError("features contain no descriptors")
+        return (
+            self.device_data["descriptors"].transpose(0, 1).detach().cpu().numpy()
+            .astype(np.float32, copy=False)
+        )
 
 
 class SuperPointLightGlueBackend:
@@ -87,22 +99,29 @@ class SuperPointLightGlueBackend:
         ).unsqueeze(0).to(self.device)
         with self.torch.inference_mode():
             prediction = self.local_model({"image": tensor})
-        values = {
-            name: value[0].float().cpu().numpy()
-            for name, value in prediction.items()
-        }
         processed_size = np.array(tensor.shape[-2:][::-1], dtype=np.float32)
         scales = original_size / processed_size
-        keypoints = (values["keypoints"] + 0.5) * scales - 0.5
-        descriptors = values["descriptors"].T
-        scores = values.get("scores", values.get("keypoint_scores"))
-        if descriptors.shape != (len(keypoints), 256):
-            raise RuntimeError(f"unexpected SuperPoint descriptor shape: {descriptors.shape}")
+        keypoints_device = prediction["keypoints"][0].float()
+        scale_device = self.torch.as_tensor(scales, device=self.device)
+        keypoints_device = (keypoints_device + 0.5) * scale_device - 0.5
+        descriptors_device = prediction["descriptors"][0].float()
+        scores_device = prediction.get("scores", prediction.get("keypoint_scores"))[0].float()
+        keypoints = keypoints_device.cpu().numpy()
+        scores = scores_device.cpu().numpy()
+        if descriptors_device.shape != (256, len(keypoints)):
+            raise RuntimeError(
+                f"unexpected SuperPoint descriptor shape: {tuple(descriptors_device.shape)}"
+            )
         return NeuralFeatures(
             keypoints.astype(np.float32),
-            descriptors.astype(np.float32),
+            None,
             np.asarray(scores, dtype=np.float32),
             original_size,
+            {
+                "keypoints": keypoints_device,
+                "descriptors": descriptors_device,
+                "scores": scores_device,
+            },
         )
 
     def match(self, first: NeuralFeatures, second: NeuralFeatures) -> np.ndarray:
@@ -112,17 +131,29 @@ class SuperPointLightGlueBackend:
         def tensor(value: np.ndarray) -> Any:
             return torch.from_numpy(np.asarray(value)).float().unsqueeze(0).to(self.device)
 
+        def device_features(features: NeuralFeatures) -> tuple[Any, Any, Any]:
+            if features.device_data is not None:
+                return (
+                    features.device_data["keypoints"].unsqueeze(0),
+                    features.device_data["descriptors"].unsqueeze(0),
+                    features.device_data["scores"].unsqueeze(0),
+                )
+            descriptors = features.descriptor_array()
+            return tensor(features.keypoints), tensor(descriptors.T), tensor(features.scores)
+
         height0, width0 = int(first.image_size[1]), int(first.image_size[0])
         height1, width1 = int(second.image_size[1]), int(second.image_size[0])
+        keypoints0, descriptors0, scores0 = device_features(first)
+        keypoints1, descriptors1, scores1 = device_features(second)
         data = {
-            "keypoints0": tensor(first.keypoints),
-            "descriptors0": tensor(first.descriptors.T),
-            "keypoint_scores0": tensor(first.scores),
-            "image0": torch.empty((1, 1, height0, width0)),
-            "keypoints1": tensor(second.keypoints),
-            "descriptors1": tensor(second.descriptors.T),
-            "keypoint_scores1": tensor(second.scores),
-            "image1": torch.empty((1, 1, height1, width1)),
+            "keypoints0": keypoints0,
+            "descriptors0": descriptors0,
+            "keypoint_scores0": scores0,
+            "image0": torch.empty((1, 1, height0, width0), device=self.device),
+            "keypoints1": keypoints1,
+            "descriptors1": descriptors1,
+            "keypoint_scores1": scores1,
+            "image1": torch.empty((1, 1, height1, width1), device=self.device),
         }
         with torch.inference_mode():
             prediction = self.matcher_model(data)

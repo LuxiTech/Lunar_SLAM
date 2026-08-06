@@ -20,7 +20,10 @@ set(
   OPEN3D_INSTALL
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3parts/open3d/install"
   CACHE PATH "Open3D installation prefix")
-find_package(Open3D REQUIRED PATHS "${OPEN3D_INSTALL}/lib/cmake/Open3D" NO_DEFAULT_PATH)
+find_package(Open3D QUIET PATHS "${OPEN3D_INSTALL}/lib/cmake/Open3D" NO_DEFAULT_PATH)
+if(NOT Open3D_FOUND)
+  find_package(Open3D REQUIRED)
+endif()
 
 add_library(luxi_location_core
   src/depth_projection.cpp

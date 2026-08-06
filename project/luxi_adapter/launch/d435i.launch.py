@@ -1,5 +1,6 @@
 """D435i hardware profile: vendor driver, canonical relay, IMU filter and static TF."""
 
+import os
 import shlex
 from pathlib import Path
 
@@ -33,10 +34,25 @@ def _as_bool(value, name: str) -> bool:
     raise RuntimeError(f"The D435i config setting '{name}' must be true or false.")
 
 
+def _workspace_root() -> Path:
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    for start in (Path(__file__).resolve(), Path.cwd().resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / "project").is_dir() and (candidate / "device").is_dir():
+                return candidate
+    raise RuntimeError("Cannot locate lunar_slam; set LUXI_WORKSPACE_ROOT")
+
+
 def _launch_d435i(context):
     config_path = LaunchConfiguration("config").perform(context)
     settings = _settings(config_path)
-    setup_path = Path(str(_required(settings, "d435i_setup"))).expanduser()
+    configured_setup = str(settings.get("d435i_setup", "")).strip()
+    setup_path = Path(
+        configured_setup
+        or _workspace_root() / "device" / "D435i" / "ros2_ws" / "install" / "setup.bash"
+    ).expanduser()
     if not setup_path.is_file():
         raise RuntimeError(f"D435i setup script does not exist: {setup_path}")
 

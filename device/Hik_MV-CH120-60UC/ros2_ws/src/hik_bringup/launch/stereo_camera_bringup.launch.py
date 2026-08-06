@@ -14,6 +14,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -24,7 +25,9 @@ def generate_launch_description():
     default_imu_params = os.path.join(bringup_share, 'config', 'h30_imu.yaml')
 
     camera_params = LaunchConfiguration('camera_params')
+    external_trigger = LaunchConfiguration('external_trigger')
     stereo_proc_params = LaunchConfiguration('stereo_proc_params')
+    start_stereo_depth = LaunchConfiguration('start_stereo_depth')
     use_rviz = LaunchConfiguration('use_rviz')
     use_imu = LaunchConfiguration('use_imu')
     imu_params = LaunchConfiguration('imu_params')
@@ -46,9 +49,19 @@ def generate_launch_description():
             description='Path to the camera node parameter YAML file',
         ),
         DeclareLaunchArgument(
+            'external_trigger',
+            default_value='true',
+            description='Use Line0 hardware synchronization for the stereo cameras',
+        ),
+        DeclareLaunchArgument(
             'stereo_proc_params',
             default_value=default_stereo_proc_params,
             description='Path to the stereo depth parameter YAML file',
+        ),
+        DeclareLaunchArgument(
+            'start_stereo_depth',
+            default_value='true',
+            description='Start the standalone stereo depth node',
         ),
         DeclareLaunchArgument(
             'use_rviz',
@@ -70,7 +83,10 @@ def generate_launch_description():
             executable='stereo_node',
             name='stereo_node',
             output='screen',
-            parameters=[camera_params],
+            parameters=[
+                camera_params,
+                {'external_trigger': ParameterValue(external_trigger, value_type=bool)},
+            ],
             additional_env=mvs_environment,
         ),
         # The MVS SDK needs a few seconds to open and synchronize both U3V
@@ -85,6 +101,7 @@ def generate_launch_description():
                 name='stereo_depth_node',
                 output='screen',
                 parameters=[stereo_proc_params],
+                condition=IfCondition(start_stereo_depth),
             )],
         ),
         Node(

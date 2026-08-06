@@ -85,28 +85,33 @@ command -v "${PYTHON_BIN}" >/dev/null 2>&1 ||
 [[ -f "${WORKSPACE}/.gitmodules" ]] ||
   die ".gitmodules not found under ${WORKSPACE}"
 
-declare -a SUBMODULE_PATHS=()
+declare -a DECLARED_3PARTS_PATHS=()
 while read -r _key path; do
   if [[ "${path}" == 3parts/* ]]; then
-    SUBMODULE_PATHS+=("${path}")
+    DECLARED_3PARTS_PATHS+=("${path}")
   fi
 done < <(
   git -C "${WORKSPACE}" config -f .gitmodules \
     --get-regexp '^submodule\..*\.path$'
 )
 
-((${#SUBMODULE_PATHS[@]} > 0)) ||
+((${#DECLARED_3PARTS_PATHS[@]} > 0)) ||
   die "no 3parts submodules are declared in .gitmodules"
 
 if ((UPDATE_SUBMODULES)); then
   log "Validating 3parts submodule pointers"
+  declare -a SUBMODULE_PATHS=()
   invalid=0
-  for path in "${SUBMODULE_PATHS[@]}"; do
+  for path in "${DECLARED_3PARTS_PATHS[@]}"; do
     mode="$(
       git -C "${WORKSPACE}" ls-files --stage -- "${path}" |
         awk 'NR == 1 {print $1}'
     )"
-    if [[ "${mode}" != "160000" ]]; then
+    if [[ "${mode}" == "160000" ]]; then
+      SUBMODULE_PATHS+=("${path}")
+    elif [[ "${mode}" == 100* && -d "${WORKSPACE}/${path}" ]]; then
+      printf 'using vendored third-party source: %s\n' "${path}"
+    else
       printf 'not a committed submodule: %s (mode: %s)\n' \
         "${path}" "${mode:-missing}" >&2
       invalid=1
@@ -116,10 +121,12 @@ if ((UPDATE_SUBMODULES)); then
     die "the main repository has not committed all 3parts submodule pointers"
   fi
 
-  log "Initializing pinned 3parts submodules"
-  git -C "${WORKSPACE}" submodule sync --recursive
-  git -C "${WORKSPACE}" submodule update \
-    --init --recursive -- "${SUBMODULE_PATHS[@]}"
+  if ((${#SUBMODULE_PATHS[@]} > 0)); then
+    log "Initializing pinned 3parts submodules"
+    git -C "${WORKSPACE}" submodule sync --recursive -- "${SUBMODULE_PATHS[@]}"
+    git -C "${WORKSPACE}" submodule update \
+      --init --recursive -- "${SUBMODULE_PATHS[@]}"
+  fi
 fi
 
 CPU_REQUIREMENTS="${WORKSPACE}/project/luxi_hloc/requirements-cpu.txt"

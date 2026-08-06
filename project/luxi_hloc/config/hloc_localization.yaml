@@ -1,6 +1,7 @@
 luxi_hloc_localizer:
   ros__parameters:
-    map_directory: /home/lunar/project/lunar_slam/maps/hloc_maps/map012
+    # Set by hloc_localization.launch.py or explicitly on direct node startup.
+    map_directory: ""
     device: cuda
     resize_max: 640
     max_keypoints: 1024

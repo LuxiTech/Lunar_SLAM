@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+import copy
 import math
 import threading
 from typing import Any
@@ -16,7 +17,13 @@ import numpy as np
 import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from rclpy.time import Time
 from rtabmap_msgs.msg import KeyPoint, Point3f, RGBDImage
 from sensor_msgs.msg import CameraInfo, Image
@@ -135,6 +142,7 @@ class VisualOdometryNode(Node):
             "color_topic": "/sensors/rgbd/color/image_raw",
             "depth_topic": "/sensors/rgbd/depth/image_raw",
             "camera_info_topic": "/sensors/rgbd/color/camera_info",
+            "rgbd_input_topic": "/sensors/rgbd/rgbd_image",
             "odom_topic": "/luxi_visual_frontend/odom",
             "rgbd_features_topic": "/luxi_visual_frontend/rgbd_image",
             "status_topic": "/luxi_visual_frontend/status",
@@ -216,18 +224,35 @@ class VisualOdometryNode(Node):
             DiagnosticArray, parameters["diagnostics_topic"], 10
         )
         self.create_service(Trigger, "~/reset", self._reset_callback)
-        self.create_subscription(
-            Image, parameters["color_topic"], self._color_callback, qos_profile_sensor_data
+        # Inference is intentionally slower than the 10 Hz sensor stream.  A
+        # depth-one best-effort input prevents stale full-resolution RGB-D
+        # packets from queueing while the current frame is being processed.
+        latest_sensor_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
         )
-        self.create_subscription(
-            Image, parameters["depth_topic"], self._depth_callback, qos_profile_sensor_data
-        )
-        self.create_subscription(
-            CameraInfo,
-            parameters["camera_info_topic"],
-            self._camera_info_callback,
-            qos_profile_sensor_data,
-        )
+        if parameters["rgbd_input_topic"]:
+            self.create_subscription(
+                RGBDImage,
+                parameters["rgbd_input_topic"],
+                self._rgbd_callback,
+                latest_sensor_qos,
+            )
+        else:
+            self.create_subscription(
+                Image, parameters["color_topic"], self._color_callback, latest_sensor_qos
+            )
+            self.create_subscription(
+                Image, parameters["depth_topic"], self._depth_callback, latest_sensor_qos
+            )
+            self.create_subscription(
+                CameraInfo,
+                parameters["camera_info_topic"],
+                self._camera_info_callback,
+                latest_sensor_qos,
+            )
         self.lock = threading.Lock()
         self.latest_color: Image | None = None
         self.latest_depth: Image | None = None
@@ -252,6 +277,13 @@ class VisualOdometryNode(Node):
     def _camera_info_callback(self, message: CameraInfo) -> None:
         with self.lock:
             self.latest_camera_info = message
+
+    def _rgbd_callback(self, message: RGBDImage) -> None:
+        """Commit one adapter-normalized RGB-D packet atomically."""
+        with self.lock:
+            self.latest_color = message.rgb
+            self.latest_depth = message.depth
+            self.latest_camera_info = message.rgb_camera_info
 
     def _snapshot(self) -> tuple[Image, Image, CameraInfo] | None:
         with self.lock:
@@ -349,7 +381,6 @@ class VisualOdometryNode(Node):
             message.twist.twist.angular.y = float(rotation_vector[1, 0] / elapsed)
             message.twist.twist.angular.z = float(rotation_vector[2, 0] / elapsed)
         message.twist.covariance = message.pose.covariance
-        self.odom_publisher.publish(message)
         if bool(self.parameters["publish_tf"]):
             transform = TransformStamped()
             transform.header = message.header
@@ -359,6 +390,9 @@ class VisualOdometryNode(Node):
             transform.transform.translation.z = message.pose.pose.position.z
             transform.transform.rotation = message.pose.pose.orientation
             self.tf_broadcaster.sendTransform(transform)
+        # Publish TF first. RTAB-Map may consume odometry and RGBD immediately
+        # and query this exact sensor stamp before a later TF message arrives.
+        self.odom_publisher.publish(message)
         self.last_base_pose = odom_from_base
         self.last_pose_stamp = stamp
         return odom_from_base
@@ -373,8 +407,10 @@ class VisualOdometryNode(Node):
         message = RGBDImage()
         message.header.stamp = color.header.stamp
         message.header.frame_id = color.header.frame_id
-        message.rgb_camera_info = camera_info
-        message.depth_camera_info = camera_info
+        normalized_camera_info = copy.deepcopy(camera_info)
+        normalized_camera_info.header = color.header
+        message.rgb_camera_info = normalized_camera_info
+        message.depth_camera_info = normalized_camera_info
         message.rgb = color
         message.depth = depth
         keypoints = []
@@ -394,7 +430,7 @@ class VisualOdometryNode(Node):
             points.append(point)
         message.key_points = keypoints
         message.points = points
-        payload = compress_descriptor_matrix(result.features.descriptors)
+        payload = compress_descriptor_matrix(result.features.descriptor_array())
         message.descriptors = array("B", payload)
         self.rgbd_publisher.publish(message)
 
@@ -413,6 +449,11 @@ class VisualOdometryNode(Node):
             self.parameters["maximum_sensor_time_difference"]
         ):
             self._publish_status("DEGRADED", "SENSOR_TIME_MISMATCH")
+            return
+        if abs(stamp - _stamp_seconds(camera_info)) > float(
+            self.parameters["maximum_sensor_time_difference"]
+        ):
+            self._publish_status("DEGRADED", "CAMERA_INFO_TIME_MISMATCH")
             return
         self.processing = True
         self.processed_stamp = stamp

@@ -6,59 +6,73 @@ canonical RGB-D, filtered-IMU and TF interface without knowing a camera model.
 
 import os
 import re
-import signal
 import subprocess
-import time
+from pathlib import Path
 
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
-    GroupAction,
-    IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
     TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
-from launch_ros.actions import Node
+from launch_ros.actions import LoadComposableNodes, Node
+from launch_ros.descriptions import ComposableNode
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
-TEST_PROCESS_MARKERS = (
-    "d435i_rtabmap.launch.py",
-    "rgbd_mapping_test.launch.py",
-    "luxi_rtab_map_node",
-    "d435i_rtabmap.rviz",
-    "/rtabmap_launch/share/rtabmap_launch/launch/config/rgbd.rviz",
-    "rgbd_mapping.rviz",
-    "rtabmap_util/point_cloud_xyzrgb",
-    "/rtabmap_sync/rgbd_sync",
-    "/rtabmap_odom/rgbd_odometry",
-    "/rtabmap_slam/rtabmap",
-    "luxi_visual_frontend/visual_odometry_node",
-)
+def _workspace_root() -> Path:
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    for start in (Path(__file__).resolve(), Path.cwd().resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / "project").is_dir() and (candidate / "maps").is_dir():
+                return candidate
+    raise RuntimeError("Cannot locate lunar_slam; set LUXI_WORKSPACE_ROOT")
 
-MAPS_DIRECTORY = "/home/lunar/project/lunar_slam/maps/rtab_maps"
+
+MAPS_DIRECTORY = str(_workspace_root() / "maps" / "rtab_maps")
 
 
 def _prepare_database_path(context: object) -> list[LogInfo]:
-    """Use the next numbered map database unless the caller selected one."""
+    """Select a database without silently deleting or racing another launch."""
     configured_path = LaunchConfiguration("database_path").perform(context).strip()
+    new_map = LaunchConfiguration("new_map").perform(context).lower() in {
+        "1", "true", "yes", "on"
+    }
+    allow_overwrite = LaunchConfiguration("overwrite_existing_database").perform(context).lower() in {
+        "1", "true", "yes", "on"
+    }
     if configured_path:
         database_path = os.path.abspath(os.path.expanduser(configured_path))
         os.makedirs(os.path.dirname(database_path), exist_ok=True)
+        if new_map and os.path.exists(database_path) and not allow_overwrite:
+            raise RuntimeError(
+                f"Refusing to delete existing RTAB-Map database: {database_path}. "
+                "Use new_map:=false to continue it, choose a new path, or explicitly set "
+                "overwrite_existing_database:=true."
+            )
     else:
         os.makedirs(MAPS_DIRECTORY, exist_ok=True)
-        existing_indices = []
-        for filename in os.listdir(MAPS_DIRECTORY):
-            match = re.fullmatch(r"map(\d+)\.db(?:-(?:shm|wal))?", filename)
-            if match:
-                existing_indices.append(int(match.group(1)))
+        existing_indices = [
+            int(match.group(1))
+            for filename in os.listdir(MAPS_DIRECTORY)
+            if (match := re.fullmatch(r"map(\d+)\.db(?:-(?:shm|wal))?", filename))
+        ]
         map_index = max(existing_indices, default=0) + 1
-        database_path = os.path.join(MAPS_DIRECTORY, f"map{map_index:03d}.db")
+        while True:
+            database_path = os.path.join(MAPS_DIRECTORY, f"map{map_index:03d}.db")
+            try:
+                descriptor = os.open(database_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o664)
+                os.close(descriptor)
+                break
+            except FileExistsError:
+                map_index += 1
 
     context.launch_configurations["database_path"] = database_path
     return [LogInfo(msg=f"RTAB-Map database: {database_path}")]
@@ -67,124 +81,46 @@ def _prepare_database_path(context: object) -> list[LogInfo]:
 def _wait_for_camera_inputs(context: object) -> list[LogInfo]:
     enabled = LaunchConfiguration("wait_for_camera").perform(context).lower()
     if enabled not in {"1", "true", "yes", "on"}:
-        return [LogInfo(msg="D435i RGB-D input check is disabled.")]
+        return [LogInfo(msg="Synchronized sensor input check is disabled.")]
 
     timeout = float(LaunchConfiguration("camera_wait_timeout").perform(context))
-    topics = (
-        LaunchConfiguration("rgb_topic").perform(context),
-        LaunchConfiguration("depth_topic").perform(context),
-        LaunchConfiguration("camera_info_topic").perform(context),
-    )
-    if LaunchConfiguration("use_imu").perform(context).lower() in {"1", "true", "yes", "on"}:
-        topics += (LaunchConfiguration("imu_topic").perform(context),)
-    deadline = time.monotonic() + timeout
-
-    for topic in topics:
-        # ``ros2 topic echo`` exits immediately while a topic has no known
-        # type. Retry until the shared deadline: a single call would make the
-        # advertised 15-second startup grace period ineffective after a USB
-        # reconnect or a slow camera driver startup.
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                raise RuntimeError(
-                    f"No message received from {topic} within {timeout:.1f}s. "
-                    "Check the active luxi_adapter profile and hardware driver."
-                )
-            try:
-                result = subprocess.run(
-                    [
-                        "ros2",
-                        "topic",
-                        "echo",
-                        "--once",
-                        "--no-daemon",
-                        "--field",
-                        "header",
-                        "--qos-profile",
-                        "sensor_data",
-                        topic,
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=min(2.0, remaining),
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                result = None
-            if result is not None and result.returncode == 0:
-                break
-            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
-
-    return [LogInfo(msg="Canonical RGB-D input topics are ready.")]
-
-
-def _processes() -> dict[int, tuple[int, str]]:
-    result = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,args="],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    processes: dict[int, tuple[int, str]] = {}
-    for line in result.stdout.splitlines():
-        fields = line.strip().split(maxsplit=2)
-        if len(fields) != 3:
-            continue
-        pid, parent_pid, command = fields
-        processes[int(pid)] = (int(parent_pid), command)
-    return processes
-
-
-def _terminate_processes(_: object) -> list[LogInfo]:
-    processes = _processes()
-    target_pids = {
-        pid
-        for pid, (_, command) in processes.items()
-        if any(marker in command for marker in TEST_PROCESS_MARKERS)
+    require_imu = LaunchConfiguration("use_imu").perform(context).lower() in {
+        "1", "true", "yes", "on"
     }
-    if not target_pids:
-        return [LogInfo(msg="No residual RGB-D mapping test process found.")]
-
-    changed = True
-    while changed:
-        changed = False
-        for pid, (parent_pid, _) in processes.items():
-            if parent_pid in target_pids and pid not in target_pids:
-                target_pids.add(pid)
-                changed = True
-
-    for pid in sorted(target_pids, reverse=True):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline:
-        alive = []
-        for pid in target_pids:
-            try:
-                os.kill(pid, 0)
-                alive.append(pid)
-            except ProcessLookupError:
-                pass
-        if not alive:
-            return [LogInfo(msg=f"Stopped residual mapping test processes: {sorted(target_pids)}")]
-        time.sleep(0.1)
-
-    for pid in alive:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    return [LogInfo(msg=f"Stopped residual mapping test processes: {sorted(target_pids)}")]
+    command = [
+        "ros2", "run", "luxi_rtab_map", "sensor_sync_check", "--ros-args",
+        "-p", f"rgbd_topic:={LaunchConfiguration('sensor_rgbd_topic').perform(context)}",
+        "-p", f"imu_topic:={LaunchConfiguration('imu_topic').perform(context)}",
+        "-p", f"require_imu:={'true' if require_imu else 'false'}",
+        "-p", f"timeout_sec:={timeout}",
+    ]
+    try:
+        result = subprocess.run(command, timeout=timeout + 5.0, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Sensor synchronization check exceeded {timeout:.1f}s."
+        ) from error
+    if result.returncode != 0:
+        raise RuntimeError(
+            "RGB-D/IMU synchronization check failed. "
+            "RTAB-Map was not started; inspect the active luxi_adapter profile and trigger source."
+        )
+    return [LogInfo(msg="Canonical RGB-D/IMU synchronization check passed.")]
 
 
 def generate_launch_description() -> LaunchDescription:
-    rtabmap_launch = PathJoinSubstitution(
-        [FindPackageShare("rtabmap_launch"), "launch", "rtabmap.launch.py"]
-    )
+    mvs_root = os.path.abspath(os.environ.get("MVS_ROOT", "/opt/MVS"))
+    mvs_library_dirs = {
+        os.path.join(mvs_root, "lib", "aarch64"),
+        os.path.join(mvs_root, "lib", "64"),
+    }
+    rtabmap_environment = {
+        "LD_LIBRARY_PATH": os.pathsep.join(
+            entry
+            for entry in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+            if entry and os.path.abspath(entry) not in mvs_library_dirs
+        )
+    }
     rviz_config = PathJoinSubstitution(
         [FindPackageShare("luxi_rtab_map"), "rviz", "rgbd_mapping.rviz"]
     )
@@ -198,40 +134,179 @@ def generate_launch_description() -> LaunchDescription:
         ]
     )
 
-    rtabmap = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(rtabmap_launch),
-        launch_arguments={
-            "stereo": "false",
-            "depth": "false",
-            "localization": LaunchConfiguration("localization"),
-            "rtabmap_viz": LaunchConfiguration("rtabmap_viz"),
-            "rviz": "false",
+    rgbd_sync = Node(
+        package="rtabmap_sync",
+        executable="rgbd_sync",
+        name="rgbd_sync",
+        namespace="rtabmap",
+        output="screen",
+        additional_env=rtabmap_environment,
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration("rgbd_sync"),
+            "'.lower() in ('true', '1', 'yes', 'on') and '",
+            LaunchConfiguration("rgbd_sync_component"),
+            "'.lower() not in ('true', '1', 'yes', 'on')",
+        ])),
+        parameters=[{
+            "approx_sync": ParameterValue(
+                LaunchConfiguration("approx_sync"), value_type=bool),
+            "approx_sync_max_interval": LaunchConfiguration("approx_sync_max_interval"),
+            "topic_queue_size": LaunchConfiguration("topic_queue_size"),
+            "sync_queue_size": LaunchConfiguration("sync_queue_size"),
+            "qos": LaunchConfiguration("qos"),
+            "qos_camera_info": LaunchConfiguration("qos"),
+        }],
+        remappings=[
+            ("rgb/image", LaunchConfiguration("rgb_topic")),
+            ("depth/image", LaunchConfiguration("depth_topic")),
+            ("rgb/camera_info", LaunchConfiguration("camera_info_topic")),
+            ("rgbd_image", LaunchConfiguration("rgbd_topic")),
+        ],
+    )
+    rgbd_sync_component = LoadComposableNodes(
+        target_container=LaunchConfiguration("rgbd_sync_container"),
+        condition=IfCondition(LaunchConfiguration("rgbd_sync_component")),
+        composable_node_descriptions=[ComposableNode(
+            package="rtabmap_sync",
+            plugin="rtabmap_sync::RGBDSync",
+            name="rgbd_sync",
+            namespace="rtabmap",
+            parameters=[{
+                "approx_sync": ParameterValue(
+                    LaunchConfiguration("approx_sync"), value_type=bool),
+                "approx_sync_max_interval": LaunchConfiguration("approx_sync_max_interval"),
+                "topic_queue_size": LaunchConfiguration("topic_queue_size"),
+                "sync_queue_size": LaunchConfiguration("sync_queue_size"),
+                "qos": LaunchConfiguration("qos"),
+                "qos_camera_info": LaunchConfiguration("qos"),
+            }],
+            remappings=[
+                ("rgb/image", LaunchConfiguration("rgb_topic")),
+                ("depth/image", LaunchConfiguration("depth_topic")),
+                ("rgb/camera_info", LaunchConfiguration("camera_info_topic")),
+                ("rgbd_image", LaunchConfiguration("rgbd_topic")),
+            ],
+            extra_arguments=[{"use_intra_process_comms": True}],
+        )],
+    )
+    rgbd_odometry = Node(
+        package="rtabmap_odom",
+        executable="rgbd_odometry",
+        name="rgbd_odometry",
+        namespace="rtabmap",
+        output="screen",
+        additional_env=rtabmap_environment,
+        condition=IfCondition(LaunchConfiguration("visual_odometry")),
+        parameters=[{
+            "frame_id": LaunchConfiguration("base_frame"),
+            "odom_frame_id": "odom",
+            "publish_tf": ParameterValue(
+                LaunchConfiguration("publish_odom_tf"), value_type=bool),
+            "wait_for_transform": LaunchConfiguration("wait_for_transform"),
+            "wait_imu_to_init": ParameterValue(
+                LaunchConfiguration("use_imu"), value_type=bool),
+            "always_check_imu_tf": False,
+            "approx_sync": ParameterValue(
+                LaunchConfiguration("approx_sync"), value_type=bool),
+            "approx_sync_max_interval": LaunchConfiguration("approx_sync_max_interval"),
+            "topic_queue_size": LaunchConfiguration("topic_queue_size"),
+            "sync_queue_size": LaunchConfiguration("sync_queue_size"),
+            "qos": LaunchConfiguration("qos"),
+            "qos_camera_info": LaunchConfiguration("qos"),
+            "qos_imu": LaunchConfiguration("qos_imu"),
+            "subscribe_rgbd": True,
+            "always_process_most_recent_frame": True,
+        }],
+        remappings=[
+            ("rgbd_image", LaunchConfiguration("rgbd_topic")),
+            ("odom", LaunchConfiguration("odom_topic")),
+            ("imu", LaunchConfiguration("imu_topic")),
+        ],
+        arguments=[
+            LaunchConfiguration("odom_args"), "--ros-args", "--log-level",
+            LaunchConfiguration("log_level"),
+        ],
+    )
+    rtabmap = Node(
+        package="rtabmap_slam",
+        executable="rtabmap",
+        name="rtabmap",
+        namespace="rtabmap",
+        output="screen",
+        additional_env=rtabmap_environment,
+        parameters=[{
+            "subscribe_depth": False,
+            "subscribe_rgbd": True,
+            "subscribe_rgb": False,
+            "subscribe_stereo": False,
+            "subscribe_odom_info": ParameterValue(
+                LaunchConfiguration("subscribe_odom_info"), value_type=bool),
             "frame_id": LaunchConfiguration("base_frame"),
             "map_frame_id": LaunchConfiguration("map_frame"),
             "odom_frame_id": "",
+            "publish_tf": True,
+            "wait_for_transform": LaunchConfiguration("wait_for_transform"),
             "database_path": LaunchConfiguration("database_path"),
-            "rgb_topic": LaunchConfiguration("rgb_topic"),
-            "depth_topic": LaunchConfiguration("depth_topic"),
-            "camera_info_topic": LaunchConfiguration("camera_info_topic"),
-            "rgbd_sync": LaunchConfiguration("rgbd_sync"),
-            "subscribe_rgbd": LaunchConfiguration("subscribe_rgbd"),
-            "rgbd_topic": LaunchConfiguration("rgbd_topic"),
-            "approx_rgbd_sync": "true",
-            "approx_sync": "true",
+            "approx_sync": ParameterValue(
+                LaunchConfiguration("approx_sync"), value_type=bool),
             "approx_sync_max_interval": LaunchConfiguration("approx_sync_max_interval"),
-            "visual_odometry": LaunchConfiguration("visual_odometry"),
-            "icp_odometry": LaunchConfiguration("icp_odometry"),
-            "odom_topic": LaunchConfiguration("odom_topic"),
-            "qos": LaunchConfiguration("qos"),
+            "topic_queue_size": LaunchConfiguration("topic_queue_size"),
+            "sync_queue_size": LaunchConfiguration("sync_queue_size"),
             "qos_image": LaunchConfiguration("qos"),
             "qos_camera_info": LaunchConfiguration("qos"),
+            "qos_odom": LaunchConfiguration("qos_odom"),
+            "qos_imu": LaunchConfiguration("qos_imu"),
+            "map_always_update": ParameterValue(
+                LaunchConfiguration("map_always_update"), value_type=bool),
+            "cloud_output_voxelized": ParameterValue(
+                LaunchConfiguration("cloud_output_voxelized"), value_type=bool),
+            "Mem/IncrementalMemory": ParameterValue(
+                PythonExpression([
+                    "'false' if '", LaunchConfiguration("localization"),
+                    "'.lower() in ('true', '1', 'yes', 'on') else 'true'",
+                ]),
+                value_type=str,
+            ),
+            "Mem/InitWMWithAllNodes": ParameterValue(
+                PythonExpression([
+                    "'true' if '", LaunchConfiguration("localization"),
+                    "'.lower() in ('true', '1', 'yes', 'on') else 'false'",
+                ]),
+                value_type=str,
+            ),
+        }],
+        remappings=[
+            ("rgbd_image", LaunchConfiguration("rgbd_topic")),
+            ("odom", LaunchConfiguration("odom_topic")),
+            ("imu", LaunchConfiguration("imu_topic")),
+        ],
+        arguments=[
+            effective_rtabmap_args, "--ros-args", "--log-level",
+            LaunchConfiguration("log_level"),
+        ],
+    )
+
+    rtabmap_viz = Node(
+        package="rtabmap_viz",
+        executable="rtabmap_viz",
+        name="rtabmap_viz",
+        namespace="rtabmap",
+        output="screen",
+        additional_env=rtabmap_environment,
+        condition=IfCondition(LaunchConfiguration("rtabmap_viz")),
+        parameters=[{
+            "subscribe_rgbd": True,
+            "subscribe_odom_info": ParameterValue(
+                LaunchConfiguration("visual_odometry"), value_type=bool),
+            "frame_id": LaunchConfiguration("base_frame"),
             "wait_for_transform": LaunchConfiguration("wait_for_transform"),
-            "wait_imu_to_init": LaunchConfiguration("use_imu"),
-            "imu_topic": LaunchConfiguration("imu_topic"),
-            "rtabmap_args": effective_rtabmap_args,
-            "odom_args": LaunchConfiguration("odom_args"),
-            "log_level": LaunchConfiguration("log_level"),
-        }.items(),
+            "qos_image": LaunchConfiguration("qos"),
+            "qos_odom": LaunchConfiguration("qos"),
+        }],
+        remappings=[
+            ("rgbd_image", LaunchConfiguration("rgbd_topic")),
+            ("odom", LaunchConfiguration("odom_topic")),
+        ],
     )
 
     rviz = Node(
@@ -241,6 +316,7 @@ def generate_launch_description() -> LaunchDescription:
         arguments=["-d", rviz_config],
         condition=IfCondition(LaunchConfiguration("rviz")),
         output="screen",
+        additional_env=rtabmap_environment,
     )
 
     learned_frontend = Node(
@@ -252,12 +328,9 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(LaunchConfiguration("learned_frontend")),
     )
 
-    # The adapter owns sensor TF and is started before this algorithm launch.
-    # Scope upstream arguments so its internal ``rviz=false`` does not overwrite
-    # this launch file's RViz option.
     delayed_rtabmap = TimerAction(
-        period=0.5,
-        actions=[GroupAction(actions=[rtabmap], scoped=True)],
+        period=LaunchConfiguration("rtabmap_start_delay"),
+        actions=[rgbd_sync, rgbd_sync_component, rgbd_odometry, rtabmap, rtabmap_viz],
     )
     delayed_rviz = TimerAction(period=2.0, actions=[rviz])
     publish_map = TimerAction(
@@ -300,6 +373,8 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="/sensors/rgbd/depth/image_raw",
             ),
             DeclareLaunchArgument("camera_info_topic", default_value="/sensors/rgbd/color/camera_info"),
+            DeclareLaunchArgument(
+                "sensor_rgbd_topic", default_value="/sensors/rgbd/rgbd_image"),
             DeclareLaunchArgument("learned_frontend", default_value="false"),
             DeclareLaunchArgument(
                 "visual_frontend_config",
@@ -315,11 +390,27 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("icp_odometry", default_value="false"),
             DeclareLaunchArgument("odom_topic", default_value="odom"),
             DeclareLaunchArgument("rgbd_sync", default_value="true"),
+            DeclareLaunchArgument("rgbd_sync_component", default_value="false"),
+            DeclareLaunchArgument("rgbd_sync_container", default_value="/luxi_sensor_container"),
             DeclareLaunchArgument("subscribe_rgbd", default_value="false"),
             DeclareLaunchArgument("rgbd_topic", default_value="rgbd_image"),
             DeclareLaunchArgument("qos", default_value="2"),
+            DeclareLaunchArgument("qos_imu", default_value="2"),
+            DeclareLaunchArgument("qos_odom", default_value="2"),
+            DeclareLaunchArgument("approx_sync", default_value="true"),
+            DeclareLaunchArgument("topic_queue_size", default_value="20"),
+            DeclareLaunchArgument("sync_queue_size", default_value="10"),
             DeclareLaunchArgument("approx_sync_max_interval", default_value="0.05"),
             DeclareLaunchArgument("wait_for_transform", default_value="0.5"),
+            DeclareLaunchArgument(
+                "rtabmap_start_delay",
+                default_value="0.5",
+                description="Delay RTAB startup while an optional frontend initializes.",
+            ),
+            DeclareLaunchArgument("publish_odom_tf", default_value="true"),
+            DeclareLaunchArgument("subscribe_odom_info", default_value="true"),
+            DeclareLaunchArgument("map_always_update", default_value="false"),
+            DeclareLaunchArgument("cloud_output_voxelized", default_value="true"),
             DeclareLaunchArgument("use_imu", default_value="true"),
             DeclareLaunchArgument("imu_topic", default_value="/sensors/imu/data"),
             DeclareLaunchArgument("wait_for_camera", default_value="true"),
@@ -329,6 +420,7 @@ def generate_launch_description() -> LaunchDescription:
                 description="Maximum time to wait for canonical sensor messages after hardware startup or reconnect.",
             ),
             DeclareLaunchArgument("new_map", default_value="false"),
+            DeclareLaunchArgument("overwrite_existing_database", default_value="false"),
             DeclareLaunchArgument("load_saved_map", default_value="true"),
             DeclareLaunchArgument(
                 "rtabmap_args",
@@ -338,7 +430,8 @@ def generate_launch_description() -> LaunchDescription:
                     "--RGBD/LinearUpdate 0.1 "
                     "--RGBD/AngularUpdate 0.1 "
                     "--Kp/MinDepth 0.2 "
-                    "--Kp/MaxDepth 4.5"
+                    "--Kp/MaxDepth 4.5 "
+                    "--Grid/DepthDecimation 2"
                 ),
             ),
             DeclareLaunchArgument(
@@ -363,7 +456,6 @@ def generate_launch_description() -> LaunchDescription:
                 ),
             ),
             DeclareLaunchArgument("log_level", default_value="warn"),
-            OpaqueFunction(function=_terminate_processes),
             OpaqueFunction(function=_prepare_database_path),
             OpaqueFunction(function=_wait_for_camera_inputs),
             learned_frontend,

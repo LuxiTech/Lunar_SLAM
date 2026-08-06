@@ -76,7 +76,8 @@ public:
     bool grab(
         cv::Mat& image,
         uint64_t& device_timestamp,
-        int64_t& host_timestamp
+        int64_t& host_timestamp,
+        uint32_t& frame_number
     );
 
     // =====================

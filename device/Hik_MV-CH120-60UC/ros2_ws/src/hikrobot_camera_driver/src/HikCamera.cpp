@@ -433,7 +433,8 @@ bool HikCamera::setImageSampling(
 bool HikCamera::grab(
     cv::Mat& image,
     uint64_t& device_timestamp,
-    int64_t& host_timestamp
+    int64_t& host_timestamp,
+    uint32_t& frame_number
 )
 {
 
@@ -471,6 +472,7 @@ bool HikCamera::grab(
         (static_cast<uint64_t>(frame.stFrameInfo.nDevTimeStampHigh) << 32) |
         frame.stFrameInfo.nDevTimeStampLow;
     const int64_t captured_host_timestamp = frame.stFrameInfo.nHostTimeStamp;
+    const uint32_t captured_frame_number = frame.stFrameInfo.nFrameNum;
 
     // Do not keep an SDK buffer occupied while OpenCV performs Bayer conversion.
     // This matters for two cameras receiving the same hardware trigger.
@@ -485,6 +487,7 @@ bool HikCamera::grab(
 
     device_timestamp = captured_timestamp;
     host_timestamp = captured_host_timestamp;
+    frame_number = captured_frame_number;
     bool converted = false;
 
     if (pixel_type == PixelType_Gvsp_BGR8_Packed) {

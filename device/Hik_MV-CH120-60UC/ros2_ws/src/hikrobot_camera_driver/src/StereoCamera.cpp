@@ -95,7 +95,12 @@ bool StereoCamera::open(const StereoCameraConfig& config)
 
             left_camera_.loadUserSet(config.user_set);
 
-            if (config.trigger_source != "Default" && config.trigger_source != "default") {
+            if (!config.external_trigger) {
+                if (!left_camera_.setTriggerMode(false)) {
+                    close();
+                    return false;
+                }
+            } else if (config.trigger_source != "Default" && config.trigger_source != "default") {
                 if (!left_camera_.setTriggerMode(config.external_trigger) ||
                     (config.external_trigger &&
                      !left_camera_.setTriggerSource(config.trigger_source))) {
@@ -168,7 +173,12 @@ bool StereoCamera::open(const StereoCameraConfig& config)
 
             right_camera_.loadUserSet(config.user_set);
 
-            if (config.trigger_source != "Default" && config.trigger_source != "default") {
+            if (!config.external_trigger) {
+                if (!right_camera_.setTriggerMode(false)) {
+                    close();
+                    return false;
+                }
+            } else if (config.trigger_source != "Default" && config.trigger_source != "default") {
                 if (!right_camera_.setTriggerMode(config.external_trigger) ||
                     (config.external_trigger &&
                      !right_camera_.setTriggerSource(config.trigger_source))) {
@@ -256,6 +266,7 @@ bool StereoCamera::start()
     left_camera_.printLine0Diagnostics();
     right_camera_.printLine0Diagnostics();
 
+    frame_number_offset_.reset();
     if (!left_camera_.start() || !right_camera_.start()) {
         stop();
         return false;
@@ -271,7 +282,9 @@ bool StereoCamera::grab(
     uint64_t& left_ts,
     uint64_t& right_ts,
     int64_t& left_host_ts,
-    int64_t& right_host_ts
+    int64_t& right_host_ts,
+    uint32_t& left_frame_number,
+    uint32_t& right_frame_number
 )
 {
 
@@ -279,11 +292,11 @@ bool StereoCamera::grab(
     // Both cameras receive the same hardware trigger. Retrieve and convert the
     // two frames concurrently so one Bayer conversion cannot delay the other.
     auto left_result = std::async(std::launch::async, [&]() {
-        return left_camera_.grab(left, left_ts, left_host_ts);
+        return left_camera_.grab(left, left_ts, left_host_ts, left_frame_number);
     });
 
-    const bool r = right_camera_.grab(right, right_ts, right_host_ts);
-    const bool l = left_result.get();
+    bool r = right_camera_.grab(right, right_ts, right_host_ts, right_frame_number);
+    bool l = left_result.get();
 
     static unsigned int asymmetric_failures = 0;
     if (l != r) {
@@ -298,6 +311,45 @@ bool StereoCamera::grab(
 
 
     if (!l || !r) {
+        return false;
+    }
+
+    if (!frame_number_offset_) {
+        frame_number_offset_ =
+            static_cast<int64_t>(right_frame_number) - static_cast<int64_t>(left_frame_number);
+        std::cout << "Stereo frame-number offset initialized: right-left="
+                  << *frame_number_offset_ << std::endl;
+    }
+
+    // A one-sided timeout advances only one SDK queue. Use each camera's MVS
+    // acquisition counter to catch up the lagging queue instead of silently
+    // pairing adjacent trigger events.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const int64_t observed_offset =
+            static_cast<int64_t>(right_frame_number) - static_cast<int64_t>(left_frame_number);
+        const int64_t offset_error = observed_offset - *frame_number_offset_;
+        if (offset_error == 0) {
+            break;
+        }
+        if (offset_error < 0) {
+            r = right_camera_.grab(right, right_ts, right_host_ts, right_frame_number);
+        } else {
+            l = left_camera_.grab(left, left_ts, left_host_ts, left_frame_number);
+        }
+        if (!l || !r) {
+            return false;
+        }
+    }
+    const int64_t final_offset =
+        static_cast<int64_t>(right_frame_number) - static_cast<int64_t>(left_frame_number);
+    if (final_offset != *frame_number_offset_) {
+        static unsigned int frame_mismatch_count = 0;
+        ++frame_mismatch_count;
+        if (frame_mismatch_count <= 5 || frame_mismatch_count % 30 == 0) {
+            std::cerr << "Stereo frame counter mismatch: left=" << left_frame_number
+                      << " right=" << right_frame_number
+                      << " expected_offset=" << *frame_number_offset_ << std::endl;
+        }
         return false;
     }
 

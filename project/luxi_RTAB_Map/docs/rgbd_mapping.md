@@ -8,15 +8,45 @@
 ```text
 project/luxi_adapter
   selected hardware profile
-  -> RGB、对齐深度、CameraInfo、滤波 IMU、TF
+  -> 相机、IMU、标定 TF；通用模式下也可发布统一传感器话题
 
 project/luxi_RTAB_Map
-  rgbd_mapping.launch.py
-  -> 输入检查、RGB-D 同步、视觉里程计、RTAB-Map、轻量 RViz
+  rgbd_mapping_learned.launch.py
+  -> 输入检查、luxi_visual_frontend、RTAB-Map 后端、轻量 RViz
 ```
 
 后续定位、导航和语义识别也应作为 `project` 下的独立 ROS2 包接入上述
 标准话题，避免把算法代码放入硬件驱动目录。
+
+## 统一硬件 profile + 通用建图
+
+硬件只由 `luxi_adapter` 选择和启动。Hik 项目只负责相机、H30 IMU、双目校正和
+VPI 深度；不会启动或配置海康项目中的 RTAB-Map 前端。原生同步的
+`/stereo/rgbd_image` 由 C++ adapter 归一化为原子
+`/sensors/rgbd/rgbd_image` 接口，保留原始深度、标定并统一包内时间戳；拆分图像
+话题只供兼容和预览使用，不再参与建图同步。同步门禁通过后，统一使用已由 D435i 验证的
+`luxi_visual_frontend`（SuperPoint + LightGlue）和项目 RTAB-Map 后端。
+
+```bash
+cd /home/nvidia/Desktop/lunar_slam
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
+# 或：hardware:=d435i
+```
+
+另一个终端对所有硬件执行相同命令：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch luxi_rtab_map rgbd_mapping_learned.launch.py \
+  new_map:=true load_saved_map:=false
+```
+
+正常启动应先显示两台相机的 `TriggerMode=On, TriggerSource=Line0` 和 Line0 电平跳变，
+随后显示 `SYNC PASS`。`external_trigger:=false` 仅用于诊断相机取流，不应作为正式
+建图配置。无图形桌面时在 launch 命令后追加 `rviz:=false`。
 
 ## 从开机到建图
 

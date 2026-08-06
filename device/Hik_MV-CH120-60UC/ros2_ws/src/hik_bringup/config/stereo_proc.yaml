@@ -41,7 +41,7 @@ stereo_depth_node:
     # OpenCV SGBM parameters (used only when depth_backend: sgbm, or if VPI
     # initialization/runtime fails and vpi_fallback_to_sgbm is true).
     # Use the right projection matrix to derive baseline automatically.
-    # The current calibration gives about 0.100523 m.
+    # The current projection matrices give about 0.095965 m.
     baseline_m: 0.0
     max_disparity: 128
     block_size: 7
@@ -66,9 +66,9 @@ stereo_depth_node:
     processing_scale: 1.0
     # The GPU-SGM full-resolution pipeline follows the 10 Hz hardware trigger.
     max_processing_fps: 0.0
-    # Rectification and post-filters remain on CPU. Two workers prevent those
-    # tasks from monopolizing the NX while VPI runs matching on the GPU.
-    opencv_num_threads: 4
+    # Rectification and post-filters remain on CPU. Use all Orin NX CPU cores;
+    # this changes scheduling only and leaves interpolation/results unchanged.
+    opencv_num_threads: 8
     # Publish a coloured depth view for every computed depth frame. It is
     # intentionally separate from the 10 Hz camera-only RViz previews.
     preview_publish_every_n_frames: 1

@@ -4,8 +4,6 @@
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
 
-#include "cv_bridge/cv_bridge.h"
-
 #include "opencv2/opencv.hpp"
 
 #include "camera_info_manager/camera_info_manager.hpp"
@@ -17,8 +15,35 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+namespace
+{
+
+sensor_msgs::msg::Image::UniquePtr imageMessage(
+    const std_msgs::msg::Header &header, const std::string &encoding, const cv::Mat &image)
+{
+    auto message = std::make_unique<sensor_msgs::msg::Image>();
+    message->header = header;
+    message->height = static_cast<uint32_t>(image.rows);
+    message->width = static_cast<uint32_t>(image.cols);
+    message->encoding = encoding;
+    message->is_bigendian = false;
+    message->step = static_cast<sensor_msgs::msg::Image::_step_type>(
+        image.cols * image.elemSize());
+    message->data.resize(static_cast<std::size_t>(message->step) * message->height);
+    for (int row = 0; row < image.rows; ++row) {
+        std::memcpy(
+            message->data.data() + static_cast<std::size_t>(row) * message->step,
+            image.ptr(row), message->step);
+    }
+    return message;
+}
+
+}  // namespace
 
 class StereoCameraNode : public rclcpp::Node
 {
@@ -49,6 +74,11 @@ public:
 
         // ROS parameters override XML values for one-off experiments.
         config.external_trigger = declare_parameter<bool>("external_trigger", config.external_trigger);
+        camera_config_ = config;
+        reconnect_after_failures_ = static_cast<int>(std::max<int64_t>(
+            1, declare_parameter<int64_t>("reconnect_after_failures", 3)));
+        reconnect_interval_seconds_ = std::max(
+            1.0, declare_parameter<double>("reconnect_interval_seconds", 2.0));
 
         const std::string left_calib_file = declare_parameter<std::string>(
             "left_camera_info_file",
@@ -74,9 +104,10 @@ public:
         }
 
         auto image_qos = rclcpp::SensorDataQoS().keep_last(2);
-        // RViz's compressed image transport on Humble requests Reliable QoS.
-        // Keep exactly one preview frame so a slow renderer always receives the
-        // newest frame instead of accumulating display latency.
+        // Raw RViz previews must never back-pressure the camera callback.
+        // Compressed image transport on Humble requests Reliable QoS, so keep
+        // that compatibility only for the much smaller JPEG stream.
+        auto rviz_raw_qos = rclcpp::SensorDataQoS().keep_last(1);
         auto rviz_compressed_qos = rclcpp::QoS(1).reliable().durability_volatile();
         auto info_qos = rclcpp::QoS(5).reliable().durability_volatile();
         rviz_preview_scale_ = std::clamp(
@@ -118,12 +149,12 @@ public:
         left_preview_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/stereo/preview/left_color",
-            rviz_compressed_qos
+            rviz_raw_qos
         );
         right_preview_pub_ =
         create_publisher<sensor_msgs::msg::Image>(
             "/stereo/preview/right_color",
-            rviz_compressed_qos
+            rviz_raw_qos
         );
         left_preview_compressed_pub_ =
         create_publisher<sensor_msgs::msg::CompressedImage>(
@@ -137,27 +168,7 @@ public:
         );
 
 
-        if(!camera_.open(config))
-        {
-
-            RCLCPP_ERROR(
-                get_logger(),
-                "camera open failed"
-            );
-
-            return;
-        }
-
-
-        if (!camera_.start())
-        {
-            RCLCPP_ERROR(
-                get_logger(),
-                "camera start failed; node will not publish images"
-            );
-            camera_.close();
-            return;
-        }
+        camera_ready_ = openCamera();
 
 
         timer_ =
@@ -173,16 +184,41 @@ public:
         RCLCPP_INFO(
             get_logger(),
             "Hikrobot stereo node started with user_set=%s, trigger_source=%s",
-            config.user_set.c_str(),
-            config.trigger_source.c_str()
+            camera_config_.user_set.c_str(),
+            camera_config_.trigger_source.c_str()
         );
 
     }
 
 private:
 
+    bool openCamera()
+    {
+        last_reconnect_attempt_ = std::chrono::steady_clock::now();
+        if (!camera_.open(camera_config_)) {
+            RCLCPP_ERROR(get_logger(), "camera open failed; automatic retry remains active");
+            return false;
+        }
+        if (!camera_.start()) {
+            RCLCPP_ERROR(get_logger(), "camera start failed; automatic retry remains active");
+            camera_.close();
+            return false;
+        }
+        consecutive_grab_failures_ = 0;
+        RCLCPP_INFO(get_logger(), "Hik stereo cameras are ready");
+        return true;
+    }
+
     void capture()
     {
+        if (!camera_ready_) {
+            const double since_attempt = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - last_reconnect_attempt_).count();
+            if (since_attempt >= reconnect_interval_seconds_) {
+                camera_ready_ = openCamera();
+            }
+            return;
+        }
 
         cv::Mat left;
 
@@ -197,6 +233,10 @@ private:
 
         int64_t right_host_ts;
 
+        uint32_t left_frame_number;
+
+        uint32_t right_frame_number;
+
 
 
         if(!camera_.grab(
@@ -205,16 +245,26 @@ private:
             left_ts,
             right_ts,
             left_host_ts,
-            right_host_ts))
+            right_host_ts,
+            left_frame_number,
+            right_frame_number))
         {
-
-            RCLCPP_WARN(
-                get_logger(),
-                "grab failed"
-            );
+            ++consecutive_grab_failures_;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "stereo grab failed (%d/%d before reconnect)",
+                consecutive_grab_failures_, reconnect_after_failures_);
+            if (consecutive_grab_failures_ >= reconnect_after_failures_) {
+                camera_.stop();
+                camera_.close();
+                camera_ready_ = false;
+                last_reconnect_attempt_ = std::chrono::steady_clock::now();
+                RCLCPP_ERROR(get_logger(), "stereo stream lost; scheduling automatic reconnect");
+            }
 
             return;
         }
+        consecutive_grab_failures_ = 0;
 
         const int raw_width = left.cols;
         const int raw_height = left.rows;
@@ -247,23 +297,8 @@ private:
         logTimestampDiagnostics(stamp, left_host_ts, right_host_ts, left_ts, right_ts);
 
 
-        auto left_msg =
-        cv_bridge::CvImage(
-            std_msgs::msg::Header(),
-            "bgr8",
-            left
-        )
-        .toImageMsg();
-
-
-
-        auto right_msg =
-        cv_bridge::CvImage(
-            std_msgs::msg::Header(),
-            "bgr8",
-            right
-        )
-        .toImageMsg();
+        auto left_msg = imageMessage(std_msgs::msg::Header(), "bgr8", left);
+        auto right_msg = imageMessage(std_msgs::msg::Header(), "bgr8", right);
 
         left_msg->header.stamp = stamp;
         left_msg->header.frame_id = "left_camera_optical_frame";
@@ -307,8 +342,7 @@ private:
             cv::cvtColor(left, left_gray, cv::COLOR_BGR2GRAY);
             cv::cvtColor(right, right_gray, cv::COLOR_BGR2GRAY);
             cv::hconcat(left_gray, right_gray, stereo_pair);
-            auto pair_msg = cv_bridge::CvImage(
-                std_msgs::msg::Header(), "mono8", stereo_pair).toImageMsg();
+            auto pair_msg = imageMessage(std_msgs::msg::Header(), "mono8", stereo_pair);
             pair_msg->header.stamp = stamp;
             pair_msg->header.frame_id = "left_camera_optical_frame";
             stereo_pair_pub_->publish(*pair_msg);
@@ -334,24 +368,31 @@ private:
 
         // These streams are only for RViz. Keep them entirely out of the
         // camera path when RViz is displaying the point cloud only.
+        const bool need_left = publish_left_raw || publish_left_compressed;
+        const bool need_right = publish_right_raw || publish_right_compressed;
         cv::Mat left_preview;
         cv::Mat right_preview;
-        if (rviz_preview_scale_ < 0.999) {
-            cv::resize(left, left_preview, cv::Size(), rviz_preview_scale_,
-                       rviz_preview_scale_, cv::INTER_AREA);
-            cv::resize(right, right_preview, cv::Size(), rviz_preview_scale_,
-                       rviz_preview_scale_, cv::INTER_AREA);
-        } else {
-            left_preview = left;
-            right_preview = right;
+        if (need_left) {
+            if (rviz_preview_scale_ < 0.999) {
+                cv::resize(left, left_preview, cv::Size(), rviz_preview_scale_,
+                           rviz_preview_scale_, cv::INTER_AREA);
+            } else {
+                left_preview = left;
+            }
+        }
+        if (need_right) {
+            if (rviz_preview_scale_ < 0.999) {
+                cv::resize(right, right_preview, cv::Size(), rviz_preview_scale_,
+                           rviz_preview_scale_, cv::INTER_AREA);
+            } else {
+                right_preview = right;
+            }
         }
         if (publish_left_raw) {
-            left_preview_pub_->publish(
-                *cv_bridge::CvImage(header, "bgr8", left_preview).toImageMsg());
+            left_preview_pub_->publish(*imageMessage(header, "bgr8", left_preview));
         }
         if (publish_right_raw) {
-            right_preview_pub_->publish(
-                *cv_bridge::CvImage(header, "bgr8", right_preview).toImageMsg());
+            right_preview_pub_->publish(*imageMessage(header, "bgr8", right_preview));
         }
 
         if (publish_left_compressed || publish_right_compressed) {
@@ -513,6 +554,14 @@ private:
 private:
 
     StereoCamera camera_;
+
+    StereoCameraConfig camera_config_;
+
+    bool camera_ready_{false};
+    int consecutive_grab_failures_{0};
+    int reconnect_after_failures_{3};
+    double reconnect_interval_seconds_{2.0};
+    std::chrono::steady_clock::time_point last_reconnect_attempt_{};
 
 
     rclcpp::Publisher<

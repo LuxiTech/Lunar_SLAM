@@ -2,6 +2,7 @@
 
 import os
 import re
+from pathlib import Path
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
@@ -10,7 +11,18 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 
 
-MAPS_DIRECTORY = "/home/lunar/project/lunar_slam/maps/rtab_maps"
+def _workspace_root() -> Path:
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    for start in (Path(__file__).resolve(), Path.cwd().resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / "project").is_dir() and (candidate / "maps").is_dir():
+                return candidate
+    raise RuntimeError("Cannot locate lunar_slam; set LUXI_WORKSPACE_ROOT")
+
+
+MAPS_DIRECTORY = str(_workspace_root() / "maps" / "rtab_maps")
 
 
 def _resolve_database_path(context: object) -> list[LogInfo]:

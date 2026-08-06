@@ -34,7 +34,7 @@ web_control:
     navigation_launch_package: luxi_3d_navigation
     navigation_launch_file: saved_map_navigation.launch.py
     navigation_rmw_implementation: rmw_cyclonedds_cpp
-    maps_root: /home/lunar/project/lunar_slam/maps
+    maps_root: ""
     # Selecting a database without exported layers runs tools/export_rtabmap_octomap.sh.
     # The database must already be saved; this limits the one-shot export duration.
     map_conversion_timeout: 300.0
@@ -62,4 +62,4 @@ web_control:
     # Zero loads every valid vertex from the selected saved PLY.
     max_saved_cloud_points: 0
     semantic_annotation_timeout: 15.0
-    semantic_maps_root: /home/lunar/project/lunar_slam/maps/semantic_maps
+    semantic_maps_root: ""

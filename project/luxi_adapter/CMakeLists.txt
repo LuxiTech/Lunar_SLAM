@@ -7,14 +7,17 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(rtabmap_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
-add_library(${PROJECT_NAME}_core src/sensor_adapter.cpp)
+add_library(${PROJECT_NAME}_core SHARED src/sensor_adapter.cpp)
 target_compile_features(${PROJECT_NAME}_core PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-ament_target_dependencies(${PROJECT_NAME}_core rclcpp sensor_msgs)
+ament_target_dependencies(${PROJECT_NAME}_core rclcpp rclcpp_components rtabmap_msgs sensor_msgs)
+rclcpp_components_register_nodes(${PROJECT_NAME}_core "luxi_adapter::SensorAdapter")
 
 add_executable(sensor_adapter_node src/sensor_adapter_main.cpp)
 target_link_libraries(sensor_adapter_node ${PROJECT_NAME}_core)
@@ -28,11 +31,13 @@ install(DIRECTORY config launch docs DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   ament_add_gtest(test_sensor_adapter test/test_sensor_adapter.cpp)
   if(TARGET test_sensor_adapter)
     target_link_libraries(test_sensor_adapter ${PROJECT_NAME}_core)
-    ament_target_dependencies(test_sensor_adapter rclcpp sensor_msgs)
+    ament_target_dependencies(test_sensor_adapter rclcpp rtabmap_msgs sensor_msgs)
   endif()
+  ament_add_pytest_test(test_sensor_bringup_launch test/test_sensor_bringup_launch.py)
 endif()
 
 ament_package()
