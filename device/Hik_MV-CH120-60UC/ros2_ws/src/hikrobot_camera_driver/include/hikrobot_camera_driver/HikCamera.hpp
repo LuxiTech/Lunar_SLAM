@@ -77,7 +77,8 @@ public:
         cv::Mat& image,
         uint64_t& device_timestamp,
         int64_t& host_timestamp,
-        uint32_t& frame_number
+        uint32_t& frame_number,
+        bool grayscale_output = false
     );
 
     // =====================

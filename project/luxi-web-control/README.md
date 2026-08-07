@@ -5,114 +5,121 @@
 rosbridge、前端框架或厂商 SDK。它还可管理本项目 RTAB-Map 建图 launch 的启动和
 停止，方便在同一网页中完成“开始建图 → 遥控采集 → 停止保存”。
 
-## 安全行为
 
-- 服务端限制最大线速度和角速度，浏览器不能绕过限制。
-- 浏览器拖动虚拟摇杆时以 10 Hz 刷新目标；节点以 20 Hz 发布。
-- 超过 `command_timeout`（默认 0.6 秒）未收到运动目标即发布零速度。
-- 松开按键、窗口失焦、切换页面、点击停止或急停都会发送零速度。
-- 软件急停是粘滞的；解除急停后仍保持停止，必须重新拖动摇杆才会运动。
-- 节点退出时连续发布三次零速度。
+## 设备无关的启动结构
 
-软件急停不能代替实体急停。首次联调应架空驱动轮或在开阔区域使用低速参数。
+系统分成两层，切换相机只发生在第一层：
 
-## 完整启动流程（D435i + LeKiwi + 网页）
+```text
+HIK 双目 + H30 IMU ─┐
+                    ├─ luxi_adapter ─ /sensors/* ─ luxi_visual_frontend
+D435i RGB-D + IMU ──┘                                  └─ luxi_rtab_map
+                                                               └─ Web/RViz
+```
 
-首次构建在工作区根目录执行一次：
+HIK 和 D435i 必须输出同一组算法接口。网页、视觉前端和 RTAB 后端不读取厂商话题，也
+不再默认加载 D435i 的安装目录：
+
+- `/sensors/rgbd/rgbd_image`：原子 RGB-D 包，供视觉前端使用；
+- `/sensors/rgbd/color/image_raw`、`/sensors/rgbd/depth/image_raw`；
+- `/sensors/rgbd/color/camera_info`；
+- `/sensors/rgbd/color/image_raw/compressed`：网页 RGB 预览；
+- `/sensors/imu/data_raw`、`/sensors/imu/data`。
+
+不要同时手工启动 HIK/D435i 厂商驱动、`hik_mapping.launch.py` 或另一套
+`sensor_bringup.launch.py`，否则会重复占用相机或重复发布 TF/话题。
+
+## 首次构建
 
 ```bash
-cd /home/lunar/project/lunar_slam
+cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
-sudo apt-get install ros-humble-rtabmap-launch
 colcon build --packages-select \
-  luxi_adapter luxi_location luxi_rtab_map luxi_semantic_annotation \
-  luxi_voxel_navigation luxi_3d_navigation luxi_web_control \
+  hikrobot_camera_driver hik_bringup stereo_depth \
+  luxi_adapter luxi_visual_frontend luxi_rtab_map \
+  luxi_location luxi_semantic_annotation luxi_voxel_navigation \
+  luxi_3d_navigation luxi_web_control \
   --symlink-install
 ```
 
-随后按下列顺序使用两个终端。网页遥控本身只需终端二；要使用网页 RGB 预览、建图或
-基于相机的地图定位，必须先保持终端一的硬件 profile 运行。
+## 完整启动流程（当前测试设备：HIK）
 
-### 终端一：启动唯一硬件 profile
+按顺序保持两个终端运行。终端一只负责选定的硬件及适配层；终端二负责网页、底盘以及
+由网页启动/停止的设备无关建图进程。
 
-当前默认 profile 是 D435i，选择、话题名和驱动工作区均由
-`luxi_adapter/config/sensor_bringup.yaml` 管理。不要再手工启动
-`lunar_realsense_bringup`，否则会与适配层重复占用同一相机。
+### 终端一：选择并启动硬件
 
-```bash
-cd /home/lunar/project/lunar_slam
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch luxi_adapter sensor_bringup.launch.py
-```
-
-第一次插入或热插拔 D435i 后，驱动可能需要数十秒重新枚举。保持此终端运行，确认已
-出现 `RealSense Node Is Up!`；网页建图会最多等待 60 秒，以等待统一传感器数据。
-
-可在另一个终端确认适配层已准备好：
+HIK 双目 + H30 IMU（当前推荐测试命令）：
 
 ```bash
+cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
+export ROS_DOMAIN_ID=0
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ros2 topic echo --once /sensors/rgbd/color/image_raw
-ros2 topic echo --once /sensors/rgbd/depth/image_raw
-ros2 topic echo --once /sensors/imu/data
+ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 ```
 
-### 终端二：启动网页与底盘控制
+该 profile 启动双目采集、H30、1024×750 深度计算和 `luxi_adapter`。默认
+`external_trigger:=true`，应保证相机触发线和触发源工作；仅做无外触发台架检查时才显式
+传入 `external_trigger:=false`。
+
+D435i 使用完全相同的入口，只替换一个参数：
 
 ```bash
-cd /home/lunar/project/lunar_slam
+cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
+export ROS_DOMAIN_ID=0
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
+```
 
+不传 `hardware` 时为 `auto`，会读取
+`project/luxi_adapter/config/sensor_bringup.yaml`，当前该默认配置选择 D435i。为了让现场
+操作明确且不受默认值变化影响，建议始终写出 `hardware:=hik` 或 `hardware:=d435i`。
+
+
+
+### 终端二：启动网页
+
+连接 LeKiwi 底盘时使用：
+
+```bash
+cd /home/nvidia/Desktop/lunar_slam
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 ros2 launch luxi_web_control lekiwi_web_control.launch.py \
   bind_address:=0.0.0.0 http_port:=8080
 ```
 
-查看主机局域网地址：
+只在本机测试网页、无需 LeKiwi DDS 设置时可使用：
 
 ```bash
-hostname -I
+ros2 launch luxi_web_control web_control.launch.py \
+  bind_address:=127.0.0.1 http_port:=8080
 ```
 
-启动日志会列出当前设备可访问的局域网 URL。同一局域网内的手机或电脑打开其中
-与自己同网段的地址，例如 `http://192.168.123.66:8080`。页面使用虚拟摇杆控制：
-上下对应前进/后退，左右对应左转/右转，松手自动回中停车；同时保留 W/A/S/D 和
-方向键，空格键触发急停。
+用 `hostname -I` 查看主机地址；同一局域网浏览器打开日志列出的地址，例如
+`http://192.168.123.66:8080`。网页启动后应先看到 HIK RGB 预览，再点击“开始建图”。
+状态变为“建图中”后，页面点云窗口应出现 `/rtabmap/cloud_map` 的抽样彩色点云。采集
+结束必须点击“停止建图”，等待 RTAB 正常保存数据库后再关闭终端。
 
-网页功能与前置条件：
-
-| 网页功能 | 需要先启动的内容 |
+| 网页功能 | 前置条件 |
 |---|---|
-| 遥控、急停 | 终端二；底盘在线且订阅 `/cmd_vel` |
-| RGB 预览 | 终端一的 `luxi_adapter` profile |
-| 开始建图、停止保存 | 终端一与终端二；由网页启动 RTAB-Map 算法 |
-| 加载已有地图、显示 OctoMap | 终端二；选择已保存的 `.db` 后网页会自动调用 `tools/export_rtabmap_octomap.sh` 生成彩色 PLY 与 `.bt`，再加载显示 |
-| 离线标注岩石、墙、坑 | 终端二与已有 `.bt`；不需要启动相机或定位 |
-| RTAB-Map 粗定位、ICP 精定位、选择目标点 | 终端一、终端二与已保存的 `.db`、彩色 PLY、`.bt` |
+| 遥控、急停 | 网页运行；底盘订阅 `/cmd_vel` |
+| RGB 预览 | 任一硬件 profile 正常发布统一压缩 RGB |
+| 开始建图、停止保存 | 硬件 profile 与网页运行；同步门禁通过 |
+| 实时点云预览 | 建图运行且 `/rtabmap/cloud_map` 已发布 |
+| 加载/标注已有地图 | 网页运行且已有 `.db`；不要求相机在线 |
+| 地图定位、选择导航目标 | 硬件、网页及已导出的地图层均可用 |
 
-关闭时先在网页点击“停止建图”（若正在建图），再在两个终端分别按 `Ctrl-C`；网页不
-会自动停止硬件 profile。
+关闭顺序：网页“停止建图” → 等待状态停止 → 终端二 `Ctrl-C` → 终端一 `Ctrl-C`。
+网页只管理自己启动的算法进程，不会停止硬件 profile。
 
-也可以直接运行节点并覆盖安全参数：
-
-```bash
-ros2 run luxi_web_control web_control_node --ros-args \
-  -p max_linear_x:=0.10 \
-  -p max_angular_z:=0.35 \
-  -p command_timeout:=0.6
-```
-
-修改参数后若再次出现 `Package 'luxi_web_control' not found`，通常是当前终端没有
-加载工作区。重新执行 `source /home/lunar/project/lunar_slam/install/setup.bash`。
-
-如果提示 `Address already in use`，说明已有网页控制服务正在使用该端口。当前服务可
-直接通过浏览器访问，无需再次启动。默认 `auto_stop_existing_web_control:=true` 时，
-新实例会自动向同一用户、同一 `luxi_web_control` 网页节点发送 `SIGINT`，等待其发送
-零速度并释放端口后再启动。它不会停止其他程序占用的端口。需要两个独立实例时，使用
-其他端口，例如 `http_port:=8081`。
+若提示 `Address already in use`，先访问现有 8080 服务；也可改用
+`http_port:=8081`。若提示 `Package 'luxi_web_control' not found`，重新执行
+`source /home/nvidia/Desktop/lunar_slam/install/setup.bash`。
 
 ## 与不同小车连接
 
@@ -166,15 +173,8 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 ## 网页控制 RTAB-Map 建图
 
 网页中的“开始建图”只管理算法建图进程，**不会启动或关闭相机硬件**。因此必须先按
-“终端一”启动唯一选定的 `luxi_adapter` profile，再按“终端二”启动网页。D435i 的
-完整硬件启动命令为：
-
-```bash
-cd /home/lunar/project/lunar_slam
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch luxi_adapter sensor_bringup.launch.py
-```
+“终端一”启动唯一选定的 `luxi_adapter` profile，再按“终端二”启动网页。硬件型号不
+会改变这里使用的算法 launch。
 
 打开网页后按以下顺序操作：
 
@@ -191,12 +191,16 @@ ros2 launch luxi_adapter sensor_bringup.launch.py
 成功启动并收到 RTAB-Map 地图数据后才会出现。点云为浏览器实时查看而抽样的最多
 1800 个点，并不是完整地图导出；其显示采用固定等轴视角，适合确认重建是否持续更新。
 
-每一次新建图默认写入 `/home/lunar/project/lunar_slam/maps/rtab_maps/mapNNN.db`。如果启动失败，
+每一次新建图默认写入 `/home/nvidia/Desktop/lunar_slam/maps/rtab_maps/mapNNN.db`。如果启动失败，
 网页会显示失败状态；详细日志位于
-`/home/lunar/project/lunar_slam/log/luxi_web_control_rtabmap.log`。常见原因是硬件
+`/home/nvidia/Desktop/lunar_slam/log/luxi_web_control_rtabmap.log`。常见原因是硬件
 profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 
 网页只停止它自己启动的 RTAB-Map 进程，不会停止手工终端中已经运行的建图任务。
+启动前还会检查 ROS 图中的 `/luxi_visual_frontend` 和 `/rtabmap/rtabmap`。如果终端已
+经启动建图，网页会返回冲突并拒绝创建第二套学习前端和 RTAB-Map；此时应继续使用终端
+中的任务，或者先正常结束它，再从网页启动。该保护用于防止 GPU 瞬时满载、CPU 翻倍、
+重复 TF 发布和额外内存占用。
 
 网页还会列出 `maps/rtab_maps/mapNNN.db`。选择地图后，网页会自动调用
 `tools/export_rtabmap_octomap.sh` 补齐彩色 PLY 和 `.bt`，并在缺失时调用
@@ -275,13 +279,14 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `enable_mapping_control` | `true` | 是否显示并允许 RTAB-Map 建图开关 |
 | `mapping_launch_package` | `luxi_rtab_map` | 被网页管理的建图 ROS 包 |
 | `mapping_launch_file` | `rgbd_mapping_learned.launch.py` | 被网页管理的学习型前端建图 launch 文件 |
+| `mapping_sensor_setup` | 空 | 可选的额外设备环境；统一工作区构建时保持为空 |
 | `auto_build_hloc_index` | `true` | 加载地图时是否自动构建缺失的 GPU HLoc 索引 |
 | `hloc_index_build_timeout` | `900.0` | HLoc 导出和单个模型构建步骤的超时秒数 |
 | `enable_preview` | `true` | 是否订阅并提供 RGB、稀疏点云预览 |
 | `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `1800` | 单次浏览器点云预览的最大抽样点数 |
-| `max_saved_cloud_points` | `0` | 保存 PLY 的显示点数上限；0 表示显示全部有效点 |
+| `max_saved_cloud_points` | `30000` | 浏览器 Canvas 的保存点云显示上限；只限制预览，不改变 PLY、OctoMap 或定位精度 |
 | `semantic_annotation_timeout` | `15.0` | 单次标注检查或保存的超时秒数 |
 | `semantic_maps_root` | `maps/semantic_maps` | 独立语义标注输出目录 |
 | `navigation_localization_pose_topic` | `/luxi_hloc/coarse_pose` | HLoc 粗定位输入 |

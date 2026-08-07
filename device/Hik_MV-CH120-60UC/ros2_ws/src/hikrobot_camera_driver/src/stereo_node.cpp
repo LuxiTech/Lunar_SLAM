@@ -45,14 +45,17 @@ sensor_msgs::msg::Image::UniquePtr imageMessage(
 
 }  // namespace
 
+namespace hikrobot_camera_driver
+{
+
 class StereoCameraNode : public rclcpp::Node
 {
 
 public:
 
-    StereoCameraNode()
+    explicit StereoCameraNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
     :
-    Node("stereo_node")
+    Node("stereo_node", options)
     {
 
         const std::string package_share =
@@ -298,7 +301,8 @@ private:
 
 
         auto left_msg = imageMessage(std_msgs::msg::Header(), "bgr8", left);
-        auto right_msg = imageMessage(std_msgs::msg::Header(), "bgr8", right);
+        const std::string right_encoding = right.channels() == 1 ? "mono8" : "bgr8";
+        auto right_msg = imageMessage(std_msgs::msg::Header(), right_encoding, right);
 
         left_msg->header.stamp = stamp;
         left_msg->header.frame_id = "left_camera_optical_frame";
@@ -314,20 +318,15 @@ private:
         scaleCameraInfoToImage("right", right_info, right.cols, right.rows);
         right_info.header = right_msg->header;
 
+        const auto left_header = left_msg->header;
 
-
-        left_pub_->publish(
-            *left_msg
-        );
+        left_pub_->publish(std::move(left_msg));
 
         left_info_pub_->publish(
             left_info
         );
 
-
-        right_pub_->publish(
-            *right_msg
-        );
+        right_pub_->publish(std::move(right_msg));
 
         right_info_pub_->publish(
             right_info
@@ -340,14 +339,18 @@ private:
             cv::Mat right_gray;
             cv::Mat stereo_pair;
             cv::cvtColor(left, left_gray, cv::COLOR_BGR2GRAY);
-            cv::cvtColor(right, right_gray, cv::COLOR_BGR2GRAY);
+            if (right.channels() == 1) {
+                right_gray = right;
+            } else {
+                cv::cvtColor(right, right_gray, cv::COLOR_BGR2GRAY);
+            }
             cv::hconcat(left_gray, right_gray, stereo_pair);
             auto pair_msg = imageMessage(std_msgs::msg::Header(), "mono8", stereo_pair);
             pair_msg->header.stamp = stamp;
             pair_msg->header.frame_id = "left_camera_optical_frame";
             stereo_pair_pub_->publish(*pair_msg);
         }
-        publishRvizPreviews(left, right, left_msg->header);
+        publishRvizPreviews(left, right, left_header);
 
     }
 
@@ -392,7 +395,8 @@ private:
             left_preview_pub_->publish(*imageMessage(header, "bgr8", left_preview));
         }
         if (publish_right_raw) {
-            right_preview_pub_->publish(*imageMessage(header, "bgr8", right_preview));
+            right_preview_pub_->publish(*imageMessage(
+                header, right_preview.channels() == 1 ? "mono8" : "bgr8", right_preview));
         }
 
         if (publish_left_compressed || publish_right_compressed) {
@@ -411,7 +415,8 @@ private:
                 cv::imencode(".jpg", right_preview, right_jpeg, jpeg_parameters);
                 auto right_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
                 right_compressed->header = header;
-                right_compressed->format = "bgr8; jpeg compressed bgr8";
+                right_compressed->format = right_preview.channels() == 1 ?
+                    "mono8; jpeg compressed mono8" : "bgr8; jpeg compressed bgr8";
                 right_compressed->data = std::move(right_jpeg);
                 right_preview_compressed_pub_->publish(std::move(right_compressed));
             }
@@ -613,8 +618,12 @@ private:
 
 };
 
+}  // namespace hikrobot_camera_driver
 
-
+#ifdef HIK_STEREO_COMPONENT_BUILD
+#include "rclcpp_components/register_node_macro.hpp"
+RCLCPP_COMPONENTS_REGISTER_NODE(hikrobot_camera_driver::StereoCameraNode)
+#else
 int main(
     int argc,
     char **argv
@@ -628,7 +637,7 @@ int main(
 
 
     auto node =
-    std::make_shared<StereoCameraNode>();
+    std::make_shared<hikrobot_camera_driver::StereoCameraNode>();
 
 
     rclcpp::spin(node);
@@ -639,3 +648,4 @@ int main(
 
     return 0;
 }
+#endif

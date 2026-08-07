@@ -19,6 +19,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
 
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -73,27 +74,28 @@ get_filename_component(MVS_LIBRARY_DIR "${MVS_CAMERA_CONTROL_LIBRARY}" DIRECTORY
 # Stereo Camera Node
 # ==========================
 
-add_executable(
-    stereo_node
-
+set(STEREO_NODE_SOURCES
     src/stereo_node.cpp
     src/HikCamera.cpp
     src/StereoCamera.cpp
     src/CameraConfig.cpp
 )
+add_executable(stereo_node ${STEREO_NODE_SOURCES})
+add_library(stereo_camera_component SHARED ${STEREO_NODE_SOURCES})
+target_compile_definitions(stereo_camera_component PRIVATE HIK_STEREO_COMPONENT_BUILD)
 
 # ==========================
 # Include
 # ==========================
 
-target_include_directories(
-    stereo_node
-    PRIVATE
-
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${MVS_INCLUDE_DIR}
-    ${OpenCV_INCLUDE_DIRS}
-)
+foreach(stereo_camera_target stereo_node stereo_camera_component)
+    target_include_directories(
+        ${stereo_camera_target}
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${MVS_INCLUDE_DIR}
+        ${OpenCV_INCLUDE_DIRS}
+    )
 
 
 
@@ -101,43 +103,46 @@ target_include_directories(
 # Link
 # ==========================
 
-target_link_libraries(
-    stereo_node
+    target_link_libraries(
+        ${stereo_camera_target}
+        ${MVS_CAMERA_CONTROL_LIBRARY}
+        ${OpenCV_LIBRARIES}
+        rclcpp::rclcpp
+        ament_index_cpp::ament_index_cpp
+        PkgConfig::TINYXML2
+        camera_info_manager::camera_info_manager
+        pthread
+    )
 
-    # Hikrobot SDK
-    ${MVS_CAMERA_CONTROL_LIBRARY}
+    ament_target_dependencies(${stereo_camera_target}
+        rclcpp
+        rclcpp_components
+        sensor_msgs
+        std_msgs
+        ament_index_cpp
+        camera_info_manager)
 
+    set_target_properties(${stereo_camera_target} PROPERTIES
+        BUILD_RPATH "${MVS_LIBRARY_DIR}"
+        INSTALL_RPATH "${MVS_LIBRARY_DIR}")
+endforeach()
 
-    # OpenCV
-    ${OpenCV_LIBRARIES}
+rclcpp_components_register_nodes(
+    stereo_camera_component "hikrobot_camera_driver::StereoCameraNode")
 
-
-    # ROS2
-    rclcpp::rclcpp
-
-    ament_index_cpp::ament_index_cpp
-    PkgConfig::TINYXML2
-    camera_info_manager::camera_info_manager
-
-
-    pthread
-)
-
-ament_target_dependencies(stereo_node
-    rclcpp
-    sensor_msgs
-    std_msgs
-    ament_index_cpp
-    camera_info_manager)
+if(BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(test_bayer_conversion test/test_bayer_conversion.cpp)
+    target_include_directories(test_bayer_conversion PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${MVS_INCLUDE_DIR}
+        ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(test_bayer_conversion ${OpenCV_LIBRARIES})
+endif()
 
 # The MVS control library dlopens companion libraries from the same SDK
 # directory.  Keep this path on the executable so a normal ROS launch does
 # not depend on a globally exported LD_LIBRARY_PATH.
-set_target_properties(stereo_node PROPERTIES
-    BUILD_RPATH "${MVS_LIBRARY_DIR}"
-    INSTALL_RPATH "${MVS_LIBRARY_DIR}")
-
-
 # ==========================
 # Install
 # ==========================
@@ -146,8 +151,11 @@ install(
     TARGETS
 
     stereo_node
+    stereo_camera_component
 
-    DESTINATION lib/${PROJECT_NAME}
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
 

@@ -2,11 +2,23 @@ luxi_visual_frontend:
   ros__parameters:
     device: cuda
     resize_max: 800
-    max_keypoints: 2048
-    nms_radius: 3
+    max_keypoints: 1024
+    nms_radius: 4
     lightglue_depth_confidence: 0.90
     lightglue_width_confidence: 0.95
+    lightglue_mixed_precision: true
     cpu_threads: 4
+    # Use a shape-matched TensorRT engine when present, otherwise retain the
+    # original PyTorch path. INT8 is not selected without a separate quality gate.
+    superpoint_backend: auto
+    superpoint_engine_directory: ""
+    superpoint_precision: fp16
+    # Preserve model quality while reducing repeated CUDA kernel launches.
+    # Frames above 512 points automatically retain the original eager path.
+    superpoint_cuda_graph: true
+    lightglue_cuda_graph: true
+    lightglue_cuda_graph_keypoints: 512
+    lightglue_cuda_graph_layers: 3
 
     color_topic: /sensors/rgbd/color/image_raw
     depth_topic: /sensors/rgbd/depth/image_raw
@@ -16,10 +28,21 @@ luxi_visual_frontend:
     rgbd_features_topic: /luxi_visual_frontend/rgbd_image
     status_topic: /luxi_visual_frontend/status
     diagnostics_topic: /luxi_visual_frontend/diagnostics
+    imu_topic: /sensors/imu/data
     odom_frame: odom
     base_frame: base_link
+    use_imu_rotation: true
+    # Hardware profiles override this with their calibrated t_imu-t_camera.
+    camera_to_imu_time_offset: 0.0
+    maximum_imu_time_difference: 0.03
 
-    target_rate: 10.0
+    # HIK stereo already occupies about 56% of GR3D. Five learned-odometry
+    # updates per second keep total GPU duty in the 30-60% target range while
+    # retaining margin over RTAB-Map's 1 Hz mapping rate.
+    target_rate: 5.0
+    # RTAB-Map consumes one keyframe candidate per second. Keep odometry at
+    # 5 Hz, but avoid sending redundant full-resolution RGB-D descriptors.
+    rgbd_features_rate: 1.0
     maximum_sensor_time_difference: 0.05
     transform_timeout: 0.5
     depth_scale_16u: 0.001
@@ -42,5 +65,13 @@ luxi_visual_frontend:
     keyframe_min_rotation_deg: 8.0
     keyframe_max_age: 1.0
     keyframe_min_inlier_ratio: 0.40
-    maximum_frame_translation: 1.0
-    maximum_frame_rotation_deg: 60.0
+    maximum_frame_translation: 0.25
+    maximum_frame_rotation_deg: 45.0
+    # A fast turn can invalidate the old keyframe. Reseed locally after three
+    # rejected updates so RTAB-Map is not starved indefinitely.
+    maximum_consecutive_tracking_failures: 3
+    # When AHRS rotation is available, estimate translation from depth on both
+    # frames. This removes rotation/translation coupling during in-place turns.
+    minimum_depth_consistency_matches: 20
+    maximum_depth_consistency_error: 0.08
+    maximum_imu_rotation_error_deg: 12.0

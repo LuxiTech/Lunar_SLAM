@@ -1267,7 +1267,7 @@ function updateMapping(mapping) {
   } else if (!mapping.enabled) {
     mappingDetail.textContent = "当前节点未启用建图控制。";
   } else {
-    mappingDetail.textContent = "开始前请确认 D435i 相机驱动已经运行。";
+    mappingDetail.textContent = "开始前请确认 luxi_adapter 硬件 profile 已运行。";
   }
 }
 
@@ -1350,7 +1350,7 @@ function drawCloud(points) {
   context.fillRect(0, 0, width, height);
   if (!points.length) return;
 
-  const previewView = {yaw: Math.PI / 2, pitch: 0.42, zoom: 1};
+  const previewView = {yaw: Math.PI / 2, pitch: 1.05, zoom: 1};
   const projected = points.map(([x, y, z, red, green, blue]) => {
     const result = mapProjection.projectMapPoint(
       [x, y, z],

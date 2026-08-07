@@ -19,6 +19,15 @@ class SequenceBackend:
         return np.arange(len(first.keypoints), dtype=np.int64)
 
 
+class MatchSequenceBackend(SequenceBackend):
+    def __init__(self, features, matches):
+        super().__init__(features)
+        self.matches = iter(matches)
+
+    def match(self, _first, _second):
+        return next(self.matches)
+
+
 def _features(keypoints):
     count = len(keypoints)
     descriptors = np.zeros((count, 256), dtype=np.float32)
@@ -96,3 +105,95 @@ def test_tracker_does_not_initialize_with_too_few_features():
     )
     assert not result.accepted
     assert result.reason == "KEYPOINTS_LOW"
+
+
+def test_tracker_reseeds_keyframe_after_consecutive_match_failures():
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
+    )
+    features = [_features(pixels) for _ in range(4)]
+    no_matches = np.full(len(pixels), -1, dtype=np.int64)
+    all_matches = np.arange(len(pixels), dtype=np.int64)
+    tracker = VisualOdometryTracker(
+        MatchSequenceBackend(features, [no_matches, no_matches, all_matches]),
+        TrackerConfig(
+            minimum_keypoints=8,
+            minimum_matches=8,
+            minimum_depth_matches=8,
+            minimum_inliers=6,
+            minimum_grid_coverage=0.0,
+            maximum_consecutive_tracking_failures=2,
+        ),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    initialized = tracker.process(rgb, depth, intrinsics, 0.001, 1.0)
+    first_failure = tracker.process(rgb, depth, intrinsics, 0.001, 1.1)
+    reseeded = tracker.process(rgb, depth, intrinsics, 0.001, 1.2)
+    recovered = tracker.process(rgb, depth, intrinsics, 0.001, 1.3)
+
+    assert initialized.accepted
+    assert not first_failure.accepted and not first_failure.keyframe_updated
+    assert not reseeded.accepted and reseeded.keyframe_updated
+    assert reseeded.reason == "MATCHES_LOW_KEYFRAME_RESEEDED"
+    assert recovered.accepted
+
+
+def test_tracker_preserves_imu_rotation_when_reseeding_keyframe():
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
+    )
+    features = [_features(pixels) for _ in range(4)]
+    no_matches = np.full(len(pixels), -1, dtype=np.int64)
+    all_matches = np.arange(len(pixels), dtype=np.int64)
+    tracker = VisualOdometryTracker(
+        MatchSequenceBackend(features, [no_matches, no_matches, all_matches]),
+        TrackerConfig(
+            minimum_keypoints=8,
+            minimum_matches=8,
+            minimum_depth_matches=8,
+            minimum_inliers=6,
+            minimum_grid_coverage=0.0,
+            minimum_depth_consistency_matches=6,
+            maximum_consecutive_tracking_failures=2,
+        ),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    rotation_20deg, _ = cv2.Rodrigues(np.array([0.0, 0.0, np.deg2rad(20.0)]))
+
+    initialized = tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.0,
+        world_from_camera_rotation=np.eye(3),
+    )
+    first_failure = tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.1,
+        world_from_camera_rotation=rotation_20deg,
+    )
+    reseeded = tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.2,
+        world_from_camera_rotation=rotation_20deg,
+    )
+    recovered = tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.3,
+        world_from_camera_rotation=rotation_20deg,
+    )
+
+    assert initialized.accepted
+    assert not first_failure.accepted
+    assert not reseeded.accepted and reseeded.keyframe_updated
+    np.testing.assert_allclose(
+        reseeded.odom_from_camera[:3, :3], rotation_20deg, atol=1e-6
+    )
+    assert recovered.accepted
+    np.testing.assert_allclose(
+        recovered.odom_from_camera[:3, :3], rotation_20deg, atol=1e-6
+    )
+    np.testing.assert_allclose(recovered.odom_from_camera[:3, 3], 0.0, atol=1e-6)

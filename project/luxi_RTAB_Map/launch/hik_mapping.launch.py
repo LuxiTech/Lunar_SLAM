@@ -39,6 +39,14 @@ def generate_launch_description():
             "load_saved_map": LaunchConfiguration("load_saved_map"),
             "camera_wait_timeout": LaunchConfiguration("camera_wait_timeout"),
             "wait_for_camera": "true",
+            # Keep the complete 0.35-6.0 m HIK depth stream available to the
+            # adapter and RViz, but exclude the noisier long-range tail from
+            # odometry/map clouds and reject sparse ray-like outliers.
+            "mapping_depth_min": "0.35",
+            "mapping_depth_max": "3.5",
+            "camera_to_imu_time_offset": "-0.03776861601888945",
+            "grid_noise_filtering_radius": "0.08",
+            "grid_noise_filtering_min_neighbors": "8",
         }.items(),
     )
 

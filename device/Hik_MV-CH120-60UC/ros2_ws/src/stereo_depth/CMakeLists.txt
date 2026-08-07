@@ -33,6 +33,7 @@ add_executable(rgb_cloud_accumulator_node src/rgb_cloud_accumulator_node.cpp)
 
 foreach(stereo_depth_target stereo_depth_node stereo_depth_component)
   target_include_directories(${stereo_depth_target} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${OpenCV_INCLUDE_DIRS}
   )
   target_link_libraries(${stereo_depth_target}
@@ -57,6 +58,16 @@ foreach(stereo_depth_target stereo_depth_node stereo_depth_component)
   )
 endforeach()
 rclcpp_components_register_nodes(stereo_depth_component "StereoDepthNode")
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_rectification_utils test/test_rectification_utils.cpp)
+  target_include_directories(test_rectification_utils PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_rectification_utils ${OpenCV_LIBRARIES})
+endif()
 
 target_include_directories(rgb_cloud_accumulator_node PRIVATE
 )

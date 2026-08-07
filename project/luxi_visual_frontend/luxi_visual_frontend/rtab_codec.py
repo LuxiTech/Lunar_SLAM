@@ -28,7 +28,9 @@ def compress_descriptor_matrix(descriptors: np.ndarray) -> bytes:
         int(continuous.shape[1]),
         _OPENCV_TYPES[continuous.dtype],
     )
-    return zlib.compress(continuous.tobytes(order="C")) + header
+    # Level 1 preserves the exact descriptor bytes while avoiding expensive
+    # default-level compression on every RTAB feature publication.
+    return zlib.compress(continuous.tobytes(order="C"), level=1) + header
 
 
 def decode_descriptor_matrix(payload: bytes) -> np.ndarray:

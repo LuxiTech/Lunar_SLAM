@@ -16,26 +16,37 @@ stereo_depth_node:
     depth_backend: vpi_ofa_pva_vic
     vpi_fallback_to_sgbm: true
     # The current calibration has positive P[3] on cam1, so valid disparities
-    # are right-minus-left. VPI CUDA-SGM searches positive disparity only.
-    # The node remaps its result back onto the normal left-camera image grid.
-    matcher_input_order: right_left
-    # Measured on the current mechanically changed rig after rectification:
-    # shift the right image down by 2 px to reduce vertical residual from
-    # 2.46 px to 0.58 px. Recalibrate if this mechanical assembly changes.
-    right_rectification_y_offset_px: 2.0
-    # VPI returns Q10.5 disparity. The OFA+PVA+VIC path uses its neural
-    # confidence stage; 3 eSGM passes preserve thin edges and low-texture detail.
-    # Reject low-confidence matches before CPU post-filtering. This
-    # removes the dark/low-texture speckle that made the old grey depth preview
-    # hard to interpret, while keeping a dense indoor map.
-    vpi_confidence_threshold: 16384
+    # are right-minus-left. Mirror both images before VPI so it can search
+    # positive disparity while still producing depth directly on the left
+    # image grid. This avoids holes from right-to-left forward remapping.
+    matcher_input_order: left_right_flipped
+    # Re-measured on 2026-08-06 after rectification. A constant vertical shift
+    # alone left about 3.6 px of edge-to-edge epipolar slope. Correct the
+    # measured relative roll in the rectification rotation itself, without a
+    # second image interpolation. The remaining measured slope is <0.5 px over
+    # the full 1024 px image width.
+    right_rectification_y_offset_px: 5.58
+    right_rectification_roll_deg: -0.1785
+    # VPI returns Q10.5 disparity. Reject low-confidence matches before CPU
+    # post-filtering to suppress low-texture speckle in the map.
+    # Low-texture walls can otherwise be filled with confident-looking but
+    # geometrically inconsistent disparity. Prefer plane quality over an
+    # inflated valid-pixel percentage.
+    # Absolute confidence performs a hardware left/right disparity consistency
+    # check. This is more conservative than the CNN score on blank painted
+    # walls, where visually plausible but false matches caused radial rays.
+    vpi_confidence_type: absolute
+    # Reject low-texture correspondences unless the hardware left/right check
+    # agrees closely. 64500 removed the long wall rays in the measured scene
+    # while retaining enough structured depth for learned RGB-D odometry.
+    vpi_confidence_threshold: 64500
     vpi_p1: 8
     vpi_p2: 81
     vpi_uniqueness: -1.0
-    vpi_ofa_window_size: 5
-    # One OFA eSGM pass keeps the calibrated 1024x750 depth stream at the
-    # 10 Hz camera rate on Orin NX. Two passes were measured at only ~6.5 Hz.
-    vpi_ofa_num_passes: 1
+    vpi_ofa_window_size: 7
+    # Two directional aggregation passes balance low-texture wall quality with
+    # the 10 Hz hardware input rate on Orin NX.
+    vpi_ofa_num_passes: 2
     vpi_ofa_apply_cpu_postfilters: false
 
     # OpenCV SGBM parameters (used only when depth_backend: sgbm, or if VPI
@@ -66,12 +77,20 @@ stereo_depth_node:
     processing_scale: 1.0
     # The GPU-SGM full-resolution pipeline follows the 10 Hz hardware trigger.
     max_processing_fps: 0.0
-    # Rectification and post-filters remain on CPU. Use all Orin NX CPU cores;
-    # this changes scheduling only and leaves interpolation/results unchanged.
-    opencv_num_threads: 8
+    # Keep OpenCV below the camera/depth executor's core count. Three workers
+    # retain parallel rectification while avoiding eight-core bursts that
+    # starve capture, DDS and the web process on Orin NX.
+    # Three workers are the measured minimum needed to sustain the 10 Hz
+    # 1024x750 rectification path; one worker falls to about 7.7 Hz.
+    opencv_num_threads: 3
     # Publish a coloured depth view for every computed depth frame. It is
     # intentionally separate from the 10 Hz camera-only RViz previews.
-    preview_publish_every_n_frames: 1
+    # Web/RViz JPEG is display-only. Keep SLAM RGBD/depth at 10 Hz while
+    # encoding the latest preview at 5 Hz to remove avoidable libjpeg CPU work.
+    preview_publish_every_n_frames: 2
     point_cloud_step: 4
-    min_depth_m: 0.45
-    max_depth_m: 4.5
+    # fx*baseline=43.6732 pixel*m and max disparity=128 give a 0.341 m
+    # theoretical near limit. Keep the complete, photometrically verified
+    # sensor output here; RTAB-Map independently limits mapping to 4.5 m.
+    min_depth_m: 0.35
+    max_depth_m: 6.0

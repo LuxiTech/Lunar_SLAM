@@ -25,6 +25,49 @@
 环境检查确认 PyTorch 2.8.0、CUDA 可用，设备为 Orin。正式 launch 使用 `device=cuda`，
 CUDA 不可用时会直接报错，不会静默回退到 CPU。
 
+### HIK TensorRT FP16 加速与质量门禁（2026-08-06）
+
+HIK `1024x750` 图像保持原分辨率输入，SuperPoint 按既有 `resize_max=800`
+处理为 `800x586`。TensorRT 只替换 SuperPoint 稠密卷积，网络 I/O、NMS、
+描述子采样、几何验证和 RTAB 的 256 维 `float32` 描述子接口保持不变；
+LightGlue 单独启用 PyTorch AMP FP16。
+
+| 路径 | SuperPoint 耗时 | 正确匹配总量 | 内点率 | RMSE |
+| --- | ---: | ---: | ---: | ---: |
+| TensorRT FP32 | 101.0 ms | 1334 | 0.9474 | 1.111 px |
+| TensorRT FP16 | 40.8 ms | 1332 | 0.9494 | 1.116 px |
+| TensorRT INT8（拒绝） | 30.2 ms | 1221 | 0.8151 | 1.548 px |
+
+- FP16 相对 FP32 的 SuperPoint 加速为 2.48 倍，正确匹配保留 99.85%；
+- LightGlue AMP 从 43.34 ms 降至 38.38 ms，同一帧匹配集合完全一致；
+- 32 帧 HIK 熵校准 INT8 的关键点坐标重合仅 9.47%、匹配集合 Jaccard 3.3%，
+  即使更快也未通过质量门禁，不进入生产配置；
+- 输入长边 720/640 分别损失 16.7%/29.8% 正确匹配，因此保留 800；
+- NMS 半径从 3 调至 4，关键点减少 10.7%，保留 91.4% 正确匹配总量，
+  内点率和 RMSE 略有改善；最大关键点限制从 2048 降至 1024；
+- Nsight Systems 显示 TensorRT FP16 卷积族约占前端 GPU kernel 时间 47%，原版
+  SuperPoint NMS 的五次全分辨率 `max_pool` 单项占 18.8%；LightGlue 的主要问题
+  是大量小 kernel 的启动与同步，而不是 FlashAttention 算术本身；
+- CUDA Graph 仅覆盖固定形状 TensorRT 和 LightGlue `<=512` 点的前三层，较大或
+  困难帧自动回到原生自适应路径。8 次固定输入测试中普通 kernel launch 从
+  4450 次降到 3718 次；8 张图的 SuperPoint 关键点、分数、描述子以及小点集的
+  LightGlue 匹配索引与优化前逐元素一致；
+- TensorRT 直接绑定 Torch CUDA 指针并复用输出缓存，稠密输出不回传 CPU；
+  仅保留一次必要的灰度图 H2D 和小型关键点/分数 D2H。
+
+10 Hz 上限压测时前端曾达到 8.53 Hz，但会把 HIK 与前端的合计 GPU 平均值推到
+68.8%，且 30.2% 的 200 ms 采样窗达到 90% 以上。生产配置改为最新帧 5 Hz，
+RTAB 特征 2 Hz、后端检测 1 Hz；完整 SLAM 实测 GPU 平均 57.4%、中位 49%，
+前端 CPU 46.5%、RTAB CPU 27.0%。普通帧耗时约 79--91 ms，困难帧由 LightGlue
+自适应运行到第 5--6 层时约 111--121 ms，仍小于 200 ms 跟踪周期。建图前同步
+检查通过：RGB/Depth 时间差 0 ms，相机/IMU 最近时间差 0.866 ms。RTAB 外部
+odom、RGBD 特征均为唯一发布/订阅；本次临时库正常停止后为 43 MiB，含 47 个
+节点、87 条约束和 47 条数据记录。
+
+TensorRT 引擎只与构建它的 Jetson GPU 和 TensorRT 版本兼容。`auto` 模式只在
+输入尺寸、精度和引擎完全匹配时启用，否则保持原 PyTorch 路径；诊断消息会明确
+报告当前 SuperPoint 与 LightGlue 后端。
+
 ## 测试结果
 
 ### D435i 与学习型里程计

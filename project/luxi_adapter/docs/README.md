@@ -94,6 +94,13 @@ relaying `/imu/data`. Original pixels, frame IDs and calibration are preserved;
 the learned frontend consumes the atomic packet without re-synchronizing split
 topics.
 
+For the Hik profile, `stereo_node`, `stereo_depth_node` and `luxi_adapter` are
+C++ components in `/luxi_sensor_container` with intra-process communication.
+The camera component starts first and the depth/adapter components load after
+the MVS initialization window. Raw left/right images and native RGB-D therefore
+do not cross a DDS process boundary; split canonical images are still published
+on demand for RViz and other compatibility consumers.
+
 ## D435i hardware acceptance
 
 Run the automated adapter test before connecting hardware:

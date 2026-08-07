@@ -123,6 +123,19 @@ ros2 launch luxi_rtab_map rgbd_mapping_learned.launch.py \
   rviz:=false new_map:=true load_saved_map:=false
 ```
 
+Hik 本机一键建图可直接使用项目入口。RViz 已包含 RGB、深度和地图显示，不要再同时
+打开 RTAB-Map 自带 Qt 可视化：
+
+```bash
+ros2 launch luxi_rtab_map hik_mapping.launch.py \
+  rviz:=true rtabmap_viz:=false \
+  database_path:=/tmp/hik_mapping_test.db
+```
+
+终端手工建图和网页“开始建图”二选一。网页控制节点会在启动前检查
+`/luxi_visual_frontend` 和 `/rtabmap/rtabmap`；发现外部建图链路时拒绝再次启动，避免
+重复运行两套 SuperPoint、LightGlue 和 RTAB-Map。
+
 正常启动应看到以下关键日志：
 
 ```text
@@ -223,15 +236,69 @@ RViz 订阅都会影响结果。
 | 单帧深度处理 | 通常 90–100 ms |
 | VPI 立体匹配阶段 | 通常 63–67 ms |
 | 满链路 + RViz 深度输出 | 通常约 7–9.5 Hz |
-| `luxi_visual_frontend` | 约 3.2–3.3 Hz |
+| `luxi_visual_frontend` | 当前约 4.2 Hz |
 | 视觉里程计端到端延迟 | 平均约 0.41 s |
 | RViz RGB 预览延迟 | 平均约 0.03 s |
 | RViz 深度预览延迟 | 平均约 0.12 s |
 | RTAB 检测率 | 配置为 1 Hz |
 
-一次满链路资源采样约为：传感器组件容器 1 个 CPU 核、视觉前端 0.7 个 CPU 核和
-约 1.6 GB RSS、相机驱动 0.35 个 CPU 核、RTAB 约 0.3 个 CPU 核和 0.4 GB RSS；
+一次满链路资源采样约为：传感器组件容器 1 个 CPU 核、视觉前端 0.5 个 CPU 核和
+约 2.0 GB RSS、相机驱动 0.35 个 CPU 核、RTAB 约 0.3 个 CPU 核和 0.5 GB RSS；
 GPU 在前端推理期间可达到 99%。这些数值用于判断回归，不是固定资源上限。
+
+### GPU 峰值诊断基线（2026-08-06）
+
+测试条件：Orin NX `MAXN`、Hik 1024×750/10 Hz、VPI 深度、TensorRT FP16
+SuperPoint、AMP FP16 LightGlue、单套 RTAB-Map、一个 RViz，关闭 `rtabmap_viz`。
+`GR3D_FREQ` 使用 250 ms 周期采样，场景和相机运动会引起波动。
+
+| 指标 | 实测结果 |
+| --- | ---: |
+| GPU 平均占用 | 56.7% |
+| GPU 瞬时峰值 | 99% |
+| 大于等于 90% 的采样占比 | 22.8% |
+| 暂停学习视觉前端后的 GPU 平均占用 | 45.3% |
+| 暂停 RViz 后的 GPU 平均占用 | 52.5% |
+| 视觉里程计发布率 | 约 4.23 Hz |
+| SuperPoint 提取 | 约 55.1 ms |
+| LightGlue 匹配 | 约 32.9 ms |
+| 单帧学习前端总耗时 | 约 94.7 ms |
+| 示例关键点/匹配/内点 | 422 / 373 / 220 |
+| 示例内点率 | 91.3% |
+
+“暂停学习视觉前端”和“暂停 RViz”是分别执行的短时隔离实验，用于判断负载来源；因
+场景、显示订阅和 GPU 动态频率不同，不能将表中差值直接相加作为单个节点的固定占用。
+
+瞬时 98–99% 不表示建图异常，也不能直接解释为“当前纹理非常丰富”。SuperPoint 的
+密集卷积扫描整张 `800×586` 网络输入，基础计算量主要由输入尺寸决定；CUDA kernel
+执行时会短暂占满计算单元。纹理丰富会产生更多关键点和 LightGlue 候选，使高负载持续
+时间变长，但通常不会显著改变已经接近 100% 的瞬时峰值。应优先判断 30 秒以上的平均
+占用、推理延迟、里程计频率、温度和掉帧，而不是单个峰值。
+
+### GPU 优化方案与优先级
+
+1. **禁止重复链路。** 同一时刻只允许一个 `luxi_visual_frontend` 和一个
+   `/rtabmap/rtabmap`。不要在终端建图运行时再次点击网页“开始建图”。这是最高优先级，
+   因为重复链路会同时增加 GPU、CPU 和约数 GiB 内存。
+2. **只保留一种本机建图可视化。** 正式配置使用 `rviz:=true`、
+   `rtabmap_viz:=false`。`rtabmap_viz` 与 RViz 同时运行会重复保存和绘制地图，本次现场
+   单个 `rtabmap_viz` 约占 2 GiB RSS 和 60% 以上单核 CPU。
+3. **保持已验证的 FP16 推理配置。** 生产配置继续使用 `resize_max=800`、
+   `max_keypoints=1024`、`nms_radius=4`、TensorRT FP16 SuperPoint 和 AMP FP16
+   LightGlue，并启用 CUDA Graph。诊断话题必须显示
+   `tensorrt_fp16_cudagraph` 和 `pytorch_amp_fp16_cudagraph_512x3`。
+4. **仅在持续超载时降低工作量。** 如果 30 秒平均 GPU 长期超过 70%、温度持续超过
+   80°C 或里程计开始掉帧，再依次评估视觉前端 5 Hz 降至 4 Hz、输入长边 800 降至
+   720，以及限制匹配点数。每一步都必须重新测试快速转动、弱纹理墙面和回环，不允许
+   只根据 GPU 数字上线。
+5. **暂不启用 720/640 或 INT8。** 已有质量门禁中，720 输入正确匹配减少 16.7%，
+   640 减少 29.8%；INT8 内点率为 0.815，低于 FP16 的 0.949。它们可用于独立实验，
+   不能替换当前生产配置。
+
+当前验收目标是：单套节点、Hik RGB-D 约 9–10 Hz、视觉里程计不低于 4 Hz、30 秒
+平均 GPU 位于约 30–60%、温度低于 80°C、内点率通常不低于 80%，并且没有持续积压
+或跟踪丢失。满足这些条件时，偶发 98–99% 峰值属于正常的高效 GPU 调度，不应通过
+限制 GPU 时钟来掩盖。
 
 ### Jetson 供电限制
 

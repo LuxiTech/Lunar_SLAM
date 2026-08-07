@@ -1,14 +1,19 @@
 Panels:
   - Class: rviz_common/Displays
+    Help Height: 70
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /Global Options1
         - /RGBImage1
         - /DepthPreview1
-    Tree Height: 560
+      Splitter Ratio: 0.5
+    Tree Height: 110
   - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
     Name: Views
+    Splitter Ratio: 0.5
 Visualization Manager:
   Class: ""
   Displays:
@@ -18,9 +23,14 @@ Visualization Manager:
       Color: 160; 160; 164
       Enabled: true
       Line Style:
-        Line Width: 0.03
+        Line Width: 0.029999999329447746
         Value: Lines
       Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
       Plane: XY
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
@@ -30,19 +40,35 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-      Marker Scale: 0.4
+        base_link:
+          Value: true
+        imu_link:
+          Value: true
+        left_camera_optical_frame:
+          Value: true
+        map:
+          Value: true
+        odom:
+          Value: true
+      Marker Scale: 0.4000000059604645
       Name: CameraTF
       Show Arrows: true
       Show Axes: true
       Show Names: true
+      Tree:
+        map:
+          odom:
+            base_link:
+              left_camera_optical_frame:
+                imu_link:
+                  {}
       Update Interval: 0
       Value: true
-    - Alpha: 1
-      Class: rviz_default_plugins/Axes
+    - Class: rviz_default_plugins/Axes
       Enabled: true
       Length: 0.5
       Name: CameraCoordinate
-      Radius: 0.025
+      Radius: 0.02500000037252903
       Reference Frame: left_camera_optical_frame
       Value: true
     - Class: rviz_default_plugins/Image
@@ -57,14 +83,13 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Transport Override: raw
         Value: /sensors/rgbd/color/image_raw
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
       Max Value: 4.5
       Median window: 5
-      Min Value: 0.45
+      Min Value: 0.44999998807907104
       Name: DepthPreview
       Normalize Range: false
       Topic:
@@ -72,14 +97,13 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Transport Override: raw
         Value: /sensors/rgbd/depth/image_raw
       Value: true
-    - Angle Tolerance: 0.1
+    - Angle Tolerance: 0.10000000149011612
       Class: rviz_default_plugins/Odometry
       Covariance:
         Orientation:
-          Alpha: 0.3
+          Alpha: 0.30000001192092896
           Color: 255; 255; 127
           Color Style: Unique
           Frame: Local
@@ -87,7 +111,7 @@ Visualization Manager:
           Scale: 1
           Value: false
         Position:
-          Alpha: 0.3
+          Alpha: 0.30000001192092896
           Color: 204; 51; 204
           Scale: 1
           Value: false
@@ -95,16 +119,16 @@ Visualization Manager:
       Enabled: true
       Keep: 100
       Name: CameraOdometry
-      Position Tolerance: 0.05
+      Position Tolerance: 0.05000000074505806
       Shape:
         Alpha: 1
-        Axes Length: 0.4
-        Axes Radius: 0.025
+        Axes Length: 0.4000000059604645
+        Axes Radius: 0.02500000037252903
         Color: 255; 85; 0
-        Head Length: 0.08
-        Head Radius: 0.04
-        Shaft Length: 0.2
-        Shaft Radius: 0.02
+        Head Length: 0.07999999821186066
+        Head Radius: 0.03999999910593033
+        Shaft Length: 0.20000000298023224
+        Shaft Radius: 0.019999999552965164
         Value: Axes
       Topic:
         Depth: 5
@@ -119,11 +143,11 @@ Visualization Manager:
       Class: rviz_default_plugins/Path
       Color: 255; 85; 0
       Enabled: false
-      Head Diameter: 0.08
-      Head Length: 0.06
-      Length: 0.3
+      Head Diameter: 0.07999999821186066
+      Head Length: 0.05999999865889549
+      Length: 0.30000001192092896
       Line Style: Lines
-      Line Width: 0.03
+      Line Width: 0.029999999329447746
       Name: MapPath
       Offset:
         X: 0
@@ -131,16 +155,17 @@ Visualization Manager:
         Z: 0
       Pose Color: 255; 85; 0
       Pose Style: None
-      Radius: 0.03
-      Shaft Diameter: 0.04
-      Shaft Length: 0.1
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.03999999910593033
+      Shaft Length: 0.10000000149011612
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /rtabmap/mapPath
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -163,18 +188,19 @@ Visualization Manager:
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 2
-      Size (m): 0.02
+      Size (m): 0.019999999552965164
       Style: Points
       Topic:
         Depth: 1
         Durability Policy: Transient Local
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /rtabmap/cloud_map
       Use Fixed Frame: true
       Use rainbow: false
       Value: true
-    - Alpha: 0.7
+    - Alpha: 0.699999988079071
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
@@ -183,6 +209,7 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /rtabmap/map
@@ -198,7 +225,7 @@ Visualization Manager:
       Enabled: true
       Name: Semantic Obstacles
       Namespaces:
-        semantic_obstacles: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Transient Local
@@ -235,27 +262,39 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3
+      Distance: 5
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
       Focal Point:
         X: 0
         Y: 0
-        Z: 0
+        Z: 0.5
       Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05
+      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
-      Near Clip Distance: 0.01
-      Pitch: 0.4
+      Near Clip Distance: 0.009999999776482582
+      Pitch: -0.039999913424253464
       Target Frame: map
       Value: Orbit (rviz_default_plugins)
-      Yaw: 3.14
+      Yaw: 2.945002317428589
     Saved: ~
 Window Geometry:
+  DepthPreview:
+    collapsed: false
   Displays:
     collapsed: false
   Height: 800
   Hide Left Dock: false
   Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001cb000002c6fc0200000004fb000000100052004700420049006d006100670065010000003d0000008f0000002800fffffffb0000001800440065007000740068005000720065007600690065007701000000d2000000900000002800fffffffb000000100044006900730070006c0061007900730100000168000000f1000000c900fffffffb0000000a00560069006500770073010000025f000000a4000000a400ffffff0000032f000002c600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  RGBImage:
+    collapsed: false
   Views:
     collapsed: false
   Width: 1280
+  X: 37
+  Y: 64

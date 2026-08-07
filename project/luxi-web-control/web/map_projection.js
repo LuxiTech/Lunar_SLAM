@@ -5,7 +5,9 @@
 }(typeof globalThis !== "undefined" ? globalThis : this, () => {
   const defaultView = Object.freeze({
     yaw: Math.PI / 2,
-    pitch: 0.62,
+    // Prefer a map-like overview so vertical walls read as contours instead
+    // of overlapping radial streaks. Dragging still exposes the full 3-D view.
+    pitch: 1.15,
     zoom: 1.0,
   });
 

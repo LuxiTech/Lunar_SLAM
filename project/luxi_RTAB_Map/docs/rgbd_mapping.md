@@ -541,7 +541,9 @@ ros2 run luxi_rtab_map export_3d_map.sh \
 ```
 
 导出的 `*_cloud.ply` 可以使用 CloudCompare、MeshLab 或 PCL 工具查看。导出脚本
-会检查 RTAB-Map 是否仍在运行，避免读取尚未完整写入的数据库。
+会检查 RTAB-Map 是否仍在运行，避免读取尚未完整写入的数据库；并在 3 cm
+体素化后移除 8 cm 邻域内不足 3 个邻点的孤立深度噪声。该过滤只作用于离线地图层，
+不降低相机分辨率或实时视觉前端的输入精度。
 
 ## 验证
 

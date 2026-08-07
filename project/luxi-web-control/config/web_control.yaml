@@ -18,12 +18,12 @@ web_control:
     max_angular_z: 0.8
     enable_output: true
 
-    # The web node can start/stop the project's RTAB-Map launch it owns.
-    # It sources the D435i overlay and the project workspace before launching.
+    # The web node can start/stop the project's device-independent RTAB-Map launch.
+    # Hardware is started separately through luxi_adapter and publishes /sensors/*.
     enable_mapping_control: true
     mapping_launch_package: luxi_rtab_map
     mapping_launch_file: rgbd_mapping_learned.launch.py
-    # D435i driver uses Cyclone DDS; /cmd_vel stays on Fast DDS in the web node.
+    # The mapping child uses the same RMW as the sensor pipeline.
     mapping_rmw_implementation: rmw_cyclonedds_cpp
 
     # Map pairs are discovered as rtab_maps/mapNNN.db and
@@ -59,7 +59,8 @@ web_control:
     rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
     cloud_preview_topic: /rtabmap/cloud_map
     max_cloud_points: 1800
-    # Zero loads every valid vertex from the selected saved PLY.
-    max_saved_cloud_points: 0
+    # Canvas preview only: bound JSON size and per-frame CPU. The saved PLY,
+    # OctoMap and localization inputs keep their full resolution.
+    max_saved_cloud_points: 30000
     semantic_annotation_timeout: 15.0
     semantic_maps_root: ""

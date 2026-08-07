@@ -144,6 +144,69 @@ def estimate_relative_pose(
     return RelativePose(current_from_reference, inlier_indices, rmse)
 
 
+def estimate_translation_with_rotation(
+    reference_points: np.ndarray,
+    current_points: np.ndarray,
+    current_pixels: np.ndarray,
+    intrinsics: np.ndarray,
+    current_from_reference_rotation: np.ndarray,
+    maximum_3d_error: float,
+    minimum_inliers: int,
+) -> RelativePose | None:
+    """Estimate translation robustly while keeping an external rotation fixed."""
+    reference = np.asarray(reference_points, dtype=np.float64)
+    current = np.asarray(current_points, dtype=np.float64)
+    pixels = np.asarray(current_pixels, dtype=np.float64)
+    camera = np.asarray(intrinsics, dtype=np.float64)
+    rotation = np.asarray(current_from_reference_rotation, dtype=np.float64)
+    if reference.ndim != 2 or reference.shape[1] != 3:
+        raise ValueError("reference_points must be Nx3")
+    if current.shape != reference.shape or pixels.shape != (len(reference), 2):
+        raise ValueError("current points and pixels must correspond to reference points")
+    if camera.shape != (3, 3) or rotation.shape != (3, 3):
+        raise ValueError("intrinsics and rotation must be 3x3")
+    if maximum_3d_error <= 0.0 or minimum_inliers < 3:
+        raise ValueError("invalid fixed-rotation estimator thresholds")
+    finite = (
+        np.all(np.isfinite(reference), axis=1)
+        & np.all(np.isfinite(current), axis=1)
+        & np.all(np.isfinite(pixels), axis=1)
+    )
+    finite_indices = np.flatnonzero(finite)
+    if len(finite_indices) < minimum_inliers:
+        return None
+
+    translations = current[finite] - reference[finite] @ rotation.T
+    translation = np.median(translations, axis=0)
+    residuals_3d = np.linalg.norm(translations - translation, axis=1)
+    consistent = residuals_3d <= maximum_3d_error
+    if np.count_nonzero(consistent) < minimum_inliers:
+        return None
+    translation = np.median(translations[consistent], axis=0)
+    residuals_3d = np.linalg.norm(translations - translation, axis=1)
+    consistent = residuals_3d <= maximum_3d_error
+    if np.count_nonzero(consistent) < minimum_inliers:
+        return None
+
+    inlier_indices = finite_indices[consistent]
+    rotation_vector, _ = cv2.Rodrigues(rotation)
+    projected, _ = cv2.projectPoints(
+        reference[inlier_indices],
+        rotation_vector,
+        translation.reshape(3, 1),
+        camera,
+        None,
+    )
+    residuals_2d = projected.reshape(-1, 2) - pixels[inlier_indices]
+    rmse = float(np.sqrt(np.mean(np.sum(residuals_2d * residuals_2d, axis=1))))
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = translation
+    if not np.all(np.isfinite(transform)) or not math.isfinite(rmse):
+        return None
+    return RelativePose(transform, inlier_indices, rmse)
+
+
 def image_grid_coverage(
     points: np.ndarray,
     image_width: int,

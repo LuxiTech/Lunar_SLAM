@@ -15,10 +15,13 @@ def generate_launch_description() -> LaunchDescription:
         [
             "'--Rtabmap/DetectionRate 1 "
             "--Rtabmap/LoopThr 0.2 "
-            "--RGBD/LinearUpdate 0.1 "
-            "--RGBD/AngularUpdate 0.1 "
-            "--Kp/MinDepth 0.2 "
-            "--Kp/MaxDepth 6.0 "
+            "--RGBD/LinearUpdate 0.05 "
+            "--RGBD/AngularUpdate 0.03 "
+            "--Kp/MinDepth ",
+            LaunchConfiguration("mapping_depth_min"),
+            " --Kp/MaxDepth ",
+            LaunchConfiguration("mapping_depth_max"),
+            " "
             # SIFT selects RTAB's float/L2 registration path only. With
             # Mem/UseOdomFeatures=true, the actual 256-D descriptors come from the
             # external SuperPoint RGBDImage and no SIFT extraction is performed.
@@ -31,6 +34,14 @@ def generate_launch_description() -> LaunchDescription:
             "--Mem/UseOdomFeatures true "
             "--Grid/DepthDecimation ",
             LaunchConfiguration("grid_depth_decimation"),
+            " --Grid/RangeMin ",
+            LaunchConfiguration("mapping_depth_min"),
+            " --Grid/RangeMax ",
+            LaunchConfiguration("mapping_depth_max"),
+            " --Grid/NoiseFilteringRadius ",
+            LaunchConfiguration("grid_noise_filtering_radius"),
+            " --Grid/NoiseFilteringMinNeighbors ",
+            LaunchConfiguration("grid_noise_filtering_min_neighbors"),
             "'",
         ]
     )
@@ -63,6 +74,12 @@ def generate_launch_description() -> LaunchDescription:
             "rgbd_sync": "false",
             "subscribe_rgbd": "true",
             "rgbd_topic": "/luxi_visual_frontend/rgbd_image",
+            "visual_frontend_minimum_depth": LaunchConfiguration(
+                "mapping_depth_min"),
+            "visual_frontend_maximum_depth": LaunchConfiguration(
+                "mapping_depth_max"),
+            "visual_frontend_camera_to_imu_time_offset": LaunchConfiguration(
+                "camera_to_imu_time_offset"),
             "rtabmap_args": learned_rtabmap_args,
         }.items(),
     )
@@ -84,6 +101,12 @@ def generate_launch_description() -> LaunchDescription:
                     "640x480 and 1024x750 sensor profiles."
                 ),
             ),
+            DeclareLaunchArgument("mapping_depth_min", default_value="0.2"),
+            DeclareLaunchArgument("mapping_depth_max", default_value="6.0"),
+            DeclareLaunchArgument("camera_to_imu_time_offset", default_value="0.0"),
+            DeclareLaunchArgument("grid_noise_filtering_radius", default_value="0.0"),
+            DeclareLaunchArgument(
+                "grid_noise_filtering_min_neighbors", default_value="5"),
             mapping,
         ]
     )

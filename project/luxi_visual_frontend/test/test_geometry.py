@@ -2,11 +2,47 @@ import cv2
 import numpy as np
 
 from luxi_visual_frontend.geometry import (
+    estimate_translation_with_rotation,
     estimate_relative_pose,
     image_grid_coverage,
     invert_transform,
     project_depth_points,
 )
+
+
+def test_fixed_rotation_translation_rejects_depth_outliers():
+    rotation, _ = cv2.Rodrigues(np.array([0.02, -0.12, 0.03]))
+    translation = np.array([0.08, -0.01, 0.025])
+    reference = np.array(
+        [[x * 0.12, y * 0.10, 1.5 + 0.08 * (x + y)] for y in range(-3, 4) for x in range(-4, 5)],
+        dtype=np.float64,
+    )
+    current = reference @ rotation.T + translation
+    current[-10:] += np.array([0.5, -0.4, 0.7])
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 519.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    pixels = np.column_stack(
+        (
+            intrinsics[0, 0] * current[:, 0] / current[:, 2] + intrinsics[0, 2],
+            intrinsics[1, 1] * current[:, 1] / current[:, 2] + intrinsics[1, 2],
+        )
+    )
+
+    result = estimate_translation_with_rotation(
+        reference,
+        current,
+        pixels,
+        intrinsics,
+        rotation,
+        maximum_3d_error=0.08,
+        minimum_inliers=30,
+    )
+
+    assert result is not None
+    np.testing.assert_allclose(result.current_from_reference[:3, :3], rotation, atol=1e-9)
+    np.testing.assert_allclose(result.current_from_reference[:3, 3], translation, atol=1e-6)
+    assert len(result.inlier_indices) == len(reference) - 10
 
 
 def test_depth_projection_preserves_invalid_rows():

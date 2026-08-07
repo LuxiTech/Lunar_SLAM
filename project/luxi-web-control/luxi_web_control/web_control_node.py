@@ -54,6 +54,43 @@ PLY_SCALAR_FORMATS = {
     "int": "i", "int32": "i", "uint": "I", "uint32": "I",
     "float": "f", "float32": "f", "double": "d", "float64": "d",
 }
+MAPPING_NODE_PATHS = frozenset({
+    "/luxi_visual_frontend",
+    "/rtabmap/rtabmap",
+})
+
+
+def mapping_graph_conflicts(
+    nodes: list[Tuple[str, str]],
+) -> list[str]:
+    """Return active SLAM nodes that would collide with a new mapping launch."""
+    paths = {
+        f"/{name}" if namespace == "/" else f"{namespace.rstrip('/')}/{name}"
+        for name, namespace in nodes
+    }
+    return sorted(paths.intersection(MAPPING_NODE_PATHS))
+
+
+def sanitized_subprocess_environment(
+    prepend_library_paths: Tuple[str, ...] = (),
+) -> Dict[str, str]:
+    """Exclude camera-SDK libraries from non-camera child processes."""
+    environment = os.environ.copy()
+    mvs_root = Path(environment.get("MVS_ROOT", "/opt/MVS")).resolve()
+    blocked_paths = {
+        (mvs_root / "lib/aarch64").resolve(),
+        (mvs_root / "lib/64").resolve(),
+    }
+    inherited_paths = [
+        entry
+        for entry in environment.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() not in blocked_paths
+    ]
+    environment["LD_LIBRARY_PATH"] = os.pathsep.join([
+        *(entry for entry in prepend_library_paths if entry),
+        *inherited_paths,
+    ])
+    return environment
 
 
 def _map_id_from_export_path(candidate: Path, octo_directory: Path) -> str:
@@ -566,7 +603,7 @@ class HlocIndexBuilder:
                 return False, f"{label} is missing: {executable}"
 
         output_directory.mkdir(parents=True, exist_ok=True)
-        environment = os.environ.copy()
+        environment = sanitized_subprocess_environment()
         environment["LUXI_HLOC_RUNTIME"] = "gpu"
         environment["PYTHONUNBUFFERED"] = "1"
         commands = (
@@ -638,11 +675,8 @@ class SemanticAnnotationStore:
             raise RuntimeError(
                 f"semantic annotation tool is missing: {self.executable}"
             )
-        environment = os.environ.copy()
-        environment["LD_LIBRARY_PATH"] = (
-            str(self.octomap_library_path)
-            + ":"
-            + environment.get("LD_LIBRARY_PATH", "")
+        environment = sanitized_subprocess_environment(
+            (str(self.octomap_library_path),)
         )
         try:
             result = subprocess.run(
@@ -724,7 +758,7 @@ class MappingController:
         package: str,
         launch_file: str,
         rmw_implementation: str,
-        d435_setup: Path,
+        sensor_setup: Optional[Path],
         workspace_setup: Path,
         log_path: Path,
     ) -> None:
@@ -732,7 +766,7 @@ class MappingController:
         self.package = package
         self.launch_file = launch_file
         self.rmw_implementation = rmw_implementation
-        self.d435_setup = d435_setup
+        self.sensor_setup = sensor_setup
         self.workspace_setup = workspace_setup
         self.log_path = log_path
         self._lock = threading.Lock()
@@ -744,18 +778,23 @@ class MappingController:
 
     def _command(self) -> list:
         """Build a shell-free, source-aware RTAB-Map launch command."""
-        source_commands = [
-            f"source {shlex.quote(str(self.d435_setup))}",
+        source_commands = []
+        if self.sensor_setup is not None:
+            source_commands.append(
+                f"source {shlex.quote(str(self.sensor_setup))}"
+            )
+        source_commands.extend([
             f"source {shlex.quote(str(self.workspace_setup))}",
             "export ROS_LOCALHOST_ONLY=0",
             "export RMW_IMPLEMENTATION="
             + shlex.quote(self.rmw_implementation),
-        ]
+        ])
         launch_command = shlex.join([
             "ros2",
             "launch",
             self.package,
             self.launch_file,
+            "new_map:=true",
             "rviz:=false",
             "rtabmap_viz:=false",
         ])
@@ -770,11 +809,10 @@ class MappingController:
                 return False, "mapping control is disabled"
             if self._process is not None and self._process.poll() is None:
                 return False, "RTAB-Map mapping is already running"
-            missing = [
-                path
-                for path in (self.d435_setup, self.workspace_setup)
-                if not path.is_file()
-            ]
+            setup_files = [self.workspace_setup]
+            if self.sensor_setup is not None:
+                setup_files.insert(0, self.sensor_setup)
+            missing = [path for path in setup_files if not path.is_file()]
             if missing:
                 return False, (
                     "mapping setup file is missing: "
@@ -791,7 +829,7 @@ class MappingController:
                         stdout=log_file,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
-                        env=os.environ.copy(),
+                        env=sanitized_subprocess_environment(),
                     )
             except OSError as exc:
                 self._process = None
@@ -839,7 +877,7 @@ class MappingController:
         if exit_code is None:
             return
         self._last_exit_code = exit_code
-        if exit_code != 0 and not self._stop_requested:
+        if not self._stop_requested:
             self._last_error = self._latest_log_error()
         self._stop_requested = False
         self._process = None
@@ -874,7 +912,7 @@ class MappingController:
             state = "disabled"
         elif running:
             state = "running"
-        elif exit_code not in (None, 0) and error:
+        elif error:
             state = "failed"
         else:
             state = "stopped"
@@ -901,7 +939,7 @@ class NavigationController:
         package: str,
         launch_file: str,
         rmw_implementation: str,
-        d435_setup: Path,
+        sensor_setup: Optional[Path],
         workspace_setup: Path,
         octomap_library_path: Path,
         log_path: Path,
@@ -910,7 +948,7 @@ class NavigationController:
         self.package = package
         self.launch_file = launch_file
         self.rmw_implementation = rmw_implementation
-        self.d435_setup = d435_setup
+        self.sensor_setup = sensor_setup
         self.workspace_setup = workspace_setup
         self.octomap_library_path = octomap_library_path
         self.log_path = log_path
@@ -930,14 +968,18 @@ class NavigationController:
         hloc_map_directory: Path,
         semantic_path: Path,
     ) -> list:
-        source_commands = [
-            f"source {shlex.quote(str(self.d435_setup))}",
+        source_commands = []
+        if self.sensor_setup is not None:
+            source_commands.append(
+                f"source {shlex.quote(str(self.sensor_setup))}"
+            )
+        source_commands.extend([
             f"source {shlex.quote(str(self.workspace_setup))}",
             "export ROS_LOCALHOST_ONLY=0",
             "export RMW_IMPLEMENTATION=" + shlex.quote(self.rmw_implementation),
             "export LD_LIBRARY_PATH=" + shlex.quote(str(self.octomap_library_path))
             + ':${LD_LIBRARY_PATH:-}',
-        ]
+        ])
         launch_command = shlex.join([
             "ros2", "launch", self.package, self.launch_file,
             f"database_path:={database_path}",
@@ -964,15 +1006,17 @@ class NavigationController:
                 return False, "navigation control is disabled"
             if self._process is not None and self._process.poll() is None:
                 return False, "selected-map navigation is already running"
+            prerequisites = [
+                self.workspace_setup,
+                database_path,
+                octomap_path,
+                cloud_path,
+                hloc_map_directory / "metadata.yaml",
+            ]
+            if self.sensor_setup is not None:
+                prerequisites.insert(0, self.sensor_setup)
             missing = [
-                path for path in (
-                    self.d435_setup,
-                    self.workspace_setup,
-                    database_path,
-                    octomap_path,
-                    cloud_path,
-                    hloc_map_directory / "metadata.yaml",
-                )
+                path for path in prerequisites
                 if not path.is_file()
             ]
             if missing:
@@ -996,7 +1040,8 @@ class NavigationController:
                             semantic_path,
                         ),
                         stdout=log_file, stderr=subprocess.STDOUT,
-                        start_new_session=True, env=os.environ.copy())
+                        start_new_session=True,
+                        env=sanitized_subprocess_environment())
             except OSError as exc:
                 self._process = None
                 self._last_error = str(exc)
@@ -1419,6 +1464,7 @@ class WebControlNode(Node):
             "mapping_rmw_implementation",
             "rmw_cyclonedds_cpp",
         )
+        self.declare_parameter("mapping_sensor_setup", "")
         self.declare_parameter("mapping_d435_setup", "")
         self.declare_parameter("mapping_workspace_setup", "")
         self.declare_parameter("mapping_log_path", "")
@@ -1426,6 +1472,7 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_launch_package", "luxi_3d_navigation")
         self.declare_parameter("navigation_launch_file", "saved_map_navigation.launch.py")
         self.declare_parameter("navigation_rmw_implementation", "rmw_cyclonedds_cpp")
+        self.declare_parameter("navigation_sensor_setup", "")
         self.declare_parameter("navigation_d435_setup", "")
         self.declare_parameter("navigation_workspace_setup", "")
         self.declare_parameter("navigation_log_path", "")
@@ -1458,7 +1505,7 @@ class WebControlNode(Node):
         )
         self.declare_parameter("cloud_preview_topic", "/rtabmap/cloud_map")
         self.declare_parameter("max_cloud_points", 1800)
-        self.declare_parameter("max_saved_cloud_points", 0)
+        self.declare_parameter("max_saved_cloud_points", 30000)
         self.declare_parameter("semantic_annotation_timeout", 15.0)
         self.declare_parameter("semantic_annotation_executable", "")
         self.declare_parameter("semantic_maps_root", "")
@@ -1488,7 +1535,13 @@ class WebControlNode(Node):
         self.web_root = Path(web_root).resolve()
 
         workspace_root = package_share.parents[3]
-        d435_setup = str(self.get_parameter("mapping_d435_setup").value)
+        mapping_sensor_setup = str(
+            self.get_parameter("mapping_sensor_setup").value
+        )
+        legacy_mapping_setup = str(
+            self.get_parameter("mapping_d435_setup").value
+        )
+        mapping_sensor_setup = mapping_sensor_setup or legacy_mapping_setup
         workspace_setup = str(
             self.get_parameter("mapping_workspace_setup").value
         )
@@ -1500,10 +1553,10 @@ class WebControlNode(Node):
             rmw_implementation=str(
                 self.get_parameter("mapping_rmw_implementation").value
             ),
-            d435_setup=Path(
-                d435_setup
-                or workspace_root / "device/D435i/ros2_ws/install/setup.bash"
-            ).resolve(),
+            sensor_setup=(
+                Path(mapping_sensor_setup).resolve()
+                if mapping_sensor_setup else None
+            ),
             workspace_setup=Path(
                 workspace_setup or workspace_root / "install/setup.bash"
             ).resolve(),
@@ -1512,7 +1565,15 @@ class WebControlNode(Node):
                 or workspace_root / "log/luxi_web_control_rtabmap.log"
             ).resolve(),
         )
-        navigation_d435_setup = str(self.get_parameter("navigation_d435_setup").value)
+        navigation_sensor_setup = str(
+            self.get_parameter("navigation_sensor_setup").value
+        )
+        legacy_navigation_setup = str(
+            self.get_parameter("navigation_d435_setup").value
+        )
+        navigation_sensor_setup = (
+            navigation_sensor_setup or legacy_navigation_setup
+        )
         navigation_workspace_setup = str(
             self.get_parameter("navigation_workspace_setup").value
         )
@@ -1602,10 +1663,10 @@ class WebControlNode(Node):
             rmw_implementation=str(
                 self.get_parameter("navigation_rmw_implementation").value
             ),
-            d435_setup=Path(
-                navigation_d435_setup
-                or workspace_root / "device/D435i/ros2_ws/install/setup.bash"
-            ).resolve(),
+            sensor_setup=(
+                Path(navigation_sensor_setup).resolve()
+                if navigation_sensor_setup else None
+            ),
             workspace_setup=Path(
                 navigation_workspace_setup or workspace_root / "install/setup.bash"
             ).resolve(),
@@ -2000,10 +2061,9 @@ class WebControlNode(Node):
             str(self.octomap_points_executable), str(octomap_path),
             str(self.max_voxel_points),
         ]
-        environment = os.environ.copy()
         library_path = str(self.navigation.octomap_library_path)
-        environment["LD_LIBRARY_PATH"] = (
-            library_path + ":" + environment.get("LD_LIBRARY_PATH", "")
+        environment = sanitized_subprocess_environment(
+            (library_path,)
         )
         try:
             result = subprocess.run(
@@ -2131,6 +2191,15 @@ class WebControlNode(Node):
 
     def start_mapping(self) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
+        if self.mapping.status()["state"] != "running":
+            conflicts = mapping_graph_conflicts(
+                self.get_node_names_and_namespaces()
+            )
+            if conflicts:
+                return False, (
+                    "mapping nodes are already active outside web control: "
+                    + ", ".join(conflicts)
+                )
         started, message = self.mapping.start()
         if started:
             self._clear_cloud_preview()
@@ -2194,10 +2263,9 @@ class WebControlNode(Node):
             self.maps_root / "octo_maps" / f"{map_id}_octomap"
         ).resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
-        environment = os.environ.copy()
         library_path = str(self.navigation.octomap_library_path)
-        environment["LD_LIBRARY_PATH"] = (
-            library_path + ":" + environment.get("LD_LIBRARY_PATH", "")
+        environment = sanitized_subprocess_environment(
+            (library_path,)
         )
         try:
             result = subprocess.run(

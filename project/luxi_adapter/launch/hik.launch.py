@@ -10,9 +10,10 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.actions import ComposableNodeContainer, LoadComposableNodes, Node
 from launch_ros.descriptions import ComposableNode
-from launch.substitutions import LaunchConfiguration
+from launch_ros.parameter_descriptions import ParameterValue
+from launch.substitutions import LaunchConfiguration, NotSubstitution
 
 
 def _static_transforms(context):
@@ -61,6 +62,7 @@ def _static_transforms(context):
 
 def generate_launch_description():
     hik_bringup_share = get_package_share_directory("hik_bringup")
+    camera_params = f"{hik_bringup_share}/config/camera_params.yaml"
     mvs_root = os.path.abspath(os.environ.get("MVS_ROOT", "/opt/MVS"))
     mvs_library_dirs = {
         os.path.join(mvs_root, "lib", "aarch64"),
@@ -90,18 +92,42 @@ def generate_launch_description():
                 "use_imu": "true",
                 "external_trigger": LaunchConfiguration("external_trigger"),
                 "stereo_proc_params": LaunchConfiguration("stereo_proc_params"),
+                "start_stereo_camera": NotSubstitution(
+                    LaunchConfiguration("enable_adapter")
+                ),
                 "start_stereo_depth": "false",
             }.items(),
         ),
-        # Keep the multi-megabyte RGBDImage inside one process. This preserves
-        # the adapter topic contract while avoiding a serialize/copy/deserialize
-        # round trip before the learned frontend receives canonical images.
+        # Keep both raw stereo images and the multi-megabyte RGBDImage inside
+        # one process. The MVS camera initializes before depth is loaded.
+        ComposableNodeContainer(
+            package="rclcpp_components",
+            executable="component_container_mt",
+            name="luxi_sensor_container",
+            namespace="",
+            composable_node_descriptions=[
+                ComposableNode(
+                    package="hikrobot_camera_driver",
+                    plugin="hikrobot_camera_driver::StereoCameraNode",
+                    name="stereo_node",
+                    parameters=[
+                        camera_params,
+                        {
+                            "external_trigger": ParameterValue(
+                                LaunchConfiguration("external_trigger"), value_type=bool
+                            )
+                        },
+                    ],
+                    extra_arguments=[{"use_intra_process_comms": True}],
+                ),
+            ],
+            condition=IfCondition(LaunchConfiguration("enable_adapter")),
+            additional_env=algorithm_environment,
+            output="screen",
+        ),
         TimerAction(period=5.0, actions=[
-            ComposableNodeContainer(
-                package="rclcpp_components",
-                executable="component_container_mt",
-                name="luxi_sensor_container",
-                namespace="",
+            LoadComposableNodes(
+                target_container="/luxi_sensor_container",
                 composable_node_descriptions=[
                     ComposableNode(
                         package="stereo_depth",
@@ -128,8 +154,6 @@ def generate_launch_description():
                     ),
                 ],
                 condition=IfCondition(LaunchConfiguration("enable_adapter")),
-                additional_env=algorithm_environment,
-                output="screen",
             ),
             Node(
                 package="stereo_depth",

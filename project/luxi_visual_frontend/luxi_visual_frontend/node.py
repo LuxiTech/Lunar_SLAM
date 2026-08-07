@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+from collections import deque
 import copy
 import math
 import threading
@@ -26,7 +27,7 @@ from rclpy.qos import (
 )
 from rclpy.time import Time
 from rtabmap_msgs.msg import KeyPoint, Point3f, RGBDImage
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, Imu
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
@@ -34,6 +35,7 @@ from tf2_ros import Buffer, TransformBroadcaster, TransformListener
 from .feature_backend import SuperPointLightGlueBackend
 from .geometry import invert_transform
 from .rtab_codec import compress_descriptor_matrix
+from .rate_limit import processing_is_due, publication_is_due
 from .tracker import TrackerConfig, TrackingResult, VisualOdometryTracker
 
 
@@ -134,11 +136,19 @@ class VisualOdometryNode(Node):
         defaults = {
             "device": "cuda",
             "resize_max": 800,
-            "max_keypoints": 2048,
-            "nms_radius": 3,
+            "max_keypoints": 1024,
+            "nms_radius": 4,
             "lightglue_depth_confidence": 0.90,
             "lightglue_width_confidence": 0.95,
+            "lightglue_mixed_precision": True,
             "cpu_threads": 4,
+            "superpoint_backend": "auto",
+            "superpoint_engine_directory": "",
+            "superpoint_precision": "fp16",
+            "superpoint_cuda_graph": True,
+            "lightglue_cuda_graph": True,
+            "lightglue_cuda_graph_keypoints": 512,
+            "lightglue_cuda_graph_layers": 3,
             "color_topic": "/sensors/rgbd/color/image_raw",
             "depth_topic": "/sensors/rgbd/depth/image_raw",
             "camera_info_topic": "/sensors/rgbd/color/camera_info",
@@ -147,9 +157,14 @@ class VisualOdometryNode(Node):
             "rgbd_features_topic": "/luxi_visual_frontend/rgbd_image",
             "status_topic": "/luxi_visual_frontend/status",
             "diagnostics_topic": "/luxi_visual_frontend/diagnostics",
+            "imu_topic": "/sensors/imu/data",
             "odom_frame": "odom",
             "base_frame": "base_link",
-            "target_rate": 10.0,
+            "use_imu_rotation": True,
+            "camera_to_imu_time_offset": 0.0,
+            "maximum_imu_time_difference": 0.03,
+            "target_rate": 5.0,
+            "rgbd_features_rate": 2.0,
             "maximum_sensor_time_difference": 0.05,
             "transform_timeout": 0.5,
             "depth_scale_16u": 0.001,
@@ -170,14 +185,26 @@ class VisualOdometryNode(Node):
             "keyframe_min_rotation_deg": 8.0,
             "keyframe_max_age": 1.0,
             "keyframe_min_inlier_ratio": 0.40,
-            "maximum_frame_translation": 1.0,
-            "maximum_frame_rotation_deg": 60.0,
+            "maximum_frame_translation": 0.25,
+            "maximum_frame_rotation_deg": 45.0,
+            "maximum_consecutive_tracking_failures": 3,
+            "minimum_depth_consistency_matches": 20,
+            "maximum_depth_consistency_error": 0.08,
+            "maximum_imu_rotation_error_deg": 12.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         parameters = {name: self.get_parameter(name).value for name in defaults}
         if parameters["target_rate"] <= 0.0:
             raise ValueError("target_rate must be positive")
+        if parameters["rgbd_features_rate"] <= 0.0:
+            raise ValueError("rgbd_features_rate must be positive")
+        if parameters["maximum_imu_time_difference"] <= 0.0:
+            raise ValueError("maximum_imu_time_difference must be positive")
+        if parameters["minimum_depth_consistency_matches"] < 3:
+            raise ValueError("minimum_depth_consistency_matches must be at least 3")
+        if parameters["maximum_depth_consistency_error"] <= 0.0:
+            raise ValueError("maximum_depth_consistency_error must be positive")
 
         self.get_logger().info("Loading SuperPoint and LightGlue models")
         backend = SuperPointLightGlueBackend(
@@ -188,6 +215,14 @@ class VisualOdometryNode(Node):
             float(parameters["lightglue_depth_confidence"]),
             float(parameters["lightglue_width_confidence"]),
             int(parameters["cpu_threads"]),
+            str(parameters["superpoint_backend"]),
+            str(parameters["superpoint_engine_directory"]),
+            str(parameters["superpoint_precision"]),
+            bool(parameters["lightglue_mixed_precision"]),
+            bool(parameters["superpoint_cuda_graph"]),
+            bool(parameters["lightglue_cuda_graph"]),
+            int(parameters["lightglue_cuda_graph_keypoints"]),
+            int(parameters["lightglue_cuda_graph_layers"]),
         )
         config = TrackerConfig(
             minimum_keypoints=int(parameters["minimum_keypoints"]),
@@ -208,6 +243,18 @@ class VisualOdometryNode(Node):
             keyframe_min_inlier_ratio=float(parameters["keyframe_min_inlier_ratio"]),
             maximum_frame_translation=float(parameters["maximum_frame_translation"]),
             maximum_frame_rotation=math.radians(float(parameters["maximum_frame_rotation_deg"])),
+            maximum_consecutive_tracking_failures=int(
+                parameters["maximum_consecutive_tracking_failures"]
+            ),
+            minimum_depth_consistency_matches=int(
+                parameters["minimum_depth_consistency_matches"]
+            ),
+            maximum_depth_consistency_error=float(
+                parameters["maximum_depth_consistency_error"]
+            ),
+            maximum_imu_rotation_error=math.radians(
+                float(parameters["maximum_imu_rotation_error_deg"])
+            ),
         )
         self.parameters = parameters
         self.tracker = VisualOdometryTracker(backend, config)
@@ -224,6 +271,18 @@ class VisualOdometryNode(Node):
             DiagnosticArray, parameters["diagnostics_topic"], 10
         )
         self.create_service(Trigger, "~/reset", self._reset_callback)
+        self.lock = threading.Lock()
+        self.latest_color: Image | None = None
+        self.latest_depth: Image | None = None
+        self.latest_camera_info: CameraInfo | None = None
+        self.processed_stamp = -1.0
+        self.processing = False
+        self.base_from_camera: np.ndarray | None = None
+        self.last_base_pose: np.ndarray | None = None
+        self.last_pose_stamp: float | None = None
+        self.last_rgbd_features_stamp: float | None = None
+        self.imu_samples: deque[tuple[float, str, np.ndarray]] = deque(maxlen=400)
+        self.camera_from_imu_rotations: dict[tuple[str, str], np.ndarray] = {}
         # Inference is intentionally slower than the 10 Hz sensor stream.  A
         # depth-one best-effort input prevents stale full-resolution RGB-D
         # packets from queueing while the current frame is being processed.
@@ -233,7 +292,21 @@ class VisualOdometryNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
-        if parameters["rgbd_input_topic"]:
+        if bool(parameters["use_imu_rotation"]):
+            imu_history_qos = QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=100,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                durability=DurabilityPolicy.VOLATILE,
+            )
+            self.create_subscription(
+                Imu,
+                parameters["imu_topic"],
+                self._imu_callback,
+                imu_history_qos,
+            )
+        atomic_rgbd_input = bool(parameters["rgbd_input_topic"])
+        if atomic_rgbd_input:
             self.create_subscription(
                 RGBDImage,
                 parameters["rgbd_input_topic"],
@@ -253,16 +326,14 @@ class VisualOdometryNode(Node):
                 self._camera_info_callback,
                 latest_sensor_qos,
             )
-        self.lock = threading.Lock()
-        self.latest_color: Image | None = None
-        self.latest_depth: Image | None = None
-        self.latest_camera_info: CameraInfo | None = None
-        self.processed_stamp = -1.0
-        self.processing = False
-        self.base_from_camera: np.ndarray | None = None
-        self.last_base_pose: np.ndarray | None = None
-        self.last_pose_stamp: float | None = None
-        self.timer = self.create_timer(1.0 / float(parameters["target_rate"]), self._process_latest)
+        # Atomic packets can be processed directly without waiting for the next
+        # timer tick. Split topics retain the timer as their synchronization
+        # boundary.
+        self.timer = None
+        if not atomic_rgbd_input:
+            self.timer = self.create_timer(
+                1.0 / float(parameters["target_rate"]), self._process_latest
+            )
         self._publish_status("WAITING_FOR_SENSOR_DATA")
         self.get_logger().info(f"Learned frontend inference device: {backend.device}")
 
@@ -278,12 +349,31 @@ class VisualOdometryNode(Node):
         with self.lock:
             self.latest_camera_info = message
 
+    def _imu_callback(self, message: Imu) -> None:
+        """Buffer valid AHRS orientations for camera-time interpolation."""
+        if message.orientation_covariance[0] < 0.0:
+            return
+        try:
+            rotation = _quaternion_matrix(
+                message.orientation.x,
+                message.orientation.y,
+                message.orientation.z,
+                message.orientation.w,
+            )
+        except ValueError:
+            return
+        with self.lock:
+            self.imu_samples.append(
+                (_stamp_seconds(message), message.header.frame_id, rotation)
+            )
+
     def _rgbd_callback(self, message: RGBDImage) -> None:
         """Commit one adapter-normalized RGB-D packet atomically."""
         with self.lock:
             self.latest_color = message.rgb
             self.latest_depth = message.depth
             self.latest_camera_info = message.rgb_camera_info
+        self._process_latest()
 
     def _snapshot(self) -> tuple[Image, Image, CameraInfo] | None:
         with self.lock:
@@ -295,6 +385,7 @@ class VisualOdometryNode(Node):
         self.tracker.reset()
         self.last_base_pose = None
         self.last_pose_stamp = None
+        self.last_rgbd_features_stamp = None
         response.success = True
         response.message = "visual frontend tracking state reset"
         self._publish_status("WAITING_FOR_SENSOR_DATA")
@@ -316,6 +407,38 @@ class VisualOdometryNode(Node):
             self.base_from_camera = _transform_matrix(transform)
         return self.base_from_camera
 
+    def _world_from_camera_rotation(
+        self, stamp: float, camera_frame: str
+    ) -> tuple[np.ndarray | None, float | None]:
+        """Return the nearest calibrated IMU camera orientation and time error."""
+        if not bool(self.parameters["use_imu_rotation"]):
+            return None, None
+        target_stamp = stamp + float(self.parameters["camera_to_imu_time_offset"])
+        with self.lock:
+            sample = min(
+                self.imu_samples,
+                key=lambda item: abs(item[0] - target_stamp),
+                default=None,
+            )
+        if sample is None:
+            return None, None
+        time_error = abs(sample[0] - target_stamp)
+        if time_error > float(self.parameters["maximum_imu_time_difference"]):
+            return None, time_error
+        _, imu_frame, world_from_imu = sample
+        key = (camera_frame, imu_frame)
+        camera_from_imu = self.camera_from_imu_rotations.get(key)
+        if camera_from_imu is None:
+            transform = self.tf_buffer.lookup_transform(
+                camera_frame,
+                imu_frame,
+                Time(),
+                timeout=Duration(seconds=float(self.parameters["transform_timeout"])),
+            )
+            camera_from_imu = _transform_matrix(transform)[:3, :3]
+            self.camera_from_imu_rotations[key] = camera_from_imu
+        return world_from_imu @ camera_from_imu.T, time_error
+
     def _publish_diagnostics(self, result: TrackingResult) -> None:
         message = DiagnosticArray()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -326,6 +449,11 @@ class VisualOdometryNode(Node):
         status.message = result.reason
         values = {
             "state": result.state,
+            "superpoint_backend": self.tracker.backend.active_superpoint_backend,
+            "lightglue_backend": self.tracker.backend.active_lightglue_backend,
+            "extract_seconds": round(self.tracker.backend.last_extract_seconds, 5),
+            "match_seconds": round(self.tracker.backend.last_match_seconds, 5),
+            "match_layers": self.tracker.backend.last_match_layers,
             "keypoints": result.keypoint_count,
             "matches": result.match_count,
             "depth_matches": result.depth_match_count,
@@ -335,6 +463,11 @@ class VisualOdometryNode(Node):
             "reprojection_rmse": result.reprojection_rmse,
             "elapsed_seconds": round(result.elapsed_seconds, 5),
             "keyframe_updated": result.keyframe_updated,
+            "pose_source": result.pose_source,
+            "imu_rotation_error_deg": None
+            if result.imu_rotation_error is None
+            else round(math.degrees(result.imu_rotation_error), 4),
+            "depth_consistency_inliers": result.depth_consistency_inliers,
         }
         status.values = [KeyValue(key=name, value=str(value)) for name, value in values.items()]
         message.status = [status]
@@ -445,6 +578,10 @@ class VisualOdometryNode(Node):
         stamp = _stamp_seconds(color)
         if stamp <= self.processed_stamp:
             return
+        if not processing_is_due(
+            self.processed_stamp, stamp, float(self.parameters["target_rate"])
+        ):
+            return
         if abs(stamp - _stamp_seconds(depth)) > float(
             self.parameters["maximum_sensor_time_difference"]
         ):
@@ -468,6 +605,9 @@ class VisualOdometryNode(Node):
             else:
                 raise ValueError(f"unsupported depth dtype: {depth_image.dtype}")
             base_from_camera = self._camera_transform(color.header.frame_id)
+            world_from_camera_rotation, imu_time_error = (
+                self._world_from_camera_rotation(stamp, color.header.frame_id)
+            )
             result = self.tracker.process(
                 np.asarray(rgb),
                 np.asarray(depth_image),
@@ -475,12 +615,27 @@ class VisualOdometryNode(Node):
                 depth_scale,
                 stamp,
                 base_from_camera,
+                world_from_camera_rotation,
             )
+            if world_from_camera_rotation is None and bool(
+                self.parameters["use_imu_rotation"]
+            ):
+                self.get_logger().warn(
+                    "No synchronized IMU orientation for RGB-D stamp "
+                    f"{stamp:.6f} (nearest error={imu_time_error})",
+                    throttle_duration_sec=2.0,
+                )
             self._publish_diagnostics(result)
             self._publish_status(result.state, result.reason)
             if result.accepted:
                 self._publish_odometry(result, color)
-                self._publish_rgbd_features(result, color, depth, camera_info)
+                if publication_is_due(
+                    self.last_rgbd_features_stamp,
+                    stamp,
+                    float(self.parameters["rgbd_features_rate"]),
+                ):
+                    self._publish_rgbd_features(result, color, depth, camera_info)
+                    self.last_rgbd_features_stamp = stamp
         except Exception as error:  # ROS boundary: report and keep the node diagnosable.
             self.get_logger().error(f"Visual frontend frame failed: {error}")
             self._publish_status("ERROR", type(error).__name__)
@@ -497,6 +652,9 @@ def main(arguments: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         if rclpy.ok():
             rclpy.shutdown()

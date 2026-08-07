@@ -15,9 +15,12 @@
 """Unit tests for web velocity validation."""
 
 import math
+import os
 import struct
+import subprocess
 
 import pytest
+import yaml
 
 from pathlib import Path
 
@@ -33,6 +36,7 @@ from luxi_web_control.web_control_node import is_managed_web_control_command
 from luxi_web_control.web_control_node import localization_covariance_ready
 from luxi_web_control.web_control_node import localization_pose_summary
 from luxi_web_control.web_control_node import make_access_urls
+from luxi_web_control.web_control_node import mapping_graph_conflicts
 from luxi_web_control.web_control_node import NavigationController
 from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
@@ -40,6 +44,28 @@ from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
 
 
 LIMITS = VelocityCommand(0.25, 0.1, 0.8)
+WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_saved_map_browser_preview_is_bounded_by_default():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    limit = config["web_control"]["ros__parameters"]["max_saved_cloud_points"]
+    assert 10_000 <= limit <= 50_000
+
+
+def test_map_export_filters_isolated_depth_outliers():
+    script = (
+        WORKSPACE_ROOT / "project/luxi_RTAB_Map/scripts/export_3d_map.sh"
+    ).read_text(encoding="utf-8")
+    assert "--opt 0" in script
+    assert "--min_range 0.35" in script
+    assert "--edge_bleeding_error 0.10" in script
+    assert "--noise_radius 0.08" in script
+    assert "--noise_k 8" in script
 
 
 def test_velocity_is_clamped_to_server_limits():
@@ -81,19 +107,55 @@ def test_only_our_own_web_control_command_can_be_auto_stopped():
     assert not is_managed_web_control_command("python3 -m http.server 8080")
 
 
-def test_mapping_start_requires_existing_setup_files(tmp_path):
+def test_map_export_sanitizes_camera_sdk_libraries():
+    script = WORKSPACE_ROOT / "tools/export_rtabmap_octomap.sh"
+    environment = os.environ.copy()
+    environment["LD_LIBRARY_PATH"] = (
+        "/opt/MVS/lib/aarch64:/usr/local/cuda/lib64:/opt/MVS/lib/64"
+    )
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"source {script}; sanitize_mvs_library_path; "
+            'printf %s "$LD_LIBRARY_PATH"',
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.stdout == "/usr/local/cuda/lib64"
+
+
+def test_mapping_start_only_requires_workspace_setup(tmp_path):
+    workspace_setup = Path(tmp_path / "workspace_setup.bash")
+    workspace_setup.touch()
     controller = MappingController(
         enabled=True,
         package="luxi_rtab_map",
         launch_file="rgbd_mapping.launch.py",
         rmw_implementation="rmw_cyclonedds_cpp",
-        d435_setup=Path(tmp_path / "missing_d435_setup.bash"),
-        workspace_setup=Path(tmp_path / "missing_workspace_setup.bash"),
+        sensor_setup=None,
+        workspace_setup=workspace_setup,
         log_path=Path(tmp_path / "mapping.log"),
     )
-    started, message = controller.start()
-    assert not started
-    assert "mapping setup file is missing" in message
+    command = controller._command()[-1]
+    assert f"source {workspace_setup}" in command
+    assert "device/D435i" not in command
+    assert "new_map:=true" in command
+
+
+def test_mapping_graph_conflicts_detects_external_slam_nodes():
+    assert mapping_graph_conflicts([
+        ("web_control", "/"),
+        ("luxi_visual_frontend", "/"),
+        ("rtabmap", "/rtabmap"),
+    ]) == ["/luxi_visual_frontend", "/rtabmap/rtabmap"]
+    assert mapping_graph_conflicts([
+        ("web_control", "/"),
+        ("stereo_depth_node", "/"),
+    ]) == []
 
 
 def test_mapping_status_extracts_error_from_launch_log(tmp_path):
@@ -107,13 +169,41 @@ def test_mapping_status_extracts_error_from_launch_log(tmp_path):
         package="luxi_rtab_map",
         launch_file="rgbd_mapping.launch.py",
         rmw_implementation="rmw_cyclonedds_cpp",
-        d435_setup=Path(tmp_path / "d435_setup.bash"),
+        sensor_setup=None,
         workspace_setup=Path(tmp_path / "workspace_setup.bash"),
         log_path=log_path,
     )
     assert controller._latest_log_error() == (
         "[ERROR] camera input is unavailable"
     )
+
+
+def test_mapping_status_reports_child_failure_when_launch_exits_zero(tmp_path):
+    class ExitedLaunch:
+        def poll(self):
+            return 0
+
+    log_path = Path(tmp_path / "mapping.log")
+    log_path.write_text(
+        "[ERROR] [rtabmap]: process has died\n",
+        encoding="utf-8",
+    )
+    controller = MappingController(
+        enabled=True,
+        package="luxi_rtab_map",
+        launch_file="rgbd_mapping.launch.py",
+        rmw_implementation="rmw_cyclonedds_cpp",
+        sensor_setup=None,
+        workspace_setup=Path(tmp_path / "workspace_setup.bash"),
+        log_path=log_path,
+    )
+    controller._process = ExitedLaunch()
+
+    status = controller.status()
+
+    assert status["state"] == "failed"
+    assert status["last_exit_code"] == 0
+    assert status["last_error"] == "[ERROR] [rtabmap]: process has died"
 
 
 def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
@@ -132,7 +222,7 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
         package="luxi_3d_navigation",
         launch_file="saved_map_navigation.launch.py",
         rmw_implementation="rmw_cyclonedds_cpp",
-        d435_setup=setup,
+        sensor_setup=None,
         workspace_setup=setup,
         octomap_library_path=Path(tmp_path),
         log_path=Path(tmp_path / "navigation.log"),
@@ -182,6 +272,10 @@ def test_hloc_index_builder_runs_export_and_cuda_model_build(
     tmp_path,
     monkeypatch,
 ):
+    monkeypatch.setenv(
+        "LD_LIBRARY_PATH",
+        "/opt/MVS/lib/aarch64:/usr/local/cuda/lib64:/opt/MVS/lib/64",
+    )
     exporter = tmp_path / "rtab_hloc_exporter"
     model_builder = tmp_path / "build_reference_model.py"
     database = tmp_path / "map021.db"
@@ -216,6 +310,10 @@ def test_hloc_index_builder_runs_export_and_cuda_model_build(
     ]
     assert calls[1][0][-1] == "--overwrite"
     assert calls[1][1]["env"]["LUXI_HLOC_RUNTIME"] == "gpu"
+    assert all(
+        call[1]["env"]["LD_LIBRARY_PATH"] == "/usr/local/cuda/lib64"
+        for call in calls
+    )
 
 
 def test_navigation_maps_require_database_and_octomap_pair(tmp_path):

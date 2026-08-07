@@ -15,6 +15,7 @@ from launch.actions import (
     ExecuteProcess,
     LogInfo,
     OpaqueFunction,
+    Shutdown,
     TimerAction,
 )
 from launch.conditions import IfCondition
@@ -233,6 +234,7 @@ def generate_launch_description() -> LaunchDescription:
         name="rtabmap",
         namespace="rtabmap",
         output="screen",
+        on_exit=Shutdown(reason="RTAB-Map process exited"),
         additional_env=rtabmap_environment,
         parameters=[{
             "subscribe_depth": False,
@@ -324,7 +326,26 @@ def generate_launch_description() -> LaunchDescription:
         executable="visual_odometry_node",
         name="luxi_visual_frontend",
         output="screen",
-        parameters=[LaunchConfiguration("visual_frontend_config")],
+        parameters=[
+            LaunchConfiguration("visual_frontend_config"),
+            {
+                "minimum_depth": ParameterValue(
+                    LaunchConfiguration("visual_frontend_minimum_depth"),
+                    value_type=float,
+                ),
+                "maximum_depth": ParameterValue(
+                    LaunchConfiguration("visual_frontend_maximum_depth"),
+                    value_type=float,
+                ),
+                "imu_topic": LaunchConfiguration("imu_topic"),
+                "use_imu_rotation": ParameterValue(
+                    LaunchConfiguration("use_imu"), value_type=bool),
+                "camera_to_imu_time_offset": ParameterValue(
+                    LaunchConfiguration("visual_frontend_camera_to_imu_time_offset"),
+                    value_type=float,
+                ),
+            },
+        ],
         condition=IfCondition(LaunchConfiguration("learned_frontend")),
     )
 
@@ -386,6 +407,12 @@ def generate_launch_description() -> LaunchDescription:
                     ]
                 ),
             ),
+            DeclareLaunchArgument(
+                "visual_frontend_minimum_depth", default_value="0.2"),
+            DeclareLaunchArgument(
+                "visual_frontend_maximum_depth", default_value="6.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_camera_to_imu_time_offset", default_value="0.0"),
             DeclareLaunchArgument("visual_odometry", default_value="true"),
             DeclareLaunchArgument("icp_odometry", default_value="false"),
             DeclareLaunchArgument("odom_topic", default_value="odom"),

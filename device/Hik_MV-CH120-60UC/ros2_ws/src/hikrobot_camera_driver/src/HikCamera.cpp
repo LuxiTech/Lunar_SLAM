@@ -1,4 +1,5 @@
 #include "hikrobot_camera_driver/HikCamera.hpp"
+#include "hikrobot_camera_driver/bayer_conversion.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -434,7 +435,8 @@ bool HikCamera::grab(
     cv::Mat& image,
     uint64_t& device_timestamp,
     int64_t& host_timestamp,
-    uint32_t& frame_number
+    uint32_t& frame_number,
+    bool grayscale_output
 )
 {
 
@@ -488,32 +490,57 @@ bool HikCamera::grab(
     device_timestamp = captured_timestamp;
     host_timestamp = captured_host_timestamp;
     frame_number = captured_frame_number;
-    bool converted = false;
-
-    if (pixel_type == PixelType_Gvsp_BGR8_Packed) {
-        image = cv::Mat(height, width, CV_8UC3, frame_buffer_.data()).clone();
-        converted = true;
+    bool converted = true;
+    if (grayscale_output) {
+        if (pixel_type == PixelType_Gvsp_Mono8) {
+            image = cv::Mat(height, width, CV_8UC1, frame_buffer_.data()).clone();
+        } else if (pixel_type == PixelType_Gvsp_BGR8_Packed) {
+            cv::cvtColor(
+                cv::Mat(height, width, CV_8UC3, frame_buffer_.data()), image,
+                swap_red_blue_ ? cv::COLOR_RGB2GRAY : cv::COLOR_BGR2GRAY);
+        } else if (pixel_type == PixelType_Gvsp_RGB8_Packed) {
+            cv::cvtColor(
+                cv::Mat(height, width, CV_8UC3, frame_buffer_.data()), image,
+                swap_red_blue_ ? cv::COLOR_BGR2GRAY : cv::COLOR_RGB2GRAY);
+        } else {
+            const int conversion = hikrobot_camera_driver::bayerGrayConversionCode(
+                pixel_type, swap_red_blue_);
+            if (conversion >= 0) {
+                cv::cvtColor(
+                    cv::Mat(height, width, CV_8UC1, frame_buffer_.data()), image,
+                    conversion);
+            } else {
+                converted = false;
+            }
+        }
+    } else if (pixel_type == PixelType_Gvsp_BGR8_Packed) {
+        const cv::Mat source(height, width, CV_8UC3, frame_buffer_.data());
+        if (swap_red_blue_) {
+            cv::cvtColor(source, image, cv::COLOR_BGR2RGB);
+        } else {
+            image = source.clone();
+        }
     } else if (pixel_type == PixelType_Gvsp_RGB8_Packed) {
-        cv::cvtColor(cv::Mat(height, width, CV_8UC3, frame_buffer_.data()), image, cv::COLOR_RGB2BGR);
-        converted = true;
+        const cv::Mat source(height, width, CV_8UC3, frame_buffer_.data());
+        if (swap_red_blue_) {
+            image = source.clone();
+        } else {
+            cv::cvtColor(source, image, cv::COLOR_RGB2BGR);
+        }
+    } else if (pixel_type == PixelType_Gvsp_Mono8) {
+        cv::cvtColor(
+            cv::Mat(height, width, CV_8UC1, frame_buffer_.data()), image,
+            cv::COLOR_GRAY2BGR);
     } else {
-        int conversion = -1;
-        switch (pixel_type) {
-            case PixelType_Gvsp_Mono8: conversion = cv::COLOR_GRAY2BGR; break;
-            case PixelType_Gvsp_BayerGR8: conversion = cv::COLOR_BayerGR2BGR; break;
-            case PixelType_Gvsp_BayerRG8: conversion = cv::COLOR_BayerRG2BGR; break;
-            case PixelType_Gvsp_BayerGB8: conversion = cv::COLOR_BayerGB2BGR; break;
-            case PixelType_Gvsp_BayerBG8: conversion = cv::COLOR_BayerBG2BGR; break;
-            default: break;
-        }
+        const int conversion = hikrobot_camera_driver::bayerColorConversionCode(
+            pixel_type, swap_red_blue_);
         if (conversion >= 0) {
-            cv::cvtColor(cv::Mat(height, width, CV_8UC1, frame_buffer_.data()), image, conversion);
-            converted = true;
+            cv::cvtColor(
+                cv::Mat(height, width, CV_8UC1, frame_buffer_.data()), image,
+                conversion);
+        } else {
+            converted = false;
         }
-    }
-
-    if (converted && swap_red_blue_ && image.channels() == 3) {
-        cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
     }
 
     if (!converted) {

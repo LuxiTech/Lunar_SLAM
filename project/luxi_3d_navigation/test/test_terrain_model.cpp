@@ -46,6 +46,28 @@ TEST(TerrainModel, RequiresGroundSupport)
   EXPECT_FALSE(terrain.isTraversable(terrain.worldToGrid(0.25, 0.05, 0.05)));
 }
 
+TEST(TerrainModel, HonorsMetricRobotRadiusAtVoxelBoundary)
+{
+  auto tree = makeGround(1);
+  tree.updateNode(octomap::point3d(0.25F, 0.05F, 0.05F), true);
+  tree.updateInnerOccupancy();
+  auto parameters = testParameters();
+  parameters.robot_radius = 0.18;
+  luxi_3d_navigation::TerrainModel terrain(tree, parameters);
+  EXPECT_TRUE(terrain.isTraversable(terrain.worldToGrid(0.05, 0.05, 0.05)));
+}
+
+TEST(TerrainModel, DetectsObstacleInsideMetricRobotRadius)
+{
+  auto tree = makeGround(1);
+  tree.updateNode(octomap::point3d(0.15F, 0.05F, 0.05F), true);
+  tree.updateInnerOccupancy();
+  auto parameters = testParameters();
+  parameters.robot_radius = 0.18;
+  luxi_3d_navigation::TerrainModel terrain(tree, parameters);
+  EXPECT_FALSE(terrain.isTraversable(terrain.worldToGrid(0.05, 0.05, 0.05)));
+}
+
 TEST(TerrainModel, RejectsSemanticPitFootprint)
 {
   auto tree = makeGround(5);

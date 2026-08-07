@@ -43,17 +43,28 @@ if [[ -f "${workspace}/device/D435i/ros2_ws/install/setup.bash" ]]; then
 fi
 set -u
 
+# MVS ships an older libusb which lacks symbols required by ROS/PCL. Camera
+# nodes need that directory, but the standalone exporter must resolve the
+# system libusb instead.
+export LD_LIBRARY_PATH="$(printf '%s' "${LD_LIBRARY_PATH:-}" \
+  | tr ':' '\n' \
+  | awk 'NF && $0 != "/opt/MVS/lib/aarch64" && !seen[$0]++' \
+  | paste -sd: -)"
+
 mkdir -p "${output_directory}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 output_name="luxi_rtab_map_${timestamp}"
 
 rtabmap-export \
   --cloud \
-  --opt 3 \
+  --opt 0 \
   --decimation 4 \
   --voxel 0.03 \
-  --min_range 0.2 \
+  --min_range 0.35 \
   --max_range 4.0 \
+  --edge_bleeding_error 0.10 \
+  --noise_radius 0.08 \
+  --noise_k 8 \
   --output "${output_name}" \
   --output_dir "${output_directory}" \
   "${database_path}"

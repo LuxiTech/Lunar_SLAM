@@ -13,6 +13,8 @@
 #include <vpi/Stream.h>
 #include <vpi/algo/ConvertImageFormat.h>
 #include <vpi/algo/StereoDisparity.h>
+
+#include "stereo_depth/rectification_utils.hpp"
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -80,6 +82,20 @@ sensor_msgs::msg::Image::SharedPtr imageMessage(
     return message;
 }
 
+void prepareImageMessage(
+    sensor_msgs::msg::Image &message, const std_msgs::msg::Header &header,
+    const std::string &encoding, const cv::Size &size)
+{
+    const int type = cvTypeForEncoding(encoding);
+    message.header = header;
+    message.height = static_cast<uint32_t>(size.height);
+    message.width = static_cast<uint32_t>(size.width);
+    message.encoding = encoding;
+    message.is_bigendian = false;
+    message.step = static_cast<uint32_t>(size.width * CV_ELEM_SIZE(type));
+    message.data.resize(static_cast<std::size_t>(message.step) * message.height);
+}
+
 }  // namespace
 
 class StereoDepthNode : public rclcpp::Node
@@ -102,8 +118,20 @@ public:
         matcher_input_order_ = declare_parameter<std::string>("matcher_input_order", "left_right");
         right_rectification_y_offset_px_ = std::clamp(
             declare_parameter<double>("right_rectification_y_offset_px", 0.0), -20.0, 20.0);
+        right_rectification_roll_deg_ = std::clamp(
+            declare_parameter<double>("right_rectification_roll_deg", 0.0), -5.0, 5.0);
         vpi_confidence_threshold_ = std::clamp(
             static_cast<int>(declare_parameter<int>("vpi_confidence_threshold", 0)), 0, 65535);
+        vpi_confidence_type_ = declare_parameter<std::string>(
+            "vpi_confidence_type", "inference");
+        if (vpi_confidence_type_ != "inference" &&
+            vpi_confidence_type_ != "absolute" &&
+            vpi_confidence_type_ != "relative") {
+            RCLCPP_WARN(get_logger(),
+                        "Unknown vpi_confidence_type='%s'; using inference",
+                        vpi_confidence_type_.c_str());
+            vpi_confidence_type_ = "inference";
+        }
         vpi_p1_ = std::clamp(
             static_cast<int>(declare_parameter<int>("vpi_p1", 3)), 1, 255);
         vpi_p2_ = std::clamp(
@@ -210,7 +238,8 @@ public:
             RCLCPP_WARN(get_logger(), "Unknown depth_backend='%s'; using vpi_cuda", depth_backend_.c_str());
             depth_backend_ = "vpi_cuda";
         }
-        if (matcher_input_order_ != "left_right" && matcher_input_order_ != "right_left") {
+        if (matcher_input_order_ != "left_right" && matcher_input_order_ != "right_left" &&
+            matcher_input_order_ != "left_right_flipped") {
             RCLCPP_WARN(get_logger(), "Unknown matcher_input_order='%s'; using left_right",
                         matcher_input_order_.c_str());
             matcher_input_order_ = "left_right";
@@ -285,13 +314,16 @@ public:
                     baseline_m_ > 0.0 ? std::to_string(baseline_m_).c_str() : "auto-from-calibration",
                     max_disparity_, block_size_, pre_filter_size_, pre_filter_cap_,
                     uniqueness_ratio_, speckle_size_, speckle_range_, disp12_max_diff_);
-        RCLCPP_INFO(get_logger(), "Depth backend: %s (VPI fallback_to_sgbm=%s, confidence=%d, p1=%d, p2=%d, uniqueness=%.2f, OFA window=%d passes=%d)",
+        RCLCPP_INFO(get_logger(), "Depth backend: %s (VPI fallback_to_sgbm=%s, confidence=%s/%d, p1=%d, p2=%d, uniqueness=%.2f, OFA window=%d passes=%d)",
                     depth_backend_.c_str(), vpi_fallback_to_sgbm_ ? "true" : "false",
-                    vpi_confidence_threshold_, vpi_p1_, vpi_p2_, vpi_uniqueness_,
+                    vpi_confidence_type_.c_str(), vpi_confidence_threshold_,
+                    vpi_p1_, vpi_p2_, vpi_uniqueness_,
                     vpi_ofa_window_size_, vpi_ofa_num_passes_);
         RCLCPP_INFO(get_logger(), "Stereo matcher input order: %s", matcher_input_order_.c_str());
         RCLCPP_INFO(get_logger(), "Right rectification vertical offset: %.2f px",
                     right_rectification_y_offset_px_);
+        RCLCPP_INFO(get_logger(), "Right rectification roll correction: %.4f deg",
+                    right_rectification_roll_deg_);
         RCLCPP_INFO(get_logger(), "Depth filters: median_blur=%d texture_min_gradient=%.2f edge_delta=%.3f neighbor_count=%d neighbor_delta=%.3f",
                     median_blur_size_, texture_filter_min_gradient_,
                     depth_edge_filter_max_delta_m_, depth_neighbor_filter_min_count_,
@@ -490,16 +522,24 @@ private:
                 source_size = left_gray_raw.size();
             } else {
                 const cv::Mat left_raw = imageView(*left_image, "bgr8");
-                const cv::Mat right_raw = imageView(*right_image, "bgr8");
+                const cv::Mat right_raw = imageView(*right_image, right_image->encoding);
                 if (left_raw.empty() || right_raw.empty() || left_raw.size() != right_raw.size()) {
                     return;
                 }
                 if (!need_left_color_early) {
                     cv::cvtColor(left_raw, left_gray_raw, cv::COLOR_BGR2GRAY);
                 }
-                cv::cvtColor(right_raw, right_gray_raw, cv::COLOR_BGR2GRAY);
+                if (right_image->encoding == "mono8") {
+                    right_gray_raw = right_raw;
+                } else if (right_image->encoding == "bgr8") {
+                    cv::cvtColor(right_raw, right_gray_raw, cv::COLOR_BGR2GRAY);
+                    right_color_raw = right_raw;
+                } else {
+                    throw std::runtime_error(
+                        "right image must use mono8 or bgr8, received " +
+                        right_image->encoding);
+                }
                 left_color_raw = left_raw;
-                right_color_raw = right_raw;
                 source_size = left_raw.size();
             }
             const cv::Size processing_size(
@@ -540,28 +580,58 @@ private:
             const bool need_left_color = need_left_color_early;
             const bool need_right_color = publish_right_rect_color;
 
+            // When RTAB-Map consumes RGBD, let OpenCV write the rectified RGB
+            // image directly into the ROS message storage. The previous path
+            // allocated a second 2.3 MB buffer and copied every pixel again.
+            auto rgbd_msg = publish_rgbd
+                ? std::make_unique<rtabmap_msgs::msg::RGBDImage>() : nullptr;
+            cv::Mat rgbd_color_buffer;
+            if (rgbd_msg) {
+                prepareImageMessage(
+                    rgbd_msg->rgb, left_header, "bgr8", processing_size);
+                rgbd_color_buffer = imageView(rgbd_msg->rgb, "bgr8");
+            }
+
             cv::Mat left_gray, right_gray, left_color, right_color;
             if (rectify_images_) {
                 ensureRectificationMaps(*left_info, *right_info, processing_size, scale_x, scale_y);
                 if (need_left_color && !use_stereo_pair_) {
-                    cv::remap(left_color_raw, left_color, left_map_x_, left_map_y_, cv::INTER_LINEAR);
+                    if (rgbd_msg) {
+                        cv::remap(
+                            left_color_raw, rgbd_color_buffer,
+                            left_map_x_, left_map_y_, cv::INTER_LINEAR);
+                        left_color = rgbd_color_buffer;
+                    } else {
+                        cv::remap(
+                            left_color_raw, left_color,
+                            left_map_x_, left_map_y_, cv::INTER_LINEAR);
+                    }
                     cv::cvtColor(left_color, left_gray, cv::COLOR_BGR2GRAY);
                 } else {
                     cv::remap(left_gray_raw, left_gray, left_map_x_, left_map_y_, cv::INTER_LINEAR);
                 }
                 cv::remap(right_gray_raw, right_gray, right_map_x_, right_map_y_, cv::INTER_LINEAR);
-                if (need_right_color && !use_stereo_pair_) {
+                if (need_right_color && !right_color_raw.empty()) {
                     cv::remap(right_color_raw, right_color, right_map_x_, right_map_y_, cv::INTER_LINEAR);
                 }
             } else if (processing_size != source_size) {
                 if (need_left_color && !use_stereo_pair_) {
-                    cv::resize(left_color_raw, left_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
+                    if (rgbd_msg) {
+                        cv::resize(
+                            left_color_raw, rgbd_color_buffer, processing_size,
+                            0.0, 0.0, cv::INTER_AREA);
+                        left_color = rgbd_color_buffer;
+                    } else {
+                        cv::resize(
+                            left_color_raw, left_color, processing_size,
+                            0.0, 0.0, cv::INTER_AREA);
+                    }
                     cv::cvtColor(left_color, left_gray, cv::COLOR_BGR2GRAY);
                 } else {
                     cv::resize(left_gray_raw, left_gray, processing_size, 0.0, 0.0, cv::INTER_AREA);
                 }
                 cv::resize(right_gray_raw, right_gray, processing_size, 0.0, 0.0, cv::INTER_AREA);
-                if (need_right_color && !use_stereo_pair_) {
+                if (need_right_color && !right_color_raw.empty()) {
                     cv::resize(right_color_raw, right_color, processing_size, 0.0, 0.0, cv::INTER_AREA);
                 }
             } else {
@@ -572,20 +642,8 @@ private:
                 } else {
                     left_gray = left_gray_raw;
                 }
-                if (need_right_color && !use_stereo_pair_) {
+                if (need_right_color && !right_color_raw.empty()) {
                     right_color = right_color_raw;
-                }
-            }
-
-            if (std::abs(right_rectification_y_offset_px_) > 0.001) {
-                const cv::Mat translate_right = (cv::Mat_<double>(2, 3) <<
-                    1.0, 0.0, 0.0,
-                    0.0, 1.0, right_rectification_y_offset_px_);
-                cv::warpAffine(right_gray, right_gray, translate_right, right_gray.size(),
-                               cv::INTER_LINEAR, cv::BORDER_CONSTANT);
-                if (need_right_color && !use_stereo_pair_) {
-                    cv::warpAffine(right_color, right_color, translate_right, right_color.size(),
-                                   cv::INTER_LINEAR, cv::BORDER_CONSTANT);
                 }
             }
 
@@ -595,11 +653,20 @@ private:
             // identical while the NX moves substantially less image data.
             if (use_stereo_pair_) {
                 if (need_left_color) {
-                    cv::cvtColor(left_gray, left_color, cv::COLOR_GRAY2BGR);
+                    if (rgbd_msg) {
+                        cv::cvtColor(left_gray, rgbd_color_buffer, cv::COLOR_GRAY2BGR);
+                        left_color = rgbd_color_buffer;
+                    } else {
+                        cv::cvtColor(left_gray, left_color, cv::COLOR_GRAY2BGR);
+                    }
                 }
-                if (need_right_color) {
-                    cv::cvtColor(right_gray, right_color, cv::COLOR_GRAY2BGR);
-                }
+            }
+            if (need_right_color && right_color.empty()) {
+                cv::cvtColor(right_gray, right_color, cv::COLOR_GRAY2BGR);
+            }
+            if (rgbd_msg && left_color.data != rgbd_color_buffer.data) {
+                left_color.copyTo(rgbd_color_buffer);
+                left_color = rgbd_color_buffer;
             }
 
             // After the cameras are rectified, enhance the same local contrast
@@ -617,8 +684,24 @@ private:
             cv::Mat disparity_float;
             bool used_vpi = false;
             const bool right_first = matcher_input_order_ == "right_left";
-            const cv::Mat &matcher_left = right_first ? right_gray : left_gray;
-            const cv::Mat &matcher_right = right_first ? left_gray : right_gray;
+            const bool flip_for_positive_disparity =
+                matcher_input_order_ == "left_right_flipped";
+            cv::Mat flipped_left;
+            cv::Mat flipped_right;
+            if (flip_for_positive_disparity) {
+                // The current calibration has positive right P[3], so x_right
+                // is greater than x_left. Flipping both rectified images turns
+                // this into the positive disparity expected by VPI while
+                // retaining the left camera as the reference image. This
+                // avoids the holes and collisions caused by forward-splatting
+                // a right-reference disparity image onto the left image grid.
+                cv::flip(left_gray, flipped_left, 1);
+                cv::flip(right_gray, flipped_right, 1);
+            }
+            const cv::Mat &matcher_left = flip_for_positive_disparity
+                ? flipped_left : (right_first ? right_gray : left_gray);
+            const cv::Mat &matcher_right = flip_for_positive_disparity
+                ? flipped_right : (right_first ? left_gray : right_gray);
             if (isVpiBackend()) {
                 used_vpi = computeVpiDisparity(matcher_left, matcher_right, disparity_float);
                 if (!used_vpi && !vpi_fallback_to_sgbm_) {
@@ -643,6 +726,8 @@ private:
             const auto stereo_finished = std::chrono::steady_clock::now();
             if (right_first) {
                 disparity_float = remapRightDisparityToLeft(disparity_float);
+            } else if (flip_for_positive_disparity) {
+                cv::flip(disparity_float, disparity_float, 1);
             }
             cv::Mat depth;
             const double fx = (left_info->p[0] != 0.0 ? left_info->p[0] : left_info->k[0]) * scale_x;
@@ -700,18 +785,20 @@ private:
             if (right_rect_pub_->get_subscription_count() > 0) {
                 right_rect_pub_->publish(*imageMessage(right_rect_header, "mono8", right_gray));
             }
-            if (left_rect_info_pub_->get_subscription_count() > 0 || publish_rgbd) {
+            if (left_rect_info_pub_->get_subscription_count() > 0) {
                 left_rect_info_pub_->publish(left_rect_info);
             }
-            if (right_rect_info_pub_->get_subscription_count() > 0 || publish_rgbd) {
+            if (right_rect_info_pub_->get_subscription_count() > 0) {
                 right_rect_info_pub_->publish(right_rect_info);
             }
 
-            sensor_msgs::msg::Image::SharedPtr left_color_rect_msg;
-            if (publish_left_rect_color || publish_rgbd) {
-                left_color_rect_msg = imageMessage(left_rect_header, "bgr8", left_color);
-                if (publish_left_rect_color) {
-                    left_rect_color_pub_->publish(*left_color_rect_msg);
+            if (publish_left_rect_color) {
+                if (rgbd_msg) {
+                    rgbd_msg->rgb.header = left_rect_header;
+                    left_rect_color_pub_->publish(rgbd_msg->rgb);
+                } else {
+                    left_rect_color_pub_->publish(*imageMessage(
+                        left_rect_header, "bgr8", left_color));
                 }
             }
             if (publish_right_rect_color) {
@@ -719,19 +806,31 @@ private:
                     right_rect_header, "bgr8", right_color));
             }
 
-            sensor_msgs::msg::Image::SharedPtr depth_msg;
+            sensor_msgs::msg::Image::SharedPtr standalone_depth_msg;
             if (depth_pub_->get_subscription_count() > 0 || publish_rgbd) {
-                if (depth_output_encoding_ == "16UC1") {
-                    cv::Mat depth_mm;
-                    depth.convertTo(depth_mm, CV_16UC1, 1000.0);
-                    depth_msg = imageMessage(std_msgs::msg::Header(), "16UC1", depth_mm);
+                sensor_msgs::msg::Image *depth_message = nullptr;
+                if (rgbd_msg) {
+                    prepareImageMessage(
+                        rgbd_msg->depth, std_msgs::msg::Header(),
+                        depth_output_encoding_, processing_size);
+                    depth_message = &rgbd_msg->depth;
                 } else {
-                    depth_msg = imageMessage(std_msgs::msg::Header(), "32FC1", depth);
+                    standalone_depth_msg = std::make_shared<sensor_msgs::msg::Image>();
+                    prepareImageMessage(
+                        *standalone_depth_msg, std_msgs::msg::Header(),
+                        depth_output_encoding_, processing_size);
+                    depth_message = standalone_depth_msg.get();
                 }
-                depth_msg->header.stamp = left_header.stamp;
-                depth_msg->header.frame_id = frame_id;
+                cv::Mat depth_output = imageView(*depth_message, depth_output_encoding_);
+                if (depth_output_encoding_ == "16UC1") {
+                    depth.convertTo(depth_output, CV_16UC1, 1000.0);
+                } else {
+                    depth.copyTo(depth_output);
+                }
+                depth_message->header.stamp = left_header.stamp;
+                depth_message->header.frame_id = frame_id;
                 if (depth_pub_->get_subscription_count() > 0) {
-                    depth_pub_->publish(*depth_msg);
+                    depth_pub_->publish(*depth_message);
                 }
             }
             if (disparity_pub_->get_subscription_count() > 0) {
@@ -747,18 +846,6 @@ private:
             // Avoid constructing unused image messages: on the NX this saves
             // enough memory bandwidth for the live point cloud to follow the
             // 10 Hz camera stream while RTAB-Map stays rate-limited.
-            if (publish_rgbd) {
-                auto rgbd_msg = std::make_unique<rtabmap_msgs::msg::RGBDImage>();
-                rgbd_msg->header = left_rect_header;
-                rgbd_msg->rgb_camera_info = left_rect_info;
-                rgbd_msg->depth_camera_info = left_rect_info;
-                rgbd_msg->rgb = std::move(*left_color_rect_msg);
-                rgbd_msg->depth = std::move(*depth_msg);
-                rgbd_pub_->publish(std::move(rgbd_msg));
-                last_rgbd_publish_ = rgbd_publish_now;
-                ++rgbd_window_count_;
-            }
-
             if (publish_point_cloud) {
                 publishPointCloud(depth, left_color, fx, fy, cx, cy, left_header.stamp, frame_id);
             }
@@ -768,7 +855,20 @@ private:
                     publish_preview_color_raw, publish_preview_color_compressed,
                     publish_preview_depth_raw, publish_preview_depth_compressed);
             }
+            if (rgbd_msg) {
+                rgbd_msg->header = left_rect_header;
+                rgbd_msg->rgb.header = left_rect_header;
+                rgbd_msg->rgb_camera_info = left_rect_info;
+                rgbd_msg->depth_camera_info = left_rect_info;
+                rgbd_pub_->publish(std::move(rgbd_msg));
+                last_rgbd_publish_ = rgbd_publish_now;
+                ++rgbd_window_count_;
+            }
             const int valid_pixels = static_cast<int>(cv::countNonZero(depth > 0));
+            const double valid_percent = depth.total() > 0
+                ? 100.0 * static_cast<double>(valid_pixels) /
+                    static_cast<double>(depth.total())
+                : 0.0;
             const double process_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - process_started).count();
             ++processed_window_count_;
@@ -788,10 +888,12 @@ private:
             }
             RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
                                  "Processed frame: left=%s right=%s disparity=%dx%d valid_depth_pixels=%d "
-                                 "processing=%.1f ms [pre=%.1f stereo=%.1f depth=%.1f publish=%.1f]",
+                                 "valid_depth=%.1f%% processing=%.1f ms "
+                                 "[pre=%.1f stereo=%.1f depth=%.1f publish=%.1f]",
                                  formatTime(frame_stamp).c_str(),
                                  formatTime(right_stamp).c_str(),
-                                 disparity_float.cols, disparity_float.rows, valid_pixels, process_ms,
+                                 disparity_float.cols, disparity_float.rows, valid_pixels,
+                                 valid_percent, process_ms,
                                  std::chrono::duration<double, std::milli>(
                                      preprocess_finished - process_started).count(),
                                  std::chrono::duration<double, std::milli>(
@@ -953,7 +1055,11 @@ private:
         if (ofa_pva_vic) {
             vpi_params_.windowSize = vpi_ofa_window_size_;
             vpi_params_.numPasses = vpi_ofa_num_passes_;
-            vpi_params_.confidenceType = VPI_STEREO_CONFIDENCE_INFERENCE;
+            vpi_params_.confidenceType = vpi_confidence_type_ == "absolute"
+                ? VPI_STEREO_CONFIDENCE_ABSOLUTE
+                : (vpi_confidence_type_ == "relative"
+                    ? VPI_STEREO_CONFIDENCE_RELATIVE
+                    : VPI_STEREO_CONFIDENCE_INFERENCE);
         }
         vpi_size_ = size;
         RCLCPP_INFO(get_logger(), "Initialized VPI %s for %dx%d, max_disparity=%d",
@@ -1140,13 +1246,19 @@ private:
         const cv::Mat left_d(left_info.d, true);
         const cv::Mat right_d(right_info.d, true);
         const cv::Mat left_r = cameraMatrix(left_info.r);
-        const cv::Mat right_r = cameraMatrix(right_info.r);
+        cv::Mat right_r = cameraMatrix(right_info.r);
+        stereo_depth::applyRectificationRoll(right_r, right_rectification_roll_deg_);
         cv::Mat left_p = projectionMatrix3x3(left_info.p);
         cv::Mat right_p = projectionMatrix3x3(right_info.p);
         left_p.row(0) *= scale_x;
         left_p.row(1) *= scale_y;
         right_p.row(0) *= scale_x;
         right_p.row(1) *= scale_y;
+        // Fold the calibrated vertical correction into the rectification map.
+        // This replaces a second full-frame warp and avoids interpolating the
+        // right image twice while preserving the published camera model.
+        stereo_depth::applyVerticalPrincipalPointOffset(
+            right_p, right_rectification_y_offset_px_);
 
         cv::initUndistortRectifyMap(left_k, left_d, left_r, left_p, size,
                                     CV_16SC2, left_map_x_, left_map_y_);
@@ -1424,7 +1536,9 @@ private:
     bool vpi_fallback_to_sgbm_{true};
     std::string matcher_input_order_{"left_right"};
     double right_rectification_y_offset_px_{0.0};
+    double right_rectification_roll_deg_{0.0};
     int vpi_confidence_threshold_{0};
+    std::string vpi_confidence_type_{"inference"};
     int vpi_p1_{3};
     int vpi_p2_{48};
     float vpi_uniqueness_{-1.0f};

@@ -27,6 +27,7 @@ def generate_launch_description():
     camera_params = LaunchConfiguration('camera_params')
     external_trigger = LaunchConfiguration('external_trigger')
     stereo_proc_params = LaunchConfiguration('stereo_proc_params')
+    start_stereo_camera = LaunchConfiguration('start_stereo_camera')
     start_stereo_depth = LaunchConfiguration('start_stereo_depth')
     use_rviz = LaunchConfiguration('use_rviz')
     use_imu = LaunchConfiguration('use_imu')
@@ -59,6 +60,11 @@ def generate_launch_description():
             description='Path to the stereo depth parameter YAML file',
         ),
         DeclareLaunchArgument(
+            'start_stereo_camera',
+            default_value='true',
+            description='Start the standalone Hik stereo camera node',
+        ),
+        DeclareLaunchArgument(
             'start_stereo_depth',
             default_value='true',
             description='Start the standalone stereo depth node',
@@ -88,6 +94,7 @@ def generate_launch_description():
                 {'external_trigger': ParameterValue(external_trigger, value_type=bool)},
             ],
             additional_env=mvs_environment,
+            condition=IfCondition(start_stereo_camera),
         ),
         # The MVS SDK needs a few seconds to open and synchronize both U3V
         # cameras.  Starting the OpenCV depth process concurrently can abort

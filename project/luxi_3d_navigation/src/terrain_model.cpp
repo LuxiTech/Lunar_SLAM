@@ -113,7 +113,9 @@ bool TerrainModel::inPitFootprint(const GridCell3D & cell) const
     0, static_cast<int>(std::ceil(parameters_.robot_radius / resolution())));
   for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
     for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
-      if (dx * dx + dy * dy > radius_cells * radius_cells) {
+      const double offset_m = std::hypot(
+        static_cast<double>(dx), static_cast<double>(dy)) * resolution();
+      if (offset_m > parameters_.robot_radius + 1e-9) {
         continue;
       }
       const double x = center.x() + static_cast<double>(dx) * resolution();
@@ -137,7 +139,9 @@ bool TerrainModel::collides(const GridCell3D & cell) const
   for (int dz = 0; dz < height_cells; ++dz) {
     for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
       for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
-        if (dx * dx + dy * dy > radius_cells * radius_cells) {
+        const double offset_m = std::hypot(
+          static_cast<double>(dx), static_cast<double>(dy)) * resolution();
+        if (offset_m > parameters_.robot_radius + 1e-9) {
           continue;
         }
         if (occupied(GridCell3D{cell.x + dx, cell.y + dy, cell.z + dz})) {

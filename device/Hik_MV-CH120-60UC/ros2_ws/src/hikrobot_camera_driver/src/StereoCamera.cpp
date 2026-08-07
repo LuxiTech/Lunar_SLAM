@@ -292,10 +292,10 @@ bool StereoCamera::grab(
     // Both cameras receive the same hardware trigger. Retrieve and convert the
     // two frames concurrently so one Bayer conversion cannot delay the other.
     auto left_result = std::async(std::launch::async, [&]() {
-        return left_camera_.grab(left, left_ts, left_host_ts, left_frame_number);
+        return left_camera_.grab(left, left_ts, left_host_ts, left_frame_number, false);
     });
 
-    bool r = right_camera_.grab(right, right_ts, right_host_ts, right_frame_number);
+    bool r = right_camera_.grab(right, right_ts, right_host_ts, right_frame_number, true);
     bool l = left_result.get();
 
     static unsigned int asymmetric_failures = 0;
@@ -332,9 +332,11 @@ bool StereoCamera::grab(
             break;
         }
         if (offset_error < 0) {
-            r = right_camera_.grab(right, right_ts, right_host_ts, right_frame_number);
+            r = right_camera_.grab(
+                right, right_ts, right_host_ts, right_frame_number, true);
         } else {
-            l = left_camera_.grab(left, left_ts, left_host_ts, left_frame_number);
+            l = left_camera_.grab(
+                left, left_ts, left_host_ts, left_frame_number, false);
         }
         if (!l || !r) {
             return false;
