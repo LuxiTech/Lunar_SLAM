@@ -102,15 +102,24 @@ def _launch_d435i(context):
         ),
     ]
     if enable_imu:
-        actions.append(Node(
-            package="imu_filter_madgwick",
-            executable="imu_filter_madgwick_node",
-            name="sensor_imu_filter",
-            parameters=[config_path],
-            remappings=[
-                ("imu/data_raw", str(settings.get("imu_output_topic", "/sensors/imu/data_raw"))),
-                ("imu/data", "/sensors/imu/data"),
-            ],
+        filter_command = shlex.join([
+            "ros2", "run", "imu_filter_madgwick", "imu_filter_madgwick_node",
+            "--ros-args", "-r", "__node:=sensor_imu_filter",
+            "--params-file", config_path,
+            "-r", "imu/data_raw:="
+            + str(settings.get("imu_output_topic", "/sensors/imu/data_raw")),
+            "-r", "imu/data:=/sensors/imu/data",
+        ])
+        filter_script = "; ".join([
+            "set -e",
+            f"source {shlex.quote(str(setup_path))}",
+            "export ROS_LOCALHOST_ONLY=0",
+            f"export ROS_DOMAIN_ID={shlex.quote(ros_domain_id)}",
+            f"export RMW_IMPLEMENTATION={shlex.quote(rmw_implementation)}",
+            f"exec {filter_command}",
+        ])
+        actions.append(ExecuteProcess(
+            cmd=["/bin/bash", "-c", filter_script],
             additional_env=environment,
             output="screen",
         ))

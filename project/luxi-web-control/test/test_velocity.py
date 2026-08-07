@@ -262,10 +262,12 @@ def test_sparse_cloud_extracts_finite_xyzrgb_points():
         struct.pack("<fff4xf", -1.0, 0.5, 0.25, rgb),
     ])
 
-    assert extract_sparse_cloud(cloud, 10) == [
+    expected = [
         (1.0, 2.0, 3.0, 17, 34, 51),
         (-1.0, 0.5, 0.25, 17, 34, 51),
     ]
+    assert extract_sparse_cloud(cloud, 10) == expected
+    assert extract_sparse_cloud(cloud, 0) == expected
 
 
 def test_hloc_index_builder_runs_export_and_cuda_model_build(

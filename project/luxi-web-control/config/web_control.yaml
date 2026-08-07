@@ -54,13 +54,13 @@ web_control:
     navigation_localization_timeout: 3.0
     max_voxel_points: 12000
 
-    # Read-only RGB and sparse RTAB-Map cloud previews for the web page.
+    # Read-only RGB and RTAB-Map cloud previews for the web page.
     enable_preview: true
     rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
     cloud_preview_topic: /rtabmap/cloud_map
-    max_cloud_points: 1800
-    # Canvas preview only: bound JSON size and per-frame CPU. The saved PLY,
-    # OctoMap and localization inputs keep their full resolution.
+    max_cloud_points: 0
+    # Canvas preview only: zero forwards every finite point. Set a positive cap
+    # if a large map makes JSON/Canvas expensive. Saved maps are unaffected.
     max_saved_cloud_points: 30000
     semantic_annotation_timeout: 15.0
     semantic_maps_root: ""

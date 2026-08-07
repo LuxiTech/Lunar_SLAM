@@ -5,7 +5,10 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cv_bridge/cv_bridge.h"
+#include "opencv2/imgcodecs.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
+#include "sensor_msgs/image_encodings.hpp"
 
 namespace luxi_adapter
 {
@@ -97,6 +100,18 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
       "compressed_color_output_topic", "/sensors/rgbd/color/image_raw/compressed"));
   const auto enable_imu = declare_parameter<bool>("enable_imu", true);
   const auto enable_compressed_color = declare_parameter<bool>("enable_compressed_color", true);
+  generate_compressed_color_from_raw_ = declare_parameter<bool>(
+    "generate_compressed_color_from_raw", false);
+  compressed_color_jpeg_quality_ = declare_parameter<int>(
+    "compressed_color_jpeg_quality", 80);
+  const auto compressed_color_rate = declare_parameter<double>("compressed_color_rate", 5.0);
+  if (compressed_color_jpeg_quality_ < 1 || compressed_color_jpeg_quality_ > 100) {
+    throw std::invalid_argument("compressed_color_jpeg_quality must be in [1, 100].");
+  }
+  if (compressed_color_rate <= 0.0) {
+    throw std::invalid_argument("compressed_color_rate must be positive.");
+  }
+  compressed_color_period_ns_ = static_cast<int64_t>(1.0e9 / compressed_color_rate);
   const auto reliable_image_output = declare_parameter<bool>("reliable_image_output", false);
   const auto maximum_sensor_time_difference = declare_parameter<double>(
     "maximum_sensor_time_difference", 0.05);
@@ -130,6 +145,7 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
       color_input, sensor_qos,
       [this](sensor_msgs::msg::Image::ConstSharedPtr message) {
         color_publisher_->publish(*message);
+        publish_generated_compressed_color(message);
         {
           std::lock_guard<std::mutex> lock(separate_input_mutex_);
           latest_color_ = message;
@@ -157,7 +173,7 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
         try_publish_separate_rgbd();
       });
   }
-  if (enable_compressed_color) {
+  if (enable_compressed_color && !generate_compressed_color_from_raw_) {
     compressed_color_subscription_ = create_subscription<sensor_msgs::msg::CompressedImage>(
       compressed_color_input, sensor_qos,
       [this](sensor_msgs::msg::CompressedImage::ConstSharedPtr message) {
@@ -190,6 +206,40 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
     camera_info_output.c_str(), compressed_color_output.c_str(),
     enable_compressed_color ? "" : " (disabled)",
     enable_imu ? " and IMU relay is enabled" : "; IMU adaptation is disabled");
+}
+
+void SensorAdapter::publish_generated_compressed_color(
+  const sensor_msgs::msg::Image::ConstSharedPtr & message)
+{
+  if (!generate_compressed_color_from_raw_ || !compressed_color_publisher_ ||
+    compressed_color_publisher_->get_subscription_count() == 0)
+  {
+    return;
+  }
+  const int64_t stamp_ns = stamp_nanoseconds(message->header.stamp);
+  if (last_compressed_color_stamp_ns_ >= 0 && stamp_ns > last_compressed_color_stamp_ns_ &&
+    stamp_ns - last_compressed_color_stamp_ns_ < compressed_color_period_ns_)
+  {
+    return;
+  }
+  try {
+    const auto color = cv_bridge::toCvShare(message, sensor_msgs::image_encodings::BGR8);
+    sensor_msgs::msg::CompressedImage preview;
+    preview.header = message->header;
+    preview.format = "jpeg";
+    if (!cv::imencode(
+        ".jpg", color->image, preview.data,
+        {cv::IMWRITE_JPEG_QUALITY, compressed_color_jpeg_quality_}))
+    {
+      throw std::runtime_error("OpenCV JPEG encoder returned false");
+    }
+    compressed_color_publisher_->publish(preview);
+    last_compressed_color_stamp_ns_ = stamp_ns;
+  } catch (const std::exception & error) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "Unable to generate compressed RGB preview: %s", error.what());
+  }
 }
 
 void SensorAdapter::publish_split_outputs(const rtabmap_msgs::msg::RGBDImage & message)

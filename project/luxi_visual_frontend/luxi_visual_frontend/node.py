@@ -16,7 +16,9 @@ from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -272,6 +274,10 @@ class VisualOdometryNode(Node):
         )
         self.create_service(Trigger, "~/reset", self._reset_callback)
         self.lock = threading.Lock()
+        # Keep high-rate IMU buffering schedulable while RGB-D inference is
+        # running. The default callback group remains mutually exclusive for
+        # tracker access; only the short, lock-protected IMU callback is split.
+        self.imu_callback_group = MutuallyExclusiveCallbackGroup()
         self.latest_color: Image | None = None
         self.latest_depth: Image | None = None
         self.latest_camera_info: CameraInfo | None = None
@@ -304,6 +310,7 @@ class VisualOdometryNode(Node):
                 parameters["imu_topic"],
                 self._imu_callback,
                 imu_history_qos,
+                callback_group=self.imu_callback_group,
             )
         atomic_rgbd_input = bool(parameters["rgbd_input_topic"])
         if atomic_rgbd_input:
@@ -617,8 +624,12 @@ class VisualOdometryNode(Node):
                 base_from_camera,
                 world_from_camera_rotation,
             )
-            if world_from_camera_rotation is None and bool(
-                self.parameters["use_imu_rotation"]
+            # The first frame establishes the odometry origin, so it has no
+            # relative rotation to constrain. Warn only after a pose exists.
+            if (
+                world_from_camera_rotation is None
+                and bool(self.parameters["use_imu_rotation"])
+                and self.last_pose_stamp is not None
             ):
                 self.get_logger().warn(
                     "No synchronized IMU orientation for RGB-D stamp "
@@ -637,6 +648,8 @@ class VisualOdometryNode(Node):
                     self._publish_rgbd_features(result, color, depth, camera_info)
                     self.last_rgbd_features_stamp = stamp
         except Exception as error:  # ROS boundary: report and keep the node diagnosable.
+            if not self.context.ok():
+                return
             self.get_logger().error(f"Visual frontend frame failed: {error}")
             self._publish_status("ERROR", type(error).__name__)
         finally:
@@ -647,11 +660,14 @@ def main(arguments: list[str] | None = None) -> None:
     """Run the learned visual odometry node until ROS shuts down."""
     rclpy.init(args=arguments)
     node = VisualOdometryNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         try:
             node.destroy_node()
         except KeyboardInterrupt:

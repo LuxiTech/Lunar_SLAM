@@ -19,6 +19,11 @@ luxi_adapter:
     camera_info_output_topic: /sensors/rgbd/color/camera_info
     imu_output_topic: /sensors/imu/data_raw
     compressed_color_output_topic: /sensors/rgbd/color/image_raw/compressed
+    # RealSense publishes raw RGB only. Generate a bounded on-demand JPEG
+    # preview for web clients without changing the algorithm RGB-D stream.
+    generate_compressed_color_from_raw: true
+    compressed_color_rate: 5.0
+    compressed_color_jpeg_quality: 80
     enable_imu: true
 
     # Runtime configuration for the D435i profile.

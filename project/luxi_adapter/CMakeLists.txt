@@ -6,6 +6,8 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS imgcodecs)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(rtabmap_msgs REQUIRED)
@@ -16,7 +18,9 @@ target_compile_features(${PROJECT_NAME}_core PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-ament_target_dependencies(${PROJECT_NAME}_core rclcpp rclcpp_components rtabmap_msgs sensor_msgs)
+ament_target_dependencies(
+  ${PROJECT_NAME}_core cv_bridge rclcpp rclcpp_components rtabmap_msgs sensor_msgs)
+target_link_libraries(${PROJECT_NAME}_core ${OpenCV_LIBRARIES})
 rclcpp_components_register_nodes(${PROJECT_NAME}_core "luxi_adapter::SensorAdapter")
 
 add_executable(sensor_adapter_node src/sensor_adapter_main.cpp)

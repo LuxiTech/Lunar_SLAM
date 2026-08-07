@@ -47,6 +47,38 @@ colcon build --packages-select \
 按顺序保持两个终端运行。终端一只负责选定的硬件及适配层；终端二负责网页、底盘以及
 由网页启动/停止的设备无关建图进程。
 
+### 启动前：结束旧进程
+
+每次重新启动系统或切换 HIK/D435i 前，先在一个终端执行下面的清理命令。它会先请求
+网页正常停止建图和定位，使 RTAB-Map 有机会保存数据库；随后只结束当前用户启动的
+Luxi 网页、建图和相机链路，防止重复占用 8080 端口、D435i USB、HIK 相机、GPU 以及
+重复发布 TF/话题。
+
+```bash
+bash -lc '
+set +e
+curl -fsS -X POST -H "Content-Type: application/json" -d "{}" \
+  http://127.0.0.1:8080/api/mapping/stop >/dev/null 2>&1
+curl -fsS -X POST -H "Content-Type: application/json" -d "{}" \
+  http://127.0.0.1:8080/api/navigation/stop >/dev/null 2>&1
+sleep 2
+current_uid=$(id -u)
+process_pattern="[/](luxi_web_control/lib/luxi_web_control/web_control_node|luxi_visual_frontend/lib/luxi_visual_frontend/visual_odometry_node|rtabmap_slam/rtabmap|luxi_adapter/lib/luxi_adapter/sensor_adapter_node|realsense2_camera/lib/realsense2_camera/realsense2_camera_node|imu_filter_madgwick/lib/imu_filter_madgwick/imu_filter_madgwick_node|yesense_std_ros2/lib/yesense_std_ros2/yesense_node_publisher|stereo_depth/lib/stereo_depth/stereo_depth_node|hikrobot_camera_driver/lib/hikrobot_camera_driver/stereo_node)|__node:=[l]uxi_sensor_container|[s]ensor_bringup\.launch\.py|[d]435i\.launch\.py|[s]tereo_camera_bringup\.launch\.py|[l]ekiwi_web_control\.launch\.py|[w]eb_control\.launch\.py"
+pkill -INT -u "$current_uid" -f "$process_pattern"
+sleep 3
+if pgrep -u "$current_uid" -af "$process_pattern"; then
+  echo "仍有 Luxi 旧进程，请先检查上面列出的 PID。"
+  exit 1
+fi
+echo "Luxi 旧进程已清理，可以启动硬件和网页。"
+'
+```
+
+上面整个代码块是一条命令，可直接完整复制执行。如果命令列出残留 PID 并返回失败，
+不要再次启动；先确认残留 PID 属于本工作区并正常结束。
+不要直接使用不带匹配条件的 `killall python3`、`killall component_container_mt`，它们会
+误停桌面或其他 ROS 任务。
+
 ### 终端一：选择并启动硬件
 
 HIK 双目 + H30 IMU（当前推荐测试命令）：
@@ -102,7 +134,7 @@ ros2 launch luxi_web_control web_control.launch.py \
 
 用 `hostname -I` 查看主机地址；同一局域网浏览器打开日志列出的地址，例如
 `http://192.168.123.66:8080`。网页启动后应先看到 HIK RGB 预览，再点击“开始建图”。
-状态变为“建图中”后，页面点云窗口应出现 `/rtabmap/cloud_map` 的抽样彩色点云。采集
+状态变为“建图中”后，页面点云窗口应出现 `/rtabmap/cloud_map` 的完整彩色点云。采集
 结束必须点击“停止建图”，等待 RTAB 正常保存数据库后再关闭终端。
 
 | 网页功能 | 前置条件 |
@@ -187,9 +219,10 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
    保存数据库。
 
 网页下方会同时显示两块只读预览：当前硬件 profile 的 RGB 图像，以及来自
-`/rtabmap/cloud_map` 的稀疏彩色点云。RGB 在相机驱动运行后即可显示；点云需要建图
-成功启动并收到 RTAB-Map 地图数据后才会出现。点云为浏览器实时查看而抽样的最多
-1800 个点，并不是完整地图导出；其显示采用固定等轴视角，适合确认重建是否持续更新。
+`/rtabmap/cloud_map` 的彩色点云。RGB 在相机驱动运行后即可显示；点云需要建图
+成功启动并收到 RTAB-Map 地图数据后才会出现。当前 `max_cloud_points=0`，网页不再对
+实时点云抽样；其显示采用固定等轴视角，适合确认重建是否持续更新。大地图若导致网页
+延迟升高，可将该参数恢复为正数以限制单帧预览点数，这不会改变地图数据库或导出结果。
 
 每一次新建图默认写入 `/home/nvidia/Desktop/lunar_slam/maps/rtab_maps/mapNNN.db`。如果启动失败，
 网页会显示失败状态；详细日志位于
@@ -282,10 +315,10 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `mapping_sensor_setup` | 空 | 可选的额外设备环境；统一工作区构建时保持为空 |
 | `auto_build_hloc_index` | `true` | 加载地图时是否自动构建缺失的 GPU HLoc 索引 |
 | `hloc_index_build_timeout` | `900.0` | HLoc 导出和单个模型构建步骤的超时秒数 |
-| `enable_preview` | `true` | 是否订阅并提供 RGB、稀疏点云预览 |
+| `enable_preview` | `true` | 是否订阅并提供 RGB、实时点云预览 |
 | `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
-| `max_cloud_points` | `1800` | 单次浏览器点云预览的最大抽样点数 |
+| `max_cloud_points` | `0` | 单次浏览器点云预览的最大抽样点数；`0` 表示不抽样 |
 | `max_saved_cloud_points` | `30000` | 浏览器 Canvas 的保存点云显示上限；只限制预览，不改变 PLY、OctoMap 或定位精度 |
 | `semantic_annotation_timeout` | `15.0` | 单次标注检查或保存的超时秒数 |
 | `semantic_maps_root` | `maps/semantic_maps` | 独立语义标注输出目录 |

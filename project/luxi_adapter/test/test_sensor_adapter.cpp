@@ -148,6 +148,64 @@ TEST_F(SensorAdapterTest, RejectsRelativeTopics)
     std::invalid_argument);
 }
 
+TEST_F(SensorAdapterTest, GeneratesCompressedPreviewFromRawColor)
+{
+  const std::vector<rclcpp::Parameter> parameters{
+    {"color_input_topic", "/adapter_preview_test/input/color"},
+    {"depth_input_topic", "/adapter_preview_test/input/depth"},
+    {"camera_info_input_topic", "/adapter_preview_test/input/camera_info"},
+    {"compressed_color_input_topic", "/adapter_preview_test/input/compressed_color"},
+    {"color_output_topic", "/adapter_preview_test/output/color"},
+    {"depth_output_topic", "/adapter_preview_test/output/depth"},
+    {"camera_info_output_topic", "/adapter_preview_test/output/camera_info"},
+    {"compressed_color_output_topic", "/adapter_preview_test/output/compressed_color"},
+    {"rgbd_output_topic", "/adapter_preview_test/output/rgbd"},
+    {"enable_imu", false},
+    {"generate_compressed_color_from_raw", true},
+  };
+  auto adapter = std::make_shared<luxi_adapter::SensorAdapter>(
+    rclcpp::NodeOptions().parameter_overrides(parameters));
+  auto test_node = std::make_shared<rclcpp::Node>("sensor_adapter_preview_test_client");
+  const auto qos = rclcpp::SensorDataQoS();
+  auto color_input = test_node->create_publisher<sensor_msgs::msg::Image>(
+    "/adapter_preview_test/input/color", qos);
+  std::atomic<bool> received_valid_jpeg{false};
+  auto compressed_output = test_node->create_subscription<sensor_msgs::msg::CompressedImage>(
+    "/adapter_preview_test/output/compressed_color", qos,
+    [&received_valid_jpeg](sensor_msgs::msg::CompressedImage::ConstSharedPtr message) {
+      received_valid_jpeg = message->format == "jpeg" && message->data.size() >= 4 &&
+        message->data[0] == 0xff && message->data[1] == 0xd8 &&
+        message->data[message->data.size() - 2] == 0xff &&
+        message->data.back() == 0xd9;
+    });
+
+  sensor_msgs::msg::Image image;
+  image.header.stamp.sec = 1;
+  image.header.frame_id = "camera_color_optical_frame";
+  image.height = 2;
+  image.width = 2;
+  image.encoding = "rgb8";
+  image.step = 6;
+  image.data = {
+    255, 0, 0, 0, 255, 0,
+    0, 0, 255, 255, 255, 255,
+  };
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(adapter);
+  executor.add_node(test_node);
+  const auto deadline = std::chrono::steady_clock::now() + 3s;
+  while (std::chrono::steady_clock::now() < deadline && !received_valid_jpeg) {
+    color_input->publish(image);
+    executor.spin_some();
+    std::this_thread::sleep_for(20ms);
+  }
+
+  EXPECT_TRUE(received_valid_jpeg);
+  executor.remove_node(test_node);
+  executor.remove_node(adapter);
+}
+
 TEST_F(SensorAdapterTest, SplitsSynchronizedRgbdInputIntoCanonicalTopics)
 {
   const std::vector<rclcpp::Parameter> parameters{

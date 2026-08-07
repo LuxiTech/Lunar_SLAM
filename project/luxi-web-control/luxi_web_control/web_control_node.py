@@ -501,7 +501,7 @@ def extract_sparse_cloud(
     message: PointCloud2,
     max_points: int,
 ) -> list:
-    """Extract finite XYZRGB samples from a PointCloud2 message."""
+    """Extract finite XYZRGB samples; non-positive max_points disables sampling."""
     field_by_name = {field.name: field for field in message.fields}
     required_fields = ("x", "y", "z")
     if any(name not in field_by_name for name in required_fields):
@@ -510,7 +510,11 @@ def extract_sparse_cloud(
         return []
 
     total_points = message.width * message.height
-    stride = max(1, (total_points + max_points - 1) // max_points)
+    stride = (
+        1
+        if max_points <= 0
+        else max(1, (total_points + max_points - 1) // max_points)
+    )
     endian = ">" if message.is_bigendian else "<"
     x_field = field_by_name["x"]
     y_field = field_by_name["y"]
@@ -1504,7 +1508,7 @@ class WebControlNode(Node):
             "/sensors/rgbd/color/image_raw/compressed",
         )
         self.declare_parameter("cloud_preview_topic", "/rtabmap/cloud_map")
-        self.declare_parameter("max_cloud_points", 1800)
+        self.declare_parameter("max_cloud_points", 0)
         self.declare_parameter("max_saved_cloud_points", 30000)
         self.declare_parameter("semantic_annotation_timeout", 15.0)
         self.declare_parameter("semantic_annotation_executable", "")
@@ -1853,8 +1857,10 @@ class WebControlNode(Node):
             raise ValueError("publish_rate must be greater than zero")
         if self.command_timeout <= 0.0:
             raise ValueError("command_timeout must be greater than zero")
-        if not 100 <= self.max_cloud_points <= 20000:
-            raise ValueError("max_cloud_points must be between 100 and 20000")
+        if self.max_cloud_points != 0 and not 100 <= self.max_cloud_points <= 20000:
+            raise ValueError(
+                "max_cloud_points must be zero or between 100 and 20000"
+            )
         if self.max_saved_cloud_points < 0:
             raise ValueError("max_saved_cloud_points must be zero or positive")
         if not 100 <= self.max_voxel_points <= 50000:

@@ -23,6 +23,8 @@ public:
 
 private:
   static std::string require_topic(const std::string & parameter_name, const std::string & topic);
+  void publish_generated_compressed_color(
+    const sensor_msgs::msg::Image::ConstSharedPtr & message);
   void publish_rgbd_input(rtabmap_msgs::msg::RGBDImage::UniquePtr message);
   void publish_split_outputs(const rtabmap_msgs::msg::RGBDImage & message);
   void try_publish_separate_rgbd();
@@ -48,6 +50,10 @@ private:
   sensor_msgs::msg::CameraInfo::ConstSharedPtr latest_camera_info_;
   int64_t last_rgbd_stamp_ns_{-1};
   int64_t maximum_sensor_time_difference_ns_{50000000};
+  int64_t last_compressed_color_stamp_ns_{-1};
+  int64_t compressed_color_period_ns_{200000000};
+  int compressed_color_jpeg_quality_{80};
+  bool generate_compressed_color_from_raw_{false};
 };
 
 }  // namespace luxi_adapter
