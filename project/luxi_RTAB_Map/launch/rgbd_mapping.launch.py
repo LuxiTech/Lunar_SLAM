@@ -280,7 +280,7 @@ def generate_launch_description() -> LaunchDescription:
         remappings=[
             ("rgbd_image", LaunchConfiguration("rgbd_topic")),
             ("odom", LaunchConfiguration("odom_topic")),
-            ("imu", LaunchConfiguration("imu_topic")),
+            ("imu", LaunchConfiguration("rtabmap_imu_topic")),
         ],
         arguments=[
             effective_rtabmap_args, "--ros-args", "--log-level",
@@ -440,6 +440,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("cloud_output_voxelized", default_value="true"),
             DeclareLaunchArgument("use_imu", default_value="true"),
             DeclareLaunchArgument("imu_topic", default_value="/sensors/imu/data"),
+            DeclareLaunchArgument(
+                "rtabmap_imu_topic",
+                default_value="/sensors/imu/data",
+                description=(
+                    "IMU topic consumed by the RTAB backend. It is separate from "
+                    "the frontend IMU topic to avoid applying the same yaw twice."
+                ),
+            ),
             DeclareLaunchArgument("wait_for_camera", default_value="true"),
             DeclareLaunchArgument(
                 "camera_wait_timeout",

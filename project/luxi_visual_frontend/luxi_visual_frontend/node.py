@@ -53,7 +53,7 @@ def _quaternion_matrix(x: float, y: float, z: float, w: float) -> np.ndarray:
     return np.array(
         [
             [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * w), 2.0 * (y * z - x * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
             [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
         ],
         dtype=np.float64,
@@ -188,11 +188,13 @@ class VisualOdometryNode(Node):
             "keyframe_max_age": 1.0,
             "keyframe_min_inlier_ratio": 0.40,
             "maximum_frame_translation": 0.25,
-            "maximum_frame_rotation_deg": 45.0,
+            "maximum_frame_rotation_deg": 15.0,
+            "maximum_frame_angular_rate_deg": 90.0,
             "maximum_consecutive_tracking_failures": 3,
             "minimum_depth_consistency_matches": 20,
             "maximum_depth_consistency_error": 0.08,
             "maximum_imu_rotation_error_deg": 12.0,
+            "maximum_imu_gravity_error_deg": 10.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -245,6 +247,9 @@ class VisualOdometryNode(Node):
             keyframe_min_inlier_ratio=float(parameters["keyframe_min_inlier_ratio"]),
             maximum_frame_translation=float(parameters["maximum_frame_translation"]),
             maximum_frame_rotation=math.radians(float(parameters["maximum_frame_rotation_deg"])),
+            maximum_frame_angular_rate=math.radians(
+                float(parameters["maximum_frame_angular_rate_deg"])
+            ),
             maximum_consecutive_tracking_failures=int(
                 parameters["maximum_consecutive_tracking_failures"]
             ),
@@ -256,6 +261,9 @@ class VisualOdometryNode(Node):
             ),
             maximum_imu_rotation_error=math.radians(
                 float(parameters["maximum_imu_rotation_error_deg"])
+            ),
+            maximum_imu_gravity_error=math.radians(
+                float(parameters["maximum_imu_gravity_error_deg"])
             ),
         )
         self.parameters = parameters
@@ -474,6 +482,9 @@ class VisualOdometryNode(Node):
             "imu_rotation_error_deg": None
             if result.imu_rotation_error is None
             else round(math.degrees(result.imu_rotation_error), 4),
+            "imu_gravity_error_deg": None
+            if result.imu_gravity_error is None
+            else round(math.degrees(result.imu_gravity_error), 4),
             "depth_consistency_inliers": result.depth_consistency_inliers,
         }
         status.values = [KeyValue(key=name, value=str(value)) for name, value in values.items()]
@@ -667,7 +678,10 @@ def main(arguments: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        executor.shutdown()
+        try:
+            executor.shutdown(timeout_sec=2.0)
+        except KeyboardInterrupt:
+            pass
         try:
             node.destroy_node()
         except KeyboardInterrupt:

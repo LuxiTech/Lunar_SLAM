@@ -8,6 +8,7 @@ from luxi_visual_frontend.geometry import (
     invert_transform,
     project_depth_points,
 )
+from luxi_visual_frontend.node import _matrix_quaternion, _quaternion_matrix
 
 
 def test_fixed_rotation_translation_rejects_depth_outliers():
@@ -103,3 +104,15 @@ def test_grid_coverage_rejects_clustered_features():
     )
     assert image_grid_coverage(clustered, 640, 480) == 1.0 / 12.0
     assert image_grid_coverage(distributed, 640, 480) == 1.0
+
+
+def test_quaternion_matrix_is_rigid_and_round_trips():
+    quaternion = np.array([-0.05418659, -0.02383051, 0.92378210, -0.37831541])
+    quaternion /= np.linalg.norm(quaternion)
+
+    rotation = _quaternion_matrix(*quaternion)
+    recovered = np.array(_matrix_quaternion(rotation))
+
+    np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-9)
+    np.testing.assert_allclose(np.linalg.det(rotation), 1.0, atol=1e-9)
+    assert np.isclose(abs(np.dot(quaternion, recovered)), 1.0, atol=1e-9)

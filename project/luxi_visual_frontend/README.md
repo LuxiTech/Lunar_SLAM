@@ -66,10 +66,30 @@ safe production optimization.
 
 Odometry tracking and RTAB feature publication have independent rates. On the
 HIK + Orin NX profile the frontend tracks the newest frame at 5 Hz, while
-`rgbd_features_rate` defaults to 2 Hz for RTAB-Map's 1 Hz detector. This keeps
+`rgbd_features_rate` defaults to 1 Hz for RTAB-Map's 1 Hz detector. This keeps
 the combined stereo and learned-frontend GPU duty in range without changing
 feature quality, avoids rebuilding a full RGB-D feature message on every
 tracking update, and retains one-frame margin for rejected updates.
+
+## Visual and IMU rotation policy
+
+Filtered IMU orientation is not treated as an absolute yaw measurement. PnP
+keeps authority over heading, while IMU gravity checks roll/pitch consistency.
+The fixed-rotation RGB-D translation path is used only when its full relative
+rotation agrees with PnP. During a short visual gap, keyframe reseeding
+propagates relative IMU rotation from the last accepted visual pose instead of
+reapplying orientation accumulated since startup. Rejected frames are not
+published to RTAB-Map.
+
+The learned mapping launch disables direct backend IMU input by default, so
+the same yaw is not fused once in this frontend and again in RTAB-Map. The
+diagnostic topic exposes both `imu_rotation_error_deg` and the yaw-independent
+`imu_gravity_error_deg`.
+
+Camera/base-frame conversion uses a unit-quaternion rigid rotation. Its
+orthogonality, determinant and quaternion round trip are regression-tested;
+otherwise a non-rigid transform can turn an ordinary yaw crossing into a large
+published odometry jump.
 
 The package does not run NetVLAD. NetVLAD remains isolated in `luxi_hloc` for
 low-rate global retrieval.
