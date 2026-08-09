@@ -12,6 +12,12 @@
 
 网页仍发布二维点击目标 `(x, y, 0)`，规划器会在 `snap_search_radius_cells` 范围内自动吸附到可行走表面高度。输出的 `/navigation/planned_path` 保留每个节点的 z；轮式底盘跟随器只执行 x/y/偏航，并且必须额外收到 `/navigation/start=true` 才会运动。
 
+跟随器以 15 Hz 发布 `/navigation/cmd_vel`，并通过 `/navigation/active` 和
+`/navigation/follower_state` 报告 `plan_ready`、`active`、`goal_reached`、`localization_lost`
+等状态。定位 TF 超过 1 秒未更新或机器人距离路径超过 0.50 m 时立即停车。LeKiwi 专用网页
+启动中的 C++ 速度仲裁器负责手动/导航独占、0.3 秒导航看门狗、急停以及底盘角速度方向适配，
+最后才发布真实 `/cmd_vel`。
+
 ```bash
 cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash

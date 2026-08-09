@@ -76,14 +76,18 @@ def generate_launch_description():
         ),
         Node(
             package="luxi_3d_navigation",
-            executable="twist_direction_adapter_node",
-            name="lekiwi_twist_direction_adapter",
+            executable="velocity_command_mux_node",
+            name="lekiwi_velocity_command_mux",
             output="screen",
             parameters=[{
-                "input_topic": LaunchConfiguration(
+                "manual_input_topic": LaunchConfiguration(
                     "standard_cmd_vel_topic"
                 ),
+                "navigation_input_topic": "/navigation/cmd_vel",
                 "output_topic": LaunchConfiguration("cmd_vel_topic"),
+                "navigation_active_topic": "/navigation/active",
+                "navigation_stop_topic": "/navigation/stop",
+                "emergency_stop_topic": "/navigation/emergency_stop",
                 "invert_angular_z": True,
             }],
         ),

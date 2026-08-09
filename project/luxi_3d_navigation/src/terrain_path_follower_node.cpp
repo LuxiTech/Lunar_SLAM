@@ -10,6 +10,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "tf2/utils.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
@@ -25,6 +26,8 @@ public:
     declare_parameter<std::string>("start_topic", "/navigation/start");
     declare_parameter<std::string>("stop_topic", "/navigation/stop");
     declare_parameter<std::string>("cmd_vel_topic", "/navigation/cmd_vel");
+    declare_parameter<std::string>("active_topic", "/navigation/active");
+    declare_parameter<std::string>("state_topic", "/navigation/follower_state");
     declare_parameter<std::string>("map_frame", "map");
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<double>("control_rate", 15.0);
@@ -34,36 +37,44 @@ public:
     declare_parameter<double>("angular_gain", 1.2);
     declare_parameter<double>("max_linear_speed", 0.10);
     declare_parameter<double>("max_angular_speed", 0.35);
+    declare_parameter<double>("localization_timeout", 1.0);
+    declare_parameter<double>("max_path_deviation_m", 0.50);
+
+    cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>(
+      get_parameter("cmd_vel_topic").as_string(), 10);
+    active_pub_ = create_publisher<std_msgs::msg::Bool>(
+      get_parameter("active_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
+    state_pub_ = create_publisher<std_msgs::msg::String>(
+      get_parameter("state_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
 
     path_sub_ = create_subscription<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local(),
       [this](const nav_msgs::msg::Path::SharedPtr message) {
         path_ = message->poses;
-        active_ = false;
-        publishStop();
+        setState(false, path_.empty() ? "waiting_path" : "plan_ready");
         RCLCPP_INFO(get_logger(), "Received %zu terrain path poses; waiting for explicit start", path_.size());
       });
     start_sub_ = create_subscription<std_msgs::msg::Bool>(
       get_parameter("start_topic").as_string(), 10,
       [this](const std_msgs::msg::Bool::SharedPtr message) {
-        active_ = message->data && !path_.empty();
-        if (!active_) {
-          publishStop();
-        }
+        setState(
+          message->data && !path_.empty(),
+          message->data && !path_.empty() ? "active" :
+          (path_.empty() ? "waiting_path" : "stopped"));
       });
     stop_sub_ = create_subscription<std_msgs::msg::Bool>(
       get_parameter("stop_topic").as_string(), 10,
       [this](const std_msgs::msg::Bool::SharedPtr message) {
         if (message->data) {
-          active_ = false;
-          publishStop();
+          setState(false, "stopped");
         }
       });
-    cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>(
-      get_parameter("cmd_vel_topic").as_string(), 10);
     const double rate = std::max(1.0, get_parameter("control_rate").as_double());
     timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / rate), [this]() {control();});
+    publishState("waiting_path");
   }
 
   ~TerrainPathFollowerNode() override
@@ -86,14 +97,22 @@ private:
       const auto transform = tf_buffer_.lookupTransform(
         get_parameter("map_frame").as_string(), get_parameter("base_frame").as_string(),
         tf2::TimePointZero);
+      const rclcpp::Time transform_stamp(transform.header.stamp);
+      const double transform_age = (now() - transform_stamp).seconds();
+      if (transform_stamp.nanoseconds() == 0 || transform_age < -0.1 ||
+        transform_age > get_parameter("localization_timeout").as_double())
+      {
+        RCLCPP_WARN(get_logger(), "Localization transform is stale (age=%.3fs)", transform_age);
+        setState(false, "localization_lost");
+        return;
+      }
       follow(
         transform.transform.translation.x, transform.transform.translation.y,
         tf2::getYaw(transform.transform.rotation));
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Localization unavailable: %s", error.what());
-      active_ = false;
-      publishStop();
+      setState(false, "localization_lost");
     }
   }
 
@@ -103,8 +122,7 @@ private:
     if (std::hypot(goal.x - robot_x, goal.y - robot_y) <=
       get_parameter("goal_tolerance_m").as_double())
     {
-      active_ = false;
-      publishStop();
+      setState(false, "goal_reached");
       RCLCPP_INFO(get_logger(), "3D terrain navigation goal reached");
       return;
     }
@@ -118,6 +136,13 @@ private:
         nearest = index;
         nearest_distance = distance;
       }
+    }
+    if (nearest_distance > get_parameter("max_path_deviation_m").as_double()) {
+      RCLCPP_WARN(
+        get_logger(), "Robot is %.3fm away from the planned path; stopping",
+        nearest_distance);
+      setState(false, "path_deviation");
+      return;
     }
     const double lookahead = get_parameter("lookahead_m").as_double();
     const auto * target = &goal;
@@ -152,6 +177,25 @@ private:
     }
   }
 
+  void publishState(const std::string & state) const
+  {
+    std_msgs::msg::Bool active;
+    active.data = active_;
+    active_pub_->publish(active);
+    std_msgs::msg::String message;
+    message.data = state;
+    state_pub_->publish(message);
+  }
+
+  void setState(bool active, const std::string & state)
+  {
+    active_ = active;
+    if (!active_) {
+      publishStop();
+    }
+    publishState(state);
+  }
+
   bool active_{false};
   std::vector<geometry_msgs::msg::PoseStamped> path_;
   tf2_ros::Buffer tf_buffer_;
@@ -160,6 +204,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr start_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stop_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr active_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

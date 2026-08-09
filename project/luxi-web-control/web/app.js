@@ -37,6 +37,8 @@ const navigationFilterButton = $("#navigationFilterButton");
 const navigationLocateButton = $("#navigationLocateButton");
 const navigationStopButton = $("#navigationStopButton");
 const navigationGoalButton = $("#navigationGoalButton");
+const navigationStartButton = $("#navigationStartButton");
+const navigationHaltButton = $("#navigationHaltButton");
 const voxelMapCanvas = $("#voxelMapCanvas");
 const voxelMapHint = $("#voxelMapHint");
 const navigationShowCloud = $("#navigationShowCloud");
@@ -372,7 +374,14 @@ function updateNavigation(navigation) {
   if (!navigationLoadPending && ["original", "filtered"].includes(navigation.map_variant)) {
     navigationUseFiltered = navigation.map_variant === "filtered";
   }
-  const name = navigationStateNames[navigation.state] || navigation.state;
+  let name = navigationStateNames[navigation.state] || navigation.state;
+  if (navigation.active) {
+    name = "行驶中";
+  } else if (navigation.follower_state === "goal_reached") {
+    name = "已到达";
+  } else if (navigation.path_ready) {
+    name = "规划完成";
+  }
   navigationState.textContent = name;
   navigationState.className = `preview-state ${navigation.state === "running" ? "live" : ""}`;
   const selectedMap = navigationMapRecords.get(navigationMapSelect.value);
@@ -396,6 +405,10 @@ function updateNavigation(navigation) {
     navigationVoxels.variant !== selectedVariant;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
   navigationGoalButton.disabled = !navigation.localization_ready;
+  navigationStartButton.disabled =
+    !navigation.localization_ready || !navigation.path_ready ||
+    navigation.active || estopActive;
+  navigationHaltButton.disabled = !navigation.active;
   navigationPose = navigation.pose || null;
   if (navigationLoadPending) {
     drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
@@ -411,8 +424,15 @@ function updateNavigation(navigation) {
     if (navigation.localization_stage === "localized") {
       const fitness = navigation.localization_fitness == null
         ? "" : `，fitness=${Number(navigation.localization_fitness).toFixed(3)}`;
+      const motionText = navigation.active
+        ? "正在沿规划路径行驶。"
+        : navigation.follower_state === "goal_reached"
+          ? "已到达目标点。"
+          : navigation.path_ready
+            ? `规划完成，共 ${navigation.path_point_count} 个路径点；可点击“出发”。`
+            : "请选择目标点并等待路径规划完成。";
       navigationDetail.textContent =
-        `${mapName} 已完成 HLoc 粗定位和 ICP 精定位：${poseText}${fitness}。`;
+        `${mapName} 已完成 HLoc 粗定位和 ICP 精定位：${poseText}${fitness}。${motionText}`;
     } else if (navigation.localization_stage === "refining") {
       navigationDetail.textContent =
         `${mapName} 已找到 HLoc 全局候选，正在进行 ICP 精配准：${poseText}。`;
@@ -999,10 +1019,34 @@ async function stopNavigation() {
   }
 }
 
+async function startNavigationMotion() {
+  navigationStartButton.disabled = true;
+  try {
+    const result = await api("/api/navigation/start");
+    updateNavigation(result.navigation);
+    showToast("导航已出发；手动操作或停止按钮会立即取消导航");
+  } catch (error) {
+    showToast(`出发失败：${error.message}`);
+  }
+}
+
+async function haltNavigationMotion() {
+  navigationHaltButton.disabled = true;
+  try {
+    const result = await api("/api/navigation/halt");
+    updateNavigation(result.navigation);
+    showToast("导航行驶已停止，定位和规划路径仍保留");
+  } catch (error) {
+    showToast(`停止行驶失败：${error.message}`);
+  }
+}
+
 navigationLoadButton.addEventListener("click", loadNavigationMap);
 navigationFilterButton.addEventListener("click", toggleNavigationFilter);
 navigationLocateButton.addEventListener("click", startNavigationLocalization);
 navigationStopButton.addEventListener("click", stopNavigation);
+navigationStartButton.addEventListener("click", startNavigationMotion);
+navigationHaltButton.addEventListener("click", haltNavigationMotion);
 navigationMapSelect.addEventListener("change", () => {
   navigationUseFiltered = false;
   selectedGoal = null;

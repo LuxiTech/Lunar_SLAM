@@ -548,6 +548,43 @@ def test_navigation_goal_rejects_invalid_coordinates(payload):
         parse_navigation_goal(payload)
 
 
+def test_navigation_motion_requires_localization_and_path():
+    node = WebControlNode.__new__(WebControlNode)
+    node._lock = threading.Lock()
+    node._navigation_lock = threading.Lock()
+    node._estop_active = False
+    node._navigation_follower_state = "plan_ready"
+    published = []
+    node.navigation_start_publisher = SimpleNamespace(
+        publish=published.append
+    )
+    node.navigation_status = lambda: {
+        "state": "running",
+        "localization_ready": True,
+        "path_ready": True,
+        "active": False,
+    }
+
+    started, message = node.start_navigation_motion()
+
+    assert started
+    assert message == "navigation start command sent"
+    assert len(published) == 1
+    assert published[0].data is True
+    assert node._navigation_follower_state == "starting"
+
+    node.navigation_status = lambda: {
+        "state": "running",
+        "localization_ready": True,
+        "path_ready": False,
+        "active": False,
+    }
+    started, message = node.start_navigation_motion()
+    assert not started
+    assert "valid path" in message
+    assert len(published) == 1
+
+
 @pytest.mark.parametrize("value", ["fast", True, None, math.inf, math.nan])
 def test_invalid_velocity_is_rejected(value):
     with pytest.raises(ValueError):

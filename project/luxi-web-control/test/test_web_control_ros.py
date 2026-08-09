@@ -104,6 +104,8 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"navigationShowTraversable" in page
             assert b"navigationShowCostmap" in page
             assert b"navigationFilterButton" in page
+            assert b"navigationStartButton" in page
+            assert b"navigationHaltButton" in page
 
         with urlopen(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -115,6 +117,8 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"[...maps].reverse().find" in app
             assert b"navigationDrag.yaw +" in app
             assert b'filtered: navigationUseFiltered' in app
+            assert b'api("/api/navigation/start")' in app
+            assert b'api("/api/navigation/halt")' in app
 
         with urlopen(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200

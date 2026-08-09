@@ -179,9 +179,15 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py
 ```
 
 该 LeKiwi 专用启动会保持网页和导航侧的 ROS 标准方向，并通过 C++ 适配器把
-`/lekiwi/cmd_vel_standard` 转发到 `/cmd_vel`。由于当前底盘角速度方向与 ROS 标准相反，
-适配器只反转 `angular.z`；线速度及其余分量保持不变。通用
+网页 `/lekiwi/cmd_vel_standard` 与导航 `/navigation/cmd_vel` 仲裁后转发到 `/cmd_vel`。
+导航只有在路径跟随器发布 `/navigation/active=true` 时才能接管；非零手动指令、急停、停止、
+定位失效或导航指令超过 0.3 秒未更新都会取消接管并输出零速度。由于当前底盘角速度方向与
+ROS 标准相反，最终输出只反转 `angular.z`；线速度及其余分量保持不变。通用
 `web_control.launch.py` 不做这个硬件修正。
+
+实车导航操作顺序为：加载地图、自动定位、选择目标点、等待“规划完成”，再点击“出发”。
+“停止行驶”保留定位和当前路径；“停止定位”和软件急停都会先停止行驶。当前速度上限为
+0.10 m/s，控制链只使用保存的静态地图，尚未实现实时局部障碍物融合和动态绕行。
 
 它会自动设置所需 DDS 环境变量。若使用通用 launch，则应在本机设置：
 

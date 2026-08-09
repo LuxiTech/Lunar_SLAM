@@ -41,7 +41,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 from visualization_msgs.msg import Marker
 
 
@@ -1524,6 +1524,25 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 "ok": True, "message": message, "goal": {"x": x, "y": y, "z": z},
             })
             return
+        if path == "/api/navigation/start":
+            started, message = node.start_navigation_motion()
+            if not started:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "ok": True,
+                "message": message,
+                "navigation": node.navigation_status(),
+            })
+            return
+        if path == "/api/navigation/halt":
+            node.halt_navigation_motion()
+            self._send_json(HTTPStatus.OK, {
+                "ok": True,
+                "message": "navigation motion stopped",
+                "navigation": node.navigation_status(),
+            })
+            return
         if path == "/api/semantic/save":
             try:
                 result = node.save_semantic_annotations(payload)
@@ -1580,6 +1599,17 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
+        self.declare_parameter("navigation_start_topic", "/navigation/start")
+        self.declare_parameter("navigation_stop_topic", "/navigation/stop")
+        self.declare_parameter("navigation_active_topic", "/navigation/active")
+        self.declare_parameter(
+            "navigation_follower_state_topic",
+            "/navigation/follower_state",
+        )
+        self.declare_parameter(
+            "navigation_emergency_stop_topic",
+            "/navigation/emergency_stop",
+        )
         self.declare_parameter(
             "navigation_localization_pose_topic", "/luxi_hloc/coarse_pose"
         )
@@ -1744,6 +1774,21 @@ class WebControlNode(Node):
         self.navigation_path_topic = str(
             self.get_parameter("navigation_path_topic").value
         )
+        self.navigation_start_topic = str(
+            self.get_parameter("navigation_start_topic").value
+        )
+        self.navigation_stop_topic = str(
+            self.get_parameter("navigation_stop_topic").value
+        )
+        self.navigation_active_topic = str(
+            self.get_parameter("navigation_active_topic").value
+        )
+        self.navigation_follower_state_topic = str(
+            self.get_parameter("navigation_follower_state_topic").value
+        )
+        self.navigation_emergency_stop_topic = str(
+            self.get_parameter("navigation_emergency_stop_topic").value
+        )
         self.navigation_localization_pose_topic = str(
             self.get_parameter("navigation_localization_pose_topic").value
         )
@@ -1869,6 +1914,8 @@ class WebControlNode(Node):
         self._planned_path_points = []
         self._path_frame_id = "map"
         self._path_received_at: Optional[float] = None
+        self._navigation_active = False
+        self._navigation_follower_state = "stopped"
 
         qos = QoSProfile(
             depth=10,
@@ -1878,6 +1925,15 @@ class WebControlNode(Node):
         self.publisher = self.create_publisher(Twist, self.cmd_vel_topic, qos)
         self.navigation_goal_publisher = self.create_publisher(
             PoseStamped, self.navigation_goal_topic, qos
+        )
+        self.navigation_start_publisher = self.create_publisher(
+            Bool, self.navigation_start_topic, qos
+        )
+        self.navigation_stop_publisher = self.create_publisher(
+            Bool, self.navigation_stop_topic, qos
+        )
+        self.navigation_emergency_stop_publisher = self.create_publisher(
+            Bool, self.navigation_emergency_stop_topic, qos
         )
         navigation_qos = QoSProfile(
             depth=1,
@@ -1894,6 +1950,18 @@ class WebControlNode(Node):
             NavigationPath,
             self.navigation_path_topic,
             self._on_navigation_path,
+            navigation_qos,
+        )
+        self.navigation_active_subscription = self.create_subscription(
+            Bool,
+            self.navigation_active_topic,
+            self._on_navigation_active,
+            navigation_qos,
+        )
+        self.navigation_follower_state_subscription = self.create_subscription(
+            String,
+            self.navigation_follower_state_topic,
+            self._on_navigation_follower_state,
             navigation_qos,
         )
         localization_qos = QoSProfile(
@@ -2087,6 +2155,16 @@ class WebControlNode(Node):
             self._path_frame_id = message.header.frame_id or "map"
             self._path_received_at = time.monotonic()
 
+    def _on_navigation_active(self, message: Bool) -> None:
+        """Track whether the C++ path follower currently owns navigation."""
+        with self._navigation_lock:
+            self._navigation_active = bool(message.data)
+
+    def _on_navigation_follower_state(self, message: String) -> None:
+        """Expose the bounded C++ follower state to the browser."""
+        with self._navigation_lock:
+            self._navigation_follower_state = message.data[:80]
+
     def _on_navigation_localization_pose(
         self, message: PoseWithCovarianceStamped
     ) -> None:
@@ -2171,6 +2249,8 @@ class WebControlNode(Node):
             self._navigation_cloud_error = ""
             self._planned_path_points = []
             self._path_received_at = None
+            self._navigation_active = False
+            self._navigation_follower_state = "stopped"
 
     def rgb_preview(self) -> Tuple[Optional[bytes], str]:
         """Return the latest compressed RGB frame and its MIME type."""
@@ -2415,6 +2495,11 @@ class WebControlNode(Node):
             self._last_command_time = None
             self._timed_out = False
         self._publish(VelocityCommand())
+        message = Bool()
+        message.data = active
+        self.navigation_emergency_stop_publisher.publish(message)
+        if active:
+            self.halt_navigation_motion()
 
     def start_mapping(self) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
@@ -2683,6 +2768,7 @@ class WebControlNode(Node):
 
     def stop_navigation(self) -> Tuple[bool, str]:
         """Stop localization/planning while retaining the currently loaded map."""
+        self.halt_navigation_motion()
         stopped, message = self.navigation.stop()
         if stopped:
             with self._navigation_lock:
@@ -2695,7 +2781,40 @@ class WebControlNode(Node):
                 self._refined_localization_received_at = None
                 self._refined_localization_fitness = None
                 self._refined_localization_status = ""
+                self._navigation_active = False
+                self._navigation_follower_state = "stopped"
         return stopped, message
+
+    def start_navigation_motion(self) -> Tuple[bool, str]:
+        """Start low-speed path following only after localization and planning."""
+        navigation = self.navigation_status()
+        with self._lock:
+            estop_active = self._estop_active
+        if estop_active:
+            return False, "release emergency stop before starting navigation"
+        if navigation["state"] != "running":
+            return False, "start map localization before navigation"
+        if not navigation["localization_ready"]:
+            return False, "wait for fresh HLoc and ICP localization"
+        if not navigation["path_ready"]:
+            return False, "select a reachable goal and wait for a valid path"
+        if navigation["active"]:
+            return False, "navigation is already active"
+        message = Bool()
+        message.data = True
+        self.navigation_start_publisher.publish(message)
+        with self._navigation_lock:
+            self._navigation_follower_state = "starting"
+        return True, "navigation start command sent"
+
+    def halt_navigation_motion(self) -> None:
+        """Stop path following while leaving localization and the path loaded."""
+        message = Bool()
+        message.data = True
+        self.navigation_stop_publisher.publish(message)
+        with self._navigation_lock:
+            self._navigation_active = False
+            self._navigation_follower_state = "stopped"
 
     def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
         """Publish a map-frame goal only after HLoc and ICP localization is ready."""
@@ -2704,6 +2823,7 @@ class WebControlNode(Node):
             return False, "load a map and wait for navigation to start first"
         if not navigation["localization_ready"]:
             return False, "wait for HLoc and ICP localization before selecting a goal"
+        self.halt_navigation_motion()
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         with self._navigation_lock:
@@ -2744,6 +2864,14 @@ class WebControlNode(Node):
                 and refined_age <= self.navigation_localization_timeout
             )
             running = status["state"] == "running"
+            status["path_ready"] = running and bool(
+                self._planned_path_points
+            )
+            status["path_point_count"] = len(self._planned_path_points)
+            status["active"] = running and self._navigation_active
+            status["follower_state"] = (
+                self._navigation_follower_state if running else "stopped"
+            )
             status["coarse_localization_ready"] = running and coarse_ready
             status["coarse_consistency_ready"] = (
                 running and self._coarse_gate_ready

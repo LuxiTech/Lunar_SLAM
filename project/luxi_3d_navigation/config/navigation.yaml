@@ -21,3 +21,5 @@ terrain_path_follower:
     max_angular_speed: 0.35
     lookahead_m: 0.25
     goal_tolerance_m: 0.12
+    localization_timeout: 1.0
+    max_path_deviation_m: 0.50

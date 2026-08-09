@@ -44,6 +44,11 @@ web_control:
     navigation_goal_topic: /navigation/goal_pose
     navigation_marker_topic: /navigation/occupied_voxels
     navigation_path_topic: /navigation/planned_path
+    navigation_start_topic: /navigation/start
+    navigation_stop_topic: /navigation/stop
+    navigation_active_topic: /navigation/active
+    navigation_follower_state_topic: /navigation/follower_state
+    navigation_emergency_stop_topic: /navigation/emergency_stop
     # Goal selection is disabled until HLoc publishes a geometrically verified pose.
     navigation_localization_pose_topic: /luxi_hloc/coarse_pose
     # HLoc supplies the global candidate; luxi_location refines it with ICP.
