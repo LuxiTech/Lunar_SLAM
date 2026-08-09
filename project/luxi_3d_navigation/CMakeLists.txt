@@ -79,6 +79,11 @@ target_compile_features(terrain_path_follower_node PUBLIC cxx_std_17)
 ament_target_dependencies(terrain_path_follower_node
   geometry_msgs nav_msgs rclcpp std_msgs tf2 tf2_geometry_msgs tf2_ros)
 
+add_executable(twist_direction_adapter_node src/twist_direction_adapter_node.cpp)
+target_compile_features(twist_direction_adapter_node PUBLIC cxx_std_17)
+target_include_directories(twist_direction_adapter_node PRIVATE include)
+ament_target_dependencies(twist_direction_adapter_node geometry_msgs rclcpp)
+
 add_executable(terrain_plan_check src/terrain_plan_check.cpp)
 target_compile_features(terrain_plan_check PUBLIC cxx_std_17)
 target_include_directories(terrain_plan_check PRIVATE include)
@@ -93,6 +98,7 @@ target_link_options(terrain_plan_check PRIVATE "-Wl,--disable-new-dtags")
 install(TARGETS
   octomap_3d_astar_planner_node
   terrain_path_follower_node
+  twist_direction_adapter_node
   terrain_plan_check
   terrain_map_to_points
   DESTINATION lib/${PROJECT_NAME})
@@ -109,6 +115,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_terrain_cloud_classifier test/test_terrain_cloud_classifier.cpp)
   target_link_libraries(test_terrain_cloud_classifier terrain_cloud_classifier)
   target_include_directories(test_terrain_cloud_classifier PRIVATE include)
+  ament_add_gtest(test_twist_direction_adapter test/test_twist_direction_adapter.cpp)
+  target_include_directories(test_twist_direction_adapter PRIVATE include)
+  ament_target_dependencies(test_twist_direction_adapter geometry_msgs)
   set_target_properties(
     test_terrain_cloud_classifier PROPERTIES BUILD_RPATH "/lib/aarch64-linux-gnu")
   target_link_options(test_terrain_cloud_classifier PRIVATE "-Wl,--disable-new-dtags")

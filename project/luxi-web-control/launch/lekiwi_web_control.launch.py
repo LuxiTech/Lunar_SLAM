@@ -18,11 +18,13 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 import os
 
 
@@ -36,6 +38,10 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
+        DeclareLaunchArgument(
+            "standard_cmd_vel_topic",
+            default_value="/lekiwi/cmd_vel_standard",
+        ),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
         DeclareLaunchArgument("http_port", default_value="8080"),
         DeclareLaunchArgument(
@@ -54,13 +60,31 @@ def generate_launch_description():
         ),
         SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "0"),
         SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(generic_launch),
-            launch_arguments={
-                "cmd_vel_topic": LaunchConfiguration("cmd_vel_topic"),
-                "bind_address": LaunchConfiguration("bind_address"),
-                "http_port": LaunchConfiguration("http_port"),
-                "config": LaunchConfiguration("config"),
-            }.items(),
+        GroupAction(
+            scoped=True,
+            actions=[IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(generic_launch),
+                launch_arguments={
+                    "cmd_vel_topic": LaunchConfiguration(
+                        "standard_cmd_vel_topic"
+                    ),
+                    "bind_address": LaunchConfiguration("bind_address"),
+                    "http_port": LaunchConfiguration("http_port"),
+                    "config": LaunchConfiguration("config"),
+                }.items(),
+            )],
+        ),
+        Node(
+            package="luxi_3d_navigation",
+            executable="twist_direction_adapter_node",
+            name="lekiwi_twist_direction_adapter",
+            output="screen",
+            parameters=[{
+                "input_topic": LaunchConfiguration(
+                    "standard_cmd_vel_topic"
+                ),
+                "output_topic": LaunchConfiguration("cmd_vel_topic"),
+                "invert_angular_z": True,
+            }],
         ),
     ])

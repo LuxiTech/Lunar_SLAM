@@ -178,6 +178,11 @@ ros2 run luxi_web_control web_control_node --ros-args \
 ros2 launch luxi_web_control lekiwi_web_control.launch.py
 ```
 
+该 LeKiwi 专用启动会保持网页和导航侧的 ROS 标准方向，并通过 C++ 适配器把
+`/lekiwi/cmd_vel_standard` 转发到 `/cmd_vel`。由于当前底盘角速度方向与 ROS 标准相反，
+适配器只反转 `angular.z`；线速度及其余分量保持不变。通用
+`web_control.launch.py` 不做这个硬件修正。
+
 它会自动设置所需 DDS 环境变量。若使用通用 launch，则应在本机设置：
 
 ```bash
