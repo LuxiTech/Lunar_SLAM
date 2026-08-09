@@ -101,6 +101,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"semanticSaveButton" in page
             assert b"semanticGroundZ" in page
             assert b"navigationShowSemantics" in page
+            assert b"navigationFilterButton" in page
 
         with urlopen(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -110,6 +111,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"semanticAnnotation && navigationShowSemantics.checked" in app
             assert b"[...maps].reverse().find" in app
             assert b"navigationDrag.yaw +" in app
+            assert b'filtered: navigationUseFiltered' in app
 
         with urlopen(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200
@@ -123,6 +125,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             saved_cloud = json.load(response)["cloud"]
             assert saved_cloud == {
                 "map_id": "map011",
+                "variant": "original",
                 "point_count": 2,
                 "error": None,
                 "points": [[0.0, 1.0, 2.0, 3, 4, 5], [6.0, 7.0, 8.0, 9, 10, 11]],
@@ -140,6 +143,16 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             )
         except HTTPError as error:
             assert error.code == 409
+
+        try:
+            _post(
+                base_url,
+                "/api/navigation/load_map",
+                {"map_id": "map011", "filtered": "true"},
+            )
+            assert False, "a non-boolean filtered selector must be rejected"
+        except HTTPError as error:
+            assert error.code == 400
 
         status, result = _post(
             base_url,

@@ -26,6 +26,11 @@ set -euo pipefail
 local workspace="${LUXI_WORKSPACE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 local rtab_maps_directory="${workspace}/maps/rtab_maps"
 local octo_maps_directory="${workspace}/maps/octo_maps"
+local filter_cloud=false
+if [[ "${1:-}" == "--filter" ]]; then
+  filter_cloud=true
+  shift
+fi
 local database_path="${1:-}"
 
 if [[ -z "${database_path}" ]]; then
@@ -55,8 +60,15 @@ if [[ -z "${ply_path}" || ! -s "${ply_path}" ]]; then
   echo "RTAB-Map export did not produce a cloud PLY file." >&2
   exit 3
 fi
+if [[ "${filter_cloud}" == true ]]; then
+  local filtered_ply_path="${output_directory}/$(basename "${database_path%.db}")_filtered_cloud.ply"
+  "${workspace}/tools/map_cloud_filter/map_cloud_filter" \
+    "${ply_path}" "${filtered_ply_path}"
+  ply_path="${filtered_ply_path}"
+fi
 local octomap_path="${output_directory}/$(basename "${database_path%.db}").bt"
 ros2 run luxi_voxel_navigation ply_to_octomap "${ply_path}" "${octomap_path}" 0.10
+echo "OctoMap source cloud: ${ply_path}"
 echo "Offline OctoMap: ${octomap_path}"
 }
 

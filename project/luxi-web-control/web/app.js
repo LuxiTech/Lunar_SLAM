@@ -33,6 +33,7 @@ const navigationState = $("#navigationState");
 const navigationDetail = $("#navigationDetail");
 const navigationMapSelect = $("#navigationMapSelect");
 const navigationLoadButton = $("#navigationLoadButton");
+const navigationFilterButton = $("#navigationFilterButton");
 const navigationLocateButton = $("#navigationLocateButton");
 const navigationStopButton = $("#navigationStopButton");
 const navigationGoalButton = $("#navigationGoalButton");
@@ -81,6 +82,7 @@ let navigationPinch = null;
 const navigationPointers = new Map();
 let navigationGoalMode = false;
 let navigationMapRecords = new Map();
+let navigationUseFiltered = false;
 let navigationPose = null;
 let semanticAnnotation = null;
 let semanticDraftPit = [];
@@ -363,17 +365,31 @@ const navigationStateNames = {
 
 function updateNavigation(navigation) {
   if (!navigation) return;
+  if (!navigationLoadPending && ["original", "filtered"].includes(navigation.map_variant)) {
+    navigationUseFiltered = navigation.map_variant === "filtered";
+  }
   const name = navigationStateNames[navigation.state] || navigation.state;
   navigationState.textContent = name;
   navigationState.className = `preview-state ${navigation.state === "running" ? "live" : ""}`;
   const selectedMap = navigationMapRecords.get(navigationMapSelect.value);
+  const selectedVariant = navigationUseFiltered ? "filtered" : "original";
+  const selectedLocalizable = navigationUseFiltered
+    ? selectedMap?.filtered_localizable
+    : selectedMap?.localizable;
   navigationLoadButton.disabled = navigationLoadPending || !selectedMap?.convertible;
+  navigationFilterButton.disabled = navigationLoadPending || !selectedMap?.convertible;
+  navigationFilterButton.textContent = navigationUseFiltered
+    ? "查看原始地图"
+    : selectedMap?.filtered_loadable ? "查看过滤地图" : "生成过滤地图";
+  navigationFilterButton.classList.toggle("active", navigationUseFiltered);
   navigationMapSelect.disabled = navigationLoadPending;
   navigationLocateButton.disabled =
     navigationLoadPending || navigationLocatePending ||
     navigation.state === "running" ||
-    !selectedMap?.localizable ||
-    navigationCloud.map_id !== selectedMap?.id;
+    !selectedLocalizable ||
+    navigationCloud.map_id !== selectedMap?.id ||
+    navigationCloud.variant !== selectedVariant ||
+    navigationVoxels.variant !== selectedVariant;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
   navigationGoalButton.disabled = !navigation.localization_ready;
   navigationPose = navigation.pose || null;
@@ -425,6 +441,7 @@ function updateNavigationMaps(maps) {
       : item.convertible
         ? `${item.id}（选择后自动转换）`
         : `${item.id}（缺少 .db，无法转换）`;
+    if (item.filtered_loadable) option.textContent += "；可切换过滤版";
     navigationMapSelect.append(option);
   }
   if (!maps.length) {
@@ -833,7 +850,11 @@ async function refreshSemanticAnnotations(mapId) {
 async function loadNavigationMap(automatic = false) {
   const mapId = navigationMapSelect.value;
   const map = navigationMapRecords.get(mapId);
-  if (!map?.convertible || navigationLoadPending) return;
+  if (!map?.convertible || navigationLoadPending) return false;
+  const filtered = navigationUseFiltered;
+  const variantLabel = filtered ? "过滤地图" : "原始地图";
+  const variantLoadable = filtered ? map.filtered_loadable : map.loadable;
+  const variantLocalizable = filtered ? map.filtered_localizable : map.localizable;
   let navigationResult = {enabled: true, state: "stopped"};
   navigationLoadPending = true;
   updateNavigation(navigationResult);
@@ -846,13 +867,17 @@ async function loadNavigationMap(automatic = false) {
   clearSemanticAnnotations();
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
-  if (!map.loadable) {
-    navigationDetail.textContent = `${mapId} 正在转换为网页显示格式，请稍候…`;
-  } else if (!map.localizable) {
+  if (!variantLoadable) {
+    navigationDetail.textContent = `${mapId} 正在生成${variantLabel}，请稍候…`;
+  } else if (!variantLocalizable) {
     navigationDetail.textContent = `${mapId} 正在使用 GPU 构建 HLoc 索引，请稍候…`;
   }
   try {
-    const result = await api("/api/navigation/load_map", {map_id: mapId});
+    const result = await api("/api/navigation/load_map", {
+      map_id: mapId,
+      filtered: navigationUseFiltered,
+    });
+    navigationUseFiltered = result.map_variant === "filtered";
     updateNavigationMaps(Array.isArray(result.maps) ? result.maps : []);
     navigationResult = result.navigation || navigationResult;
     updateNavigation(navigationResult);
@@ -863,14 +888,28 @@ async function loadNavigationMap(automatic = false) {
     ]);
     const loadedMap = navigationMapRecords.get(mapId);
     showToast(
-      `${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；` +
-      (loadedMap?.localizable ? "可点击“自动定位”" : "尚未构建 HLoc 索引")
+      `${mapId} ${variantLoadable ? "已加载" : "已生成并加载"}${variantLabel}；` +
+      ((navigationUseFiltered ? loadedMap?.filtered_localizable : loadedMap?.localizable)
+        ? "可点击“自动定位”" : "尚未构建 HLoc 索引")
     );
+    return true;
   } catch (error) {
     showToast(`${automatic ? "地图转换或加载" : "地图加载"}失败：${error.message}`);
+    return false;
   } finally {
     navigationLoadPending = false;
     updateNavigation(navigationResult);
+  }
+}
+
+async function toggleNavigationFilter() {
+  if (navigationLoadPending) return;
+  const previous = navigationUseFiltered;
+  navigationUseFiltered = !previous;
+  updateNavigation({enabled: true, state: "stopped"});
+  if (!await loadNavigationMap(false)) {
+    navigationUseFiltered = previous;
+    updateNavigation({enabled: true, state: "stopped"});
   }
 }
 
@@ -903,9 +942,11 @@ async function stopNavigation() {
 }
 
 navigationLoadButton.addEventListener("click", loadNavigationMap);
+navigationFilterButton.addEventListener("click", toggleNavigationFilter);
 navigationLocateButton.addEventListener("click", startNavigationLocalization);
 navigationStopButton.addEventListener("click", stopNavigation);
 navigationMapSelect.addEventListener("change", () => {
+  navigationUseFiltered = false;
   selectedGoal = null;
   navigationCloud = {};
   navigationVoxels = {};

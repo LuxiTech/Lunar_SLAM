@@ -321,6 +321,7 @@ def test_hloc_index_builder_runs_export_and_cuda_model_build(
 def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
     (tmp_path / "rtab_maps").mkdir()
     (tmp_path / "octo_maps" / "map011_octomap").mkdir(parents=True)
+    (tmp_path / "octo_maps" / "map011_filtered_octomap").mkdir(parents=True)
     (tmp_path / "rtab_maps" / "map011.db").write_bytes(b"database")
     (tmp_path / "rtab_maps" / "map012.db").write_bytes(b"database")
     (tmp_path / "hloc_maps" / "map011").mkdir(parents=True)
@@ -337,6 +338,15 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
         "end_header\n0 0 0 255 0 1\n1.25 -2.5 3 4 5 6\n",
         encoding="ascii",
     )
+    filtered_octomap = (
+        tmp_path / "octo_maps" / "map011_filtered_octomap" / "map011.bt"
+    )
+    filtered_octomap.write_bytes(b"filtered octomap")
+    filtered_cloud = (
+        tmp_path / "octo_maps" / "map011_filtered_octomap"
+        / "map011_filtered_cloud.ply"
+    )
+    filtered_cloud.write_text(cloud_path.read_text(encoding="ascii"), encoding="ascii")
 
     assert discover_navigation_maps(tmp_path) == [
         {
@@ -346,22 +356,30 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
                 (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").resolve()
             ),
             "cloud_path": str(cloud_path.resolve()),
+            "filtered_octomap_path": str(filtered_octomap.resolve()),
+            "filtered_cloud_path": str(filtered_cloud.resolve()),
             "hloc_map_directory": str(
                 (tmp_path / "hloc_maps" / "map011").resolve()
             ),
             "convertible": True,
             "loadable": True,
             "localizable": True,
+            "filtered_loadable": True,
+            "filtered_localizable": True,
         },
         {
             "id": "map012",
             "database_path": str((tmp_path / "rtab_maps" / "map012.db").resolve()),
             "octomap_path": None,
             "cloud_path": None,
+            "filtered_octomap_path": None,
+            "filtered_cloud_path": None,
             "hloc_map_directory": None,
             "convertible": True,
             "loadable": False,
             "localizable": False,
+            "filtered_loadable": False,
+            "filtered_localizable": False,
         },
     ]
 

@@ -103,10 +103,24 @@ def _map_id_from_export_path(candidate: Path, octo_directory: Path) -> str:
             break
         if MAP_IDENTIFIER.fullmatch(parent.name):
             return parent.name
-        matched = re.match(r"^(map\d+)_octomap$", parent.name)
+        matched = re.match(
+            r"^(map\d+)_(?:octomap|filtered(?:_.+)?)$", parent.name
+        )
         if matched:
             return matched.group(1)
     return ""
+
+
+def _is_filtered_export_path(candidate: Path, octo_directory: Path) -> bool:
+    """Return whether a saved layer belongs to a filtered map export."""
+    if candidate.stem.endswith("_filtered_cloud"):
+        return True
+    for parent in candidate.parents:
+        if parent == octo_directory.parent:
+            break
+        if re.match(r"^map\d+_filtered(?:_.+)?$", parent.name):
+            return True
+    return False
 
 
 def discover_navigation_maps(maps_root: Path) -> list:
@@ -120,24 +134,39 @@ def discover_navigation_maps(maps_root: Path) -> list:
         if MAP_IDENTIFIER.fullmatch(candidate.stem)
     }
     octomaps: Dict[str, Path] = {}
+    filtered_octomaps: Dict[str, Path] = {}
     for candidate in octo_directory.rglob("*.bt"):
         map_id = _map_id_from_export_path(candidate, octo_directory)
         if map_id:
-            previous = octomaps.get(map_id)
+            collection = (
+                filtered_octomaps
+                if _is_filtered_export_path(candidate, octo_directory)
+                else octomaps
+            )
+            previous = collection.get(map_id)
             if previous is None or candidate.stat().st_mtime > previous.stat().st_mtime:
-                octomaps[map_id] = candidate.resolve()
+                collection[map_id] = candidate.resolve()
     clouds: Dict[str, Path] = {}
+    filtered_clouds: Dict[str, Path] = {}
     for candidate in octo_directory.rglob("*_cloud.ply"):
         map_id = _map_id_from_export_path(candidate, octo_directory)
         if map_id:
-            previous = clouds.get(map_id)
+            collection = (
+                filtered_clouds
+                if _is_filtered_export_path(candidate, octo_directory)
+                else clouds
+            )
+            previous = collection.get(map_id)
             if previous is None or candidate.stat().st_mtime > previous.stat().st_mtime:
-                clouds[map_id] = candidate.resolve()
+                collection[map_id] = candidate.resolve()
     maps = []
-    for map_id in sorted(set(databases) | set(octomaps), key=lambda value: int(value[3:])):
+    map_ids = set(databases) | set(octomaps) | set(filtered_octomaps)
+    for map_id in sorted(map_ids, key=lambda value: int(value[3:])):
         database = databases.get(map_id)
         octomap = octomaps.get(map_id)
         cloud = clouds.get(map_id)
+        filtered_octomap = filtered_octomaps.get(map_id)
+        filtered_cloud = filtered_clouds.get(map_id)
         hloc_map = (hloc_directory / map_id).resolve()
         hloc_ready = (hloc_map / "metadata.yaml").is_file()
         maps.append({
@@ -145,6 +174,10 @@ def discover_navigation_maps(maps_root: Path) -> list:
             "database_path": str(database) if database else None,
             "octomap_path": str(octomap) if octomap else None,
             "cloud_path": str(cloud) if cloud else None,
+            "filtered_octomap_path": (
+                str(filtered_octomap) if filtered_octomap else None
+            ),
+            "filtered_cloud_path": str(filtered_cloud) if filtered_cloud else None,
             "hloc_map_directory": str(hloc_map) if hloc_ready else None,
             "convertible": database is not None,
             "loadable": database is not None and octomap is not None,
@@ -152,6 +185,17 @@ def discover_navigation_maps(maps_root: Path) -> list:
                 database is not None
                 and octomap is not None
                 and cloud is not None
+                and hloc_ready
+            ),
+            "filtered_loadable": (
+                database is not None
+                and filtered_octomap is not None
+                and filtered_cloud is not None
+            ),
+            "filtered_localizable": (
+                database is not None
+                and filtered_octomap is not None
+                and filtered_cloud is not None
                 and hloc_ready
             ),
         })
@@ -1382,7 +1426,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(map_id, str):
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "map_id must be a string")
                 return
-            loaded, message = node.load_navigation_map(map_id)
+            filtered = payload.get("filtered", False)
+            if not isinstance(filtered, bool):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST, "filtered must be boolean"
+                )
+                return
+            loaded, message = node.load_navigation_map(map_id, filtered)
             if not loaded:
                 self._send_error_json(HTTPStatus.CONFLICT, message)
                 return
@@ -1390,6 +1440,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 "ok": True, "message": message,
                 "maps": node.navigation_maps(),
                 "navigation": node.navigation_status(),
+                "map_variant": "filtered" if filtered else "original",
             })
             return
         if path == "/api/navigation/localize":
@@ -1724,6 +1775,7 @@ class WebControlNode(Node):
         self._voxel_resolution = 0.0
         self._voxel_received_at: Optional[float] = None
         self._navigation_voxel_map_id: Optional[str] = None
+        self._navigation_voxel_variant: Optional[str] = None
         self._navigation_voxel_error = ""
         self._localization_ready = False
         self._localization_variance: Optional[float] = None
@@ -1736,6 +1788,7 @@ class WebControlNode(Node):
         self._refined_localization_status = ""
         self._navigation_cloud_points = []
         self._navigation_cloud_map_id: Optional[str] = None
+        self._navigation_cloud_variant: Optional[str] = None
         self._navigation_cloud_error = ""
         self._planned_path_points = []
         self._path_frame_id = "map"
@@ -2019,6 +2072,7 @@ class WebControlNode(Node):
             self._voxel_points = []
             self._voxel_received_at = None
             self._navigation_voxel_map_id = None
+            self._navigation_voxel_variant = None
             self._navigation_voxel_error = ""
             self._localization_ready = False
             self._localization_variance = None
@@ -2031,6 +2085,7 @@ class WebControlNode(Node):
             self._refined_localization_status = ""
             self._navigation_cloud_points = []
             self._navigation_cloud_map_id = None
+            self._navigation_cloud_variant = None
             self._navigation_cloud_error = ""
             self._planned_path_points = []
             self._path_received_at = None
@@ -2052,6 +2107,7 @@ class WebControlNode(Node):
         with self._navigation_lock:
             return {
                 "map_id": self._navigation_voxel_map_id,
+                "variant": self._navigation_voxel_variant,
                 "frame_id": self._voxel_frame_id,
                 "resolution": self._voxel_resolution,
                 "point_count": len(self._voxel_points),
@@ -2061,7 +2117,9 @@ class WebControlNode(Node):
                 "points": list(self._voxel_points),
             }
 
-    def _load_navigation_voxels(self, map_id: str, octomap_path: str) -> str:
+    def _load_navigation_voxels(
+        self, map_id: str, octomap_path: str, variant: str = "original"
+    ) -> str:
         """Load saved occupied voxels immediately, without waiting for ROS launch."""
         command = [
             str(self.octomap_points_executable), str(octomap_path),
@@ -2083,6 +2141,7 @@ class WebControlNode(Node):
             with self._navigation_lock:
                 self._voxel_points = []
                 self._navigation_voxel_map_id = map_id
+                self._navigation_voxel_variant = variant
                 self._navigation_voxel_error = error
                 self._voxel_received_at = None
             return error
@@ -2092,6 +2151,7 @@ class WebControlNode(Node):
             self._voxel_resolution = resolution
             self._voxel_received_at = time.monotonic()
             self._navigation_voxel_map_id = map_id
+            self._navigation_voxel_variant = variant
             self._navigation_voxel_error = ""
         return ""
 
@@ -2100,16 +2160,20 @@ class WebControlNode(Node):
         with self._navigation_lock:
             return {
                 "map_id": self._navigation_cloud_map_id,
+                "variant": self._navigation_cloud_variant,
                 "point_count": len(self._navigation_cloud_points),
                 "error": self._navigation_cloud_error or None,
                 "points": list(self._navigation_cloud_points),
             }
 
-    def _load_navigation_cloud(self, map_id: str, cloud_path: Optional[str]) -> str:
+    def _load_navigation_cloud(
+        self, map_id: str, cloud_path: Optional[str], variant: str = "original"
+    ) -> str:
         if not cloud_path:
             with self._navigation_lock:
                 self._navigation_cloud_points = []
                 self._navigation_cloud_map_id = map_id
+                self._navigation_cloud_variant = variant
                 self._navigation_cloud_error = "no exported colored PLY is available"
             return self._navigation_cloud_error
         try:
@@ -2119,11 +2183,13 @@ class WebControlNode(Node):
             with self._navigation_lock:
                 self._navigation_cloud_points = []
                 self._navigation_cloud_map_id = map_id
+                self._navigation_cloud_variant = variant
                 self._navigation_cloud_error = str(exc)
             return self._navigation_cloud_error
         with self._navigation_lock:
             self._navigation_cloud_points = points
             self._navigation_cloud_map_id = map_id
+            self._navigation_cloud_variant = variant
             self._navigation_cloud_error = ""
         return ""
 
@@ -2254,7 +2320,9 @@ class WebControlNode(Node):
             map_id, Path(record["octomap_path"]), annotation
         )
 
-    def _convert_navigation_map(self, record: Dict[str, Any]) -> Tuple[bool, str]:
+    def _convert_navigation_map(
+        self, record: Dict[str, Any], filtered: bool = False
+    ) -> Tuple[bool, str]:
         """Export a saved RTAB-Map database using the project's trusted tool."""
         map_id = record["id"]
         database_path = record.get("database_path")
@@ -2266,7 +2334,8 @@ class WebControlNode(Node):
             return False, "stop mapping and save the database before converting it"
 
         output_directory = (
-            self.maps_root / "octo_maps" / f"{map_id}_octomap"
+            self.maps_root / "octo_maps"
+            / f"{map_id}_{'filtered_' if filtered else ''}octomap"
         ).resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
         library_path = str(self.navigation.octomap_library_path)
@@ -2274,12 +2343,12 @@ class WebControlNode(Node):
             (library_path,)
         )
         try:
+            command = [str(self.map_export_executable)]
+            if filtered:
+                command.append("--filter")
+            command.extend([str(Path(database_path)), str(output_directory)])
             result = subprocess.run(
-                [
-                    str(self.map_export_executable),
-                    str(Path(database_path)),
-                    str(output_directory),
-                ],
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -2300,15 +2369,20 @@ class WebControlNode(Node):
             (item for item in self.navigation_maps() if item["id"] == map_id),
             None,
         )
-        if not converted or not converted["loadable"] or not converted["cloud_path"]:
+        loadable_key = "filtered_loadable" if filtered else "loadable"
+        cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+        if not converted or not converted[loadable_key] or not converted[cloud_key]:
             output = (result.stdout or "").strip()
             return False, (
                 f"map {map_id} export did not produce both colored PLY and .bt files"
                 + (f": {output[-800:]}" if output else "")
             )
-        return True, f"map {map_id} converted for browser display"
+        variant = "filtered" if filtered else "original"
+        return True, f"map {map_id} {variant} layers converted for browser display"
 
-    def load_navigation_map(self, map_id: str) -> Tuple[bool, str]:
+    def load_navigation_map(
+        self, map_id: str, filtered: bool = False
+    ) -> Tuple[bool, str]:
         """Build missing display/HLoc assets, then load browser map layers."""
         if not MAP_IDENTIFIER.fullmatch(map_id):
             return False, "map_id must use the mapNNN format"
@@ -2333,8 +2407,11 @@ class WebControlNode(Node):
             # calling the offline export tool, which correctly refuses live maps.
             self.navigation.stop()
             operation_messages = []
-            if not record["loadable"] or not record["cloud_path"]:
-                converted, message = self._convert_navigation_map(record)
+            loadable_key = "filtered_loadable" if filtered else "loadable"
+            cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+            octomap_key = "filtered_octomap_path" if filtered else "octomap_path"
+            if not record[loadable_key] or not record[cloud_key]:
+                converted, message = self._convert_navigation_map(record, filtered)
                 if not converted:
                     return False, message
                 operation_messages.append(message)
@@ -2342,7 +2419,7 @@ class WebControlNode(Node):
                     (item for item in self.navigation_maps() if item["id"] == map_id),
                     None,
                 )
-                if record is None or not record["loadable"]:
+                if record is None or not record[loadable_key]:
                     return False, f"map {map_id} is still missing its exported .bt file"
 
             hloc_warning = ""
@@ -2372,8 +2449,13 @@ class WebControlNode(Node):
                     hloc_warning = "HLoc: " + message
 
             self._clear_navigation_preview()
-            cloud_error = self._load_navigation_cloud(map_id, record.get("cloud_path"))
-            voxel_error = self._load_navigation_voxels(map_id, record["octomap_path"])
+            variant = "filtered" if filtered else "original"
+            cloud_error = self._load_navigation_cloud(
+                map_id, record.get(cloud_key), variant
+            )
+            voxel_error = self._load_navigation_voxels(
+                map_id, record[octomap_key], variant
+            )
             preview_errors = []
             for label, error in (("colored cloud", cloud_error),
                                  ("OctoMap voxels", voxel_error)):
@@ -2382,7 +2464,7 @@ class WebControlNode(Node):
             details = operation_messages + preview_errors
             if hloc_warning:
                 details.append(hloc_warning)
-            return True, f"map {map_id} layers loaded" + (
+            return True, f"map {map_id} {variant} layers loaded" + (
                 "; " + "; ".join(details) if details else "")
         finally:
             self._navigation_map_operation_lock.release()
@@ -2397,12 +2479,19 @@ class WebControlNode(Node):
         )
         if record is None:
             return False, f"map {map_id} does not exist under {self.maps_root}"
-        required = (
-            "database_path",
-            "octomap_path",
-            "cloud_path",
-            "hloc_map_directory",
-        )
+        with self._navigation_lock:
+            loaded_variant = self._navigation_cloud_variant
+            loaded_layers_match = (
+                self._navigation_cloud_map_id == map_id
+                and self._navigation_voxel_map_id == map_id
+                and self._navigation_voxel_variant == loaded_variant
+            )
+        if not loaded_layers_match or loaded_variant not in ("original", "filtered"):
+            return False, f"load map {map_id} before starting localization"
+        filtered = loaded_variant == "filtered"
+        octomap_key = "filtered_octomap_path" if filtered else "octomap_path"
+        cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+        required = ("database_path", octomap_key, cloud_key, "hloc_map_directory")
         if any(not record.get(name) for name in required):
             return False, (
                 f"map {map_id} needs display layers and a built HLoc index first"
@@ -2411,6 +2500,8 @@ class WebControlNode(Node):
             if (
                 self._navigation_cloud_map_id != map_id
                 or self._navigation_voxel_map_id != map_id
+                or self._navigation_cloud_variant != loaded_variant
+                or self._navigation_voxel_variant != loaded_variant
             ):
                 return False, f"load map {map_id} before starting localization"
             self._localization_ready = False
@@ -2425,8 +2516,8 @@ class WebControlNode(Node):
         return self.navigation.start(
             map_id,
             Path(record["database_path"]),
-            Path(record["octomap_path"]),
-            Path(record["cloud_path"]),
+            Path(record[octomap_key]),
+            Path(record[cloud_key]),
             Path(record["hloc_map_directory"]),
             self.semantic_annotation_store.output_root / map_id / "annotations.json",
         )
@@ -2471,6 +2562,11 @@ class WebControlNode(Node):
         """Return selected-map navigation state without large preview payloads."""
         status = self.navigation.status()
         with self._navigation_lock:
+            status["map_variant"] = (
+                self._navigation_cloud_variant
+                if self._navigation_cloud_variant == self._navigation_voxel_variant
+                else None
+            )
             coarse_age = None if self._localization_received_at is None else round(
                 time.monotonic() - self._localization_received_at, 2)
             refined_age = (

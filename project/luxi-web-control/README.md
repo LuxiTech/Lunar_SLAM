@@ -238,7 +238,9 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 网页还会列出 `maps/rtab_maps/mapNNN.db`。选择地图后，网页会自动调用
 `tools/export_rtabmap_octomap.sh` 补齐彩色 PLY 和 `.bt`，并在缺失时调用
 `luxi_hloc` 导出器和 CUDA 模型构建器生成 HLoc 索引，随后立即加载显示；这一步不会
-启动相机定位。保存地图的彩色 PLY 默认读取并显示全部有效顶点，不使用实时预览的
+启动相机定位。“生成过滤地图”会保留原始导出，生成独立的过滤 PLY 和 `.bt`；完成后
+同一按键用于在原始版和过滤版之间切换。自动定位和路径规划始终使用网页当前显示的
+版本，避免混用点云与 OctoMap。保存地图的彩色 PLY 默认读取并显示全部有效顶点，不使用实时预览的
 1800 点抽样上限。地图画布支持拖动旋转视角和滚轮缩放。默认视角遵循 ROS REP-103：
 `+X`（机器人前方）朝屏幕上方，`+Y`（机器人左方）朝屏幕左侧，画布左下角同时显示
 方向标记。首次打开时默认选择编号最大的可用地图；定时刷新列表不会改变用户已经选择
@@ -337,7 +339,8 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 - `POST /api/estop`：`{"active": true}` 锁定，`false` 解除。
 - `POST /api/mapping/start`：启动受网页管理的 RTAB-Map 建图进程。
 - `POST /api/mapping/stop`：停止受网页管理的 RTAB-Map 建图进程并保存数据库。
-- `POST /api/navigation/load_map`：转换并加载地图显示图层，不启动定位。
+- `POST /api/navigation/load_map`：传入 `map_id` 以及布尔字段 `filtered`，转换并加载
+  原始或过滤地图显示图层，不启动定位。
 - `POST /api/navigation/localize`：以所选地图启动 GPU HLoc 粗定位和 ICP 精定位。
 - `POST /api/navigation/stop`：停止定位、规划相关进程。
 - `GET /api/preview/rgb`：最新压缩 RGB 图像，未收到相机数据时返回 404。
