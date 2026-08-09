@@ -2296,7 +2296,7 @@ class WebControlNode(Node):
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=20.0,
+                timeout=60.0,
                 env=environment,
             )
             resolution, traversable, obstacles = parse_terrain_point_output(

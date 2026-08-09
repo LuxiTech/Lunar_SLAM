@@ -84,6 +84,13 @@ def test_map_export_filters_isolated_depth_outliers():
     assert "--noise_k 8" in script
 
 
+def test_map_export_uses_five_centimeter_octomap_resolution():
+    script = (
+        WORKSPACE_ROOT / "tools/export_rtabmap_octomap.sh"
+    ).read_text(encoding="utf-8")
+    assert '"${octomap_path}" 0.05' in script
+
+
 def test_velocity_is_clamped_to_server_limits():
     command = parse_velocity(
         {"linear_x": 10.0, "linear_y": -3.0, "angular_z": 2.0},
@@ -472,7 +479,7 @@ def test_terrain_loader_fits_the_matching_point_cloud(monkeypatch, tmp_path):
             "0.1", "0.6", "/maps/map042_cloud.ply", "0.3", "35.0",
             "0.15",
         ]
-        assert kwargs["timeout"] == 20.0
+        assert kwargs["timeout"] == 60.0
         return subprocess.CompletedProcess(
             command, 0,
             stdout=(

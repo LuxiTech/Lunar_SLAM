@@ -127,13 +127,13 @@ export LD_LIBRARY_PATH="$PWD/3parts/octomap/install/lib:${LD_LIBRARY_PATH:-}"
 LD_PRELOAD=/lib/aarch64-linux-gnu/libusb-1.0.so.0 \
   ros2 run luxi_voxel_navigation ply_to_octomap \
   maps/octo_maps/map042_octomap/map042_filtered_cloud.ply \
-  maps/octo_maps/map042_octomap/map042_filtered.bt 0.10
+  maps/octo_maps/map042_octomap/map042_filtered.bt 0.05
 ros2 run luxi_3d_navigation terrain_plan_check \
   maps/octo_maps/map042_octomap/map042_filtered.bt
 ```
 
 map042 默认参数回归结果：点数从 84213 降到 81390（删除 3.35%）；12 cm 内少于
 4 个邻居的点从 26 降到 3，小于 20 点的独立簇从 9 个降到 0；20 邻域局部平面残差
-小于 2 cm 的比例从 78.51% 提高到 80.12%。过滤版 10 cm OctoMap 仍识别 604 个
+小于 2 cm 的比例从 78.51% 提高到 80.12%。历史过滤版 10 cm OctoMap 识别 604 个
 可站立栅格，并成功生成 86 个栅格的测试路径。完整流水线输出保存在
 `maps/octo_maps/map042_filtered_pipeline/`。

@@ -40,13 +40,14 @@ target_include_directories(voxel_astar PUBLIC include)
 
 add_executable(cloud_to_octomap_node src/cloud_to_octomap_node.cpp)
 target_compile_features(cloud_to_octomap_node PUBLIC cxx_std_17)
+target_include_directories(cloud_to_octomap_node PRIVATE include)
 ament_target_dependencies(cloud_to_octomap_node
   octomap_msgs rclcpp sensor_msgs)
 target_link_libraries(cloud_to_octomap_node ${LUXI_OCTOMAP_TARGET})
 
 add_executable(ply_to_octomap src/ply_to_octomap.cpp)
 target_compile_features(ply_to_octomap PUBLIC cxx_std_17)
-target_include_directories(ply_to_octomap PRIVATE ${PCL_INCLUDE_DIRS})
+target_include_directories(ply_to_octomap PRIVATE include ${PCL_INCLUDE_DIRS})
 target_link_libraries(ply_to_octomap ${LUXI_OCTOMAP_TARGET} ${PCL_LIBRARIES})
 
 add_executable(octomap_file_loader_node src/octomap_file_loader_node.cpp)

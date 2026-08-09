@@ -5,6 +5,12 @@
 
 #include "luxi_3d_navigation/terrain_cloud_classifier.hpp"
 
+TEST(TerrainCloudClassifier, UsesFiveCentimeterDefaultResolution)
+{
+  const luxi_3d_navigation::TerrainCloudParameters parameters;
+  EXPECT_DOUBLE_EQ(parameters.resolution, 0.05);
+}
+
 TEST(TerrainCloudClassifier, SeparatesTiltedGroundFromVerticalWall)
 {
   std::vector<luxi_3d_navigation::TerrainCloudPoint> points;

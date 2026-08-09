@@ -11,6 +11,8 @@
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 
+#include "luxi_voxel_navigation/octomap_defaults.hpp"
+
 class CloudToOctomapNode : public rclcpp::Node
 {
 public:
@@ -21,7 +23,8 @@ public:
     declare_parameter<std::string>("octomap_topic", "/navigation/octomap");
     declare_parameter<std::string>("frame_id", "map");
     declare_parameter<std::string>("save_bt_path", "");
-    declare_parameter<double>("resolution", 0.10);
+    declare_parameter<double>(
+      "resolution", luxi_voxel_navigation::kDefaultOctomapResolution);
     declare_parameter<double>("min_z", -1.0e9);
     declare_parameter<double>("max_z", 1.0e9);
 

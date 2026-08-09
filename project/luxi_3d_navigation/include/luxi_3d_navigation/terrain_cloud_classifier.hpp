@@ -17,7 +17,7 @@ struct TerrainCloudPoint
 
 struct TerrainCloudParameters
 {
-  double resolution{0.10};
+  double resolution{0.05};
   double normal_radius{0.30};
   double maximum_ground_slope_degrees{35.0};
   double obstacle_min_height{0.15};

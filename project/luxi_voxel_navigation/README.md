@@ -32,6 +32,8 @@ tools/export_rtabmap_octomap.sh
 tools/export_rtabmap_octomap.sh maps/rtab_maps/map011.db maps/octo_maps/map011_octomap
 ```
 
+实时转换与离线 `ply_to_octomap` 当前默认使用 0.05 m OctoMap 分辨率。
+
 ## 定位与实时体素转换
 
 先启动 D435i 驱动，再运行：

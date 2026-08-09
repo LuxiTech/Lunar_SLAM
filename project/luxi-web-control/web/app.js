@@ -649,7 +649,7 @@ function drawNavigationMap(voxels, path, cloud) {
       context.fillRect(x - 1, y - 1, 2, 2);
     }
   }
-  const terrainResolution = Number(navigationTerrain.resolution) || 0.1;
+  const terrainResolution = Number(navigationTerrain.resolution) || 0.05;
   if (navigationShowObstacles.checked) {
     context.fillStyle = "rgba(216, 59, 72, .78)";
     for (const point of obstaclePoints) {
@@ -690,7 +690,7 @@ function drawNavigationMap(voxels, path, cloud) {
         continue;
       }
       const [x, y] = toCanvas(point);
-      const voxelSize = Math.max(1, Math.min(14, (Number(point[3]) || voxels.resolution || 0.1) * scale));
+      const voxelSize = Math.max(1, Math.min(14, (Number(point[3]) || voxels.resolution || 0.05) * scale));
       context.fillRect(x - voxelSize * 0.5, y - voxelSize * 0.5, voxelSize, voxelSize);
     }
   }
@@ -1137,7 +1137,7 @@ function applySemanticBrush(event) {
         x: Number(point[0]),
         y: Number(point[1]),
         z: Number(point[2]),
-        size: Number(point[3]) || Number(navigationVoxels.resolution) || 0.1,
+        size: Number(point[3]) || Number(navigationVoxels.resolution) || 0.05,
       });
     }
   }

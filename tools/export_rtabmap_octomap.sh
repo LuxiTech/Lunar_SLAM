@@ -67,7 +67,7 @@ if [[ "${filter_cloud}" == true ]]; then
   ply_path="${filtered_ply_path}"
 fi
 local octomap_path="${output_directory}/$(basename "${database_path%.db}").bt"
-ros2 run luxi_voxel_navigation ply_to_octomap "${ply_path}" "${octomap_path}" 0.10
+ros2 run luxi_voxel_navigation ply_to_octomap "${ply_path}" "${octomap_path}" 0.05
 echo "OctoMap source cloud: ${ply_path}"
 echo "Offline OctoMap: ${octomap_path}"
 }
