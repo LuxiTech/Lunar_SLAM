@@ -247,6 +247,14 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 的地图。水平拖动采用轨道视角语义：向右拖动时观察视角向右环绕，地图内容向左旋转；
 该手势只改变观察角度，不修改地图坐标。
 
+地图加载时还会调用 `luxi_3d_navigation/terrain_map_to_points`，使用与规划器相同的
+C++ `TerrainModel` 生成网页地形层。它读取与当前地图版本匹配的 PLY，以 0.30 m
+局部邻域法向和高度连续性拆分平面，只保留最大的连续主地面；只有高于附近地面至少 0.15 m、且确有点云
+支撑的栅格才显示为红色障碍，稀疏或没有观测的区域保持 unknown。青绿色表示可通行
+表面，黄色到红色表示逐渐靠近地图边界或不可通行区域；原始 OctoMap 体素可用独立
+开关显示。当前按机器人半径 0.10 m 做碰撞检查，并在 0.60 m 边缘带内生成代价。
+A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低代价的中间路线。
+
 ### 已有地图的离线语义标注
 
 选择并加载地图后，地图画布上方会出现语义标注工具。操作顺序如下：
@@ -322,6 +330,12 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `0` | 单次浏览器点云预览的最大抽样点数；`0` 表示不抽样 |
 | `max_saved_cloud_points` | `30000` | 浏览器 Canvas 的保存点云显示上限；只限制预览，不改变 PLY、OctoMap 或定位精度 |
+| `max_terrain_points` | `12000` | 每类 C++ 地形图层的浏览器抽样上限，不改变规划地图 |
+| `navigation_robot_radius` | `0.10` | 网页离线地形预览使用的机器人半径（m），应与规划器一致 |
+| `navigation_costmap_margin` | `0.60` | 网页离线地形预览的边缘代价宽度（m） |
+| `navigation_ground_normal_radius` | `0.30` | PLY 局部法向拟合邻域半径（m） |
+| `navigation_ground_max_slope_degrees` | `35.0` | 地面分割允许的法向倾角（度），不是底盘最终爬坡角 |
+| `navigation_obstacle_min_height` | `0.15` | 点云高于附近地面后进入障碍层的最小高度（m） |
 | `semantic_annotation_timeout` | `15.0` | 单次标注检查或保存的超时秒数 |
 | `semantic_maps_root` | `maps/semantic_maps` | 独立语义标注输出目录 |
 | `navigation_localization_pose_topic` | `/luxi_hloc/coarse_pose` | HLoc 粗定位输入 |
@@ -343,6 +357,7 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
   原始或过滤地图显示图层，不启动定位。
 - `POST /api/navigation/localize`：以所选地图启动 GPU HLoc 粗定位和 ICP 精定位。
 - `POST /api/navigation/stop`：停止定位、规划相关进程。
+- `GET /api/navigation/terrain`：当前地图的可通行点、归一化边缘代价和障碍物点。
 - `GET /api/preview/rgb`：最新压缩 RGB 图像，未收到相机数据时返回 404。
 - `GET /api/preview/cloud`：抽样后的 XYZRGB 点云 JSON，用于网页 Canvas 预览。
 - `GET /api/semantic/annotations?map_id=mapNNN`：检查 OctoMap 并加载独立标注。

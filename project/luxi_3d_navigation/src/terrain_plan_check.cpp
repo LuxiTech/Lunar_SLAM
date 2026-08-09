@@ -2,18 +2,21 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "octomap/AbstractOcTree.h"
 #include "octomap/OcTree.h"
 
 #include "luxi_3d_navigation/terrain_model.hpp"
+#include "luxi_3d_navigation/terrain_cloud_classifier.hpp"
 
 int main(int argc, char ** argv)
 {
-  if (argc != 2) {
-    std::cerr << "usage: terrain_plan_check MAP.bt|MAP.ot\n";
+  if (argc < 2 || argc > 3) {
+    std::cerr << "usage: terrain_plan_check MAP.bt|MAP.ot [cloud.ply]\n";
     return 2;
   }
   const std::string map_path = argv[1];
@@ -37,17 +40,17 @@ int main(int argc, char ** argv)
   }
 
   luxi_3d_navigation::TerrainParameters parameters;
-  luxi_3d_navigation::TerrainModel terrain(*tree, parameters);
+  std::optional<luxi_3d_navigation::TerrainObservation> observation;
+  if (argc == 3) {
+    luxi_3d_navigation::TerrainCloudParameters cloud_parameters;
+    cloud_parameters.resolution = tree->getResolution();
+    observation = luxi_3d_navigation::classifyTerrainCloudFile(argv[2], cloud_parameters);
+  }
+  luxi_3d_navigation::TerrainModel terrain(
+    *tree, parameters, {}, std::move(observation));
   std::map<std::pair<int, int>, luxi_3d_navigation::GridCell3D> lowest_cells;
-  for (auto iterator = tree->begin_leafs(); iterator != tree->end_leafs(); ++iterator) {
-    if (!tree->isNodeOccupied(*iterator)) {
-      continue;
-    }
-    auto cell = terrain.worldToGrid(iterator.getX(), iterator.getY(), iterator.getZ());
-    ++cell.z;
-    if (!terrain.isTraversable(cell)) {
-      continue;
-    }
+  for (const auto & entry : terrain.layers().traversable_cells) {
+    const auto & cell = entry.cell;
     const auto key = std::make_pair(cell.x, cell.y);
     const auto found = lowest_cells.find(key);
     if (found == lowest_cells.end() || cell.z < found->second.z) {

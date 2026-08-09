@@ -1,6 +1,6 @@
 octomap_3d_astar_planner:
   ros__parameters:
-    robot_radius: 0.18
+    robot_radius: 0.10
     robot_height: 0.35
     max_step_height: 0.15
     max_slope_degrees: 50.0
@@ -9,6 +9,11 @@ octomap_3d_astar_planner:
     ground_support_depth_cells: 2
     snap_search_radius_cells: 12
     max_iterations: 500000
+    costmap_margin: 0.60
+    costmap_weight: 8.0
+    ground_normal_radius: 0.30
+    ground_max_slope_degrees: 35.0
+    obstacle_min_height: 0.15
 
 terrain_path_follower:
   ros__parameters:

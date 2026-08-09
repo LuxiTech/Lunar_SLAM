@@ -64,6 +64,7 @@ def generate_launch_description() -> LaunchDescription:
             name="octomap_3d_astar_planner",
             parameters=[config_path, {
                 "octomap_topic": "/navigation/octomap",
+                "cloud_path": LaunchConfiguration("cloud_path"),
                 "semantic_path": LaunchConfiguration("semantic_path"),
             }],
             output="screen",

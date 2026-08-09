@@ -18,11 +18,13 @@ find_package(nav_msgs REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(octomap CONFIG REQUIRED)
 find_package(octomap_msgs REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common features filters io search)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 if(TARGET octomap::octomap)
   set(LUXI_OCTOMAP_TARGET octomap::octomap)
@@ -39,12 +41,38 @@ target_compile_features(terrain_planning PUBLIC cxx_std_17)
 target_include_directories(terrain_planning PUBLIC include)
 target_link_libraries(terrain_planning PUBLIC ${LUXI_OCTOMAP_TARGET})
 
+add_library(terrain_cloud_classifier src/terrain_cloud_classifier.cpp)
+target_compile_features(terrain_cloud_classifier PUBLIC cxx_std_17)
+target_include_directories(terrain_cloud_classifier PUBLIC include ${PCL_INCLUDE_DIRS})
+target_link_directories(terrain_cloud_classifier PUBLIC ${PCL_LIBRARY_DIRS})
+target_link_libraries(terrain_cloud_classifier PUBLIC terrain_planning ${PCL_LIBRARIES})
+target_compile_definitions(terrain_cloud_classifier PUBLIC ${PCL_DEFINITIONS})
+
 add_executable(octomap_3d_astar_planner_node src/octomap_3d_astar_planner_node.cpp)
 target_compile_features(octomap_3d_astar_planner_node PUBLIC cxx_std_17)
 target_include_directories(octomap_3d_astar_planner_node PRIVATE include)
 ament_target_dependencies(octomap_3d_astar_planner_node
-  geometry_msgs nav_msgs octomap_msgs rclcpp tf2 tf2_geometry_msgs tf2_ros)
-target_link_libraries(octomap_3d_astar_planner_node terrain_planning nlohmann_json::nlohmann_json)
+  geometry_msgs nav_msgs octomap_msgs rclcpp std_msgs tf2 tf2_geometry_msgs tf2_ros
+  visualization_msgs)
+target_link_libraries(
+  octomap_3d_astar_planner_node terrain_cloud_classifier terrain_planning
+  nlohmann_json::nlohmann_json)
+
+add_executable(terrain_map_to_points src/terrain_map_to_points.cpp)
+target_compile_features(terrain_map_to_points PUBLIC cxx_std_17)
+target_include_directories(terrain_map_to_points PRIVATE include)
+target_link_libraries(
+  terrain_map_to_points terrain_cloud_classifier terrain_planning ${LUXI_OCTOMAP_TARGET})
+
+# Hik MVS exposes an older libusb through LD_LIBRARY_PATH. PCL requires the
+# system libusb symbol set, so PCL-backed terrain binaries must prefer /lib.
+foreach(pcl_terrain_target octomap_3d_astar_planner_node terrain_map_to_points)
+  set_target_properties(
+    ${pcl_terrain_target} PROPERTIES
+    BUILD_RPATH "/lib/aarch64-linux-gnu;${OCTOMAP_ROOT}/lib"
+    INSTALL_RPATH "/lib/aarch64-linux-gnu;${OCTOMAP_ROOT}/lib")
+  target_link_options(${pcl_terrain_target} PRIVATE "-Wl,--disable-new-dtags")
+endforeach()
 
 add_executable(terrain_path_follower_node src/terrain_path_follower_node.cpp)
 target_compile_features(terrain_path_follower_node PUBLIC cxx_std_17)
@@ -54,12 +82,19 @@ ament_target_dependencies(terrain_path_follower_node
 add_executable(terrain_plan_check src/terrain_plan_check.cpp)
 target_compile_features(terrain_plan_check PUBLIC cxx_std_17)
 target_include_directories(terrain_plan_check PRIVATE include)
-target_link_libraries(terrain_plan_check terrain_planning ${LUXI_OCTOMAP_TARGET})
+target_link_libraries(
+  terrain_plan_check terrain_cloud_classifier terrain_planning ${LUXI_OCTOMAP_TARGET})
+set_target_properties(
+  terrain_plan_check PROPERTIES
+  BUILD_RPATH "/lib/aarch64-linux-gnu;${OCTOMAP_ROOT}/lib"
+  INSTALL_RPATH "/lib/aarch64-linux-gnu;${OCTOMAP_ROOT}/lib")
+target_link_options(terrain_plan_check PRIVATE "-Wl,--disable-new-dtags")
 
 install(TARGETS
   octomap_3d_astar_planner_node
   terrain_path_follower_node
   terrain_plan_check
+  terrain_map_to_points
   DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
@@ -71,6 +106,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_terrain_model test/test_terrain_model.cpp)
   target_link_libraries(test_terrain_model terrain_planning ${LUXI_OCTOMAP_TARGET})
   target_include_directories(test_terrain_model PRIVATE include)
+  ament_add_gtest(test_terrain_cloud_classifier test/test_terrain_cloud_classifier.cpp)
+  target_link_libraries(test_terrain_cloud_classifier terrain_cloud_classifier)
+  target_include_directories(test_terrain_cloud_classifier PRIVATE include)
+  set_target_properties(
+    test_terrain_cloud_classifier PROPERTIES BUILD_RPATH "/lib/aarch64-linux-gnu")
+  target_link_options(test_terrain_cloud_classifier PRIVATE "-Wl,--disable-new-dtags")
 endif()
 
 ament_package()

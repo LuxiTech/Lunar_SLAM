@@ -114,6 +114,13 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .navigation-layers > span { font-weight: 800; color: var(--text); }
 .navigation-layers label { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
 .navigation-layers input { accent-color: var(--accent); }
+.terrain-legend { display: flex; flex-wrap: wrap; gap: 8px 15px; margin-top: 8px; color: var(--muted); font-size: .68rem; }
+.terrain-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.terrain-legend i { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+.legend-traversable { background: #65e3b5; }
+.legend-cost-low { background: #ffd166; }
+.legend-cost-high { background: #ff8a3d; }
+.legend-obstacle { background: #d83b48; }
 .semantic-toolbar {
   display: grid;
   grid-template-columns: repeat(5, minmax(92px, 1fr)) repeat(4, auto);

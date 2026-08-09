@@ -301,6 +301,42 @@ def parse_octomap_point_output(output: str) -> Tuple[float, list]:
     return round(resolution, 4), points
 
 
+def parse_terrain_point_output(output: str) -> Tuple[float, list, list]:
+    """Parse traversable costs and segmented obstacles from the C++ tool."""
+    lines = output.splitlines()
+    if not lines:
+        raise ValueError("terrain converter returned no data")
+    header = lines[0].split()
+    if len(header) != 2 or header[0] != "resolution":
+        raise ValueError("invalid terrain converter header")
+    try:
+        resolution = float(header[1])
+    except ValueError as exc:
+        raise ValueError("invalid terrain resolution") from exc
+    if not math.isfinite(resolution) or resolution <= 0.0:
+        raise ValueError("invalid terrain resolution")
+    traversable = []
+    obstacles = []
+    for line in lines[1:]:
+        values = line.split()
+        if len(values) != 5 or values[0] not in {"traversable", "obstacle"}:
+            raise ValueError("invalid terrain point row")
+        try:
+            x, y, z, cost = (float(value) for value in values[1:])
+        except ValueError as exc:
+            raise ValueError("invalid terrain point row") from exc
+        if not all(math.isfinite(value) for value in (x, y, z, cost)):
+            continue
+        if values[0] == "traversable":
+            traversable.append((
+                round(x, 3), round(y, 3), round(z, 3),
+                round(max(0.0, min(1.0, cost)), 4),
+            ))
+        else:
+            obstacles.append((round(x, 3), round(y, 3), round(z, 3)))
+    return round(resolution, 4), traversable, obstacles
+
+
 def localization_covariance_ready(covariance: list, maximum: float) -> bool:
     """Return whether the coarse localizer supplied a finite, confident pose."""
     if len(covariance) < 36 or not math.isfinite(maximum) or maximum <= 0.0:
@@ -1300,6 +1336,12 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 {"ok": True, "path": self.server.control_node.path_preview()},
             )
             return
+        if path == "/api/navigation/terrain":
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "terrain": self.server.control_node.terrain_preview()},
+            )
+            return
         if path == "/api/semantic/annotations":
             map_id = parse_qs(parsed_url.query).get("map_id", [""])[0]
             try:
@@ -1553,6 +1595,12 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_localization_max_variance", 0.5)
         self.declare_parameter("navigation_localization_timeout", 3.0)
         self.declare_parameter("max_voxel_points", 12000)
+        self.declare_parameter("max_terrain_points", 12000)
+        self.declare_parameter("navigation_robot_radius", 0.10)
+        self.declare_parameter("navigation_costmap_margin", 0.60)
+        self.declare_parameter("navigation_ground_normal_radius", 0.30)
+        self.declare_parameter("navigation_ground_max_slope_degrees", 35.0)
+        self.declare_parameter("navigation_obstacle_min_height", 0.15)
         self.declare_parameter("enable_preview", True)
         self.declare_parameter(
             "rgb_preview_topic",
@@ -1683,6 +1731,10 @@ class WebControlNode(Node):
             workspace_root / "install/luxi_voxel_navigation/lib/"
             "luxi_voxel_navigation/octomap_to_points"
         ).resolve()
+        self.terrain_points_executable = (
+            workspace_root / "install/luxi_3d_navigation/lib/"
+            "luxi_3d_navigation/terrain_map_to_points"
+        ).resolve()
         self.navigation_goal_topic = str(
             self.get_parameter("navigation_goal_topic").value
         )
@@ -1711,6 +1763,24 @@ class WebControlNode(Node):
             self.get_parameter("navigation_localization_timeout").value
         )
         self.max_voxel_points = int(self.get_parameter("max_voxel_points").value)
+        self.max_terrain_points = int(
+            self.get_parameter("max_terrain_points").value
+        )
+        self.navigation_robot_radius = float(
+            self.get_parameter("navigation_robot_radius").value
+        )
+        self.navigation_costmap_margin = float(
+            self.get_parameter("navigation_costmap_margin").value
+        )
+        self.navigation_ground_normal_radius = float(
+            self.get_parameter("navigation_ground_normal_radius").value
+        )
+        self.navigation_ground_max_slope_degrees = float(
+            self.get_parameter("navigation_ground_max_slope_degrees").value
+        )
+        self.navigation_obstacle_min_height = float(
+            self.get_parameter("navigation_obstacle_min_height").value
+        )
         self.navigation = NavigationController(
             enabled=bool(self.get_parameter("enable_navigation_control").value),
             package=str(self.get_parameter("navigation_launch_package").value),
@@ -1777,6 +1847,12 @@ class WebControlNode(Node):
         self._navigation_voxel_map_id: Optional[str] = None
         self._navigation_voxel_variant: Optional[str] = None
         self._navigation_voxel_error = ""
+        self._terrain_traversable_points = []
+        self._terrain_obstacle_points = []
+        self._terrain_resolution = 0.0
+        self._terrain_map_id: Optional[str] = None
+        self._terrain_variant: Optional[str] = None
+        self._terrain_error = ""
         self._localization_ready = False
         self._localization_variance: Optional[float] = None
         self._localization_received_at: Optional[float] = None
@@ -2074,6 +2150,12 @@ class WebControlNode(Node):
             self._navigation_voxel_map_id = None
             self._navigation_voxel_variant = None
             self._navigation_voxel_error = ""
+            self._terrain_traversable_points = []
+            self._terrain_obstacle_points = []
+            self._terrain_resolution = 0.0
+            self._terrain_map_id = None
+            self._terrain_variant = None
+            self._terrain_error = ""
             self._localization_ready = False
             self._localization_variance = None
             self._localization_received_at = None
@@ -2165,6 +2247,79 @@ class WebControlNode(Node):
                 "error": self._navigation_cloud_error or None,
                 "points": list(self._navigation_cloud_points),
             }
+
+    def terrain_preview(self) -> Dict[str, Any]:
+        """Return terrain segmentation and edge costs for browser rendering."""
+        with self._navigation_lock:
+            return {
+                "map_id": self._terrain_map_id,
+                "variant": self._terrain_variant,
+                "resolution": self._terrain_resolution,
+                "robot_radius": self.navigation_robot_radius,
+                "costmap_margin": self.navigation_costmap_margin,
+                "ground_normal_radius": self.navigation_ground_normal_radius,
+                "ground_max_slope_degrees": (
+                    self.navigation_ground_max_slope_degrees
+                ),
+                "obstacle_min_height": self.navigation_obstacle_min_height,
+                "traversable_count": len(self._terrain_traversable_points),
+                "obstacle_count": len(self._terrain_obstacle_points),
+                "error": self._terrain_error or None,
+                "traversable_points": list(self._terrain_traversable_points),
+                "obstacle_points": list(self._terrain_obstacle_points),
+            }
+
+    def _load_navigation_terrain(
+        self, map_id: str, octomap_path: str, cloud_path: Optional[str],
+        variant: str = "original"
+    ) -> str:
+        """Build bounded terrain layers through the shared C++ implementation."""
+        if not cloud_path:
+            return "no colored point cloud is available for terrain fitting"
+        command = [
+            str(self.terrain_points_executable),
+            str(octomap_path),
+            str(self.max_terrain_points),
+            str(self.navigation_robot_radius),
+            str(self.navigation_costmap_margin),
+            str(cloud_path),
+            str(self.navigation_ground_normal_radius),
+            str(self.navigation_ground_max_slope_degrees),
+            str(self.navigation_obstacle_min_height),
+        ]
+        environment = sanitized_subprocess_environment(
+            (str(self.navigation.octomap_library_path),)
+        )
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=20.0,
+                env=environment,
+            )
+            resolution, traversable, obstacles = parse_terrain_point_output(
+                result.stdout
+            )
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError,
+                ValueError) as exc:
+            error = str(exc)
+            with self._navigation_lock:
+                self._terrain_traversable_points = []
+                self._terrain_obstacle_points = []
+                self._terrain_map_id = map_id
+                self._terrain_variant = variant
+                self._terrain_error = error
+            return error
+        with self._navigation_lock:
+            self._terrain_traversable_points = traversable
+            self._terrain_obstacle_points = obstacles
+            self._terrain_resolution = resolution
+            self._terrain_map_id = map_id
+            self._terrain_variant = variant
+            self._terrain_error = ""
+        return ""
 
     def _load_navigation_cloud(
         self, map_id: str, cloud_path: Optional[str], variant: str = "original"
@@ -2456,9 +2611,13 @@ class WebControlNode(Node):
             voxel_error = self._load_navigation_voxels(
                 map_id, record[octomap_key], variant
             )
+            terrain_error = self._load_navigation_terrain(
+                map_id, record[octomap_key], record.get(cloud_key), variant
+            )
             preview_errors = []
             for label, error in (("colored cloud", cloud_error),
-                                 ("OctoMap voxels", voxel_error)):
+                                 ("OctoMap voxels", voxel_error),
+                                 ("terrain costmap", terrain_error)):
                 if error:
                     preview_errors.append(label + ": " + error)
             details = operation_messages + preview_errors

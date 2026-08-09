@@ -40,6 +40,9 @@ const navigationGoalButton = $("#navigationGoalButton");
 const voxelMapCanvas = $("#voxelMapCanvas");
 const voxelMapHint = $("#voxelMapHint");
 const navigationShowCloud = $("#navigationShowCloud");
+const navigationShowTraversable = $("#navigationShowTraversable");
+const navigationShowCostmap = $("#navigationShowCostmap");
+const navigationShowObstacles = $("#navigationShowObstacles");
 const navigationShowVoxels = $("#navigationShowVoxels");
 const navigationShowSemantics = $("#navigationShowSemantics");
 const navigationShowMappingOrigin = $("#navigationShowMappingOrigin");
@@ -75,6 +78,7 @@ let voxelViewport = null;
 let selectedGoal = null;
 let navigationCloud = {};
 let navigationVoxels = {};
+let navigationTerrain = {};
 let navigationPath = {};
 let navigationView = null;
 let navigationDrag = null;
@@ -545,10 +549,19 @@ function drawNavigationMap(voxels, path, cloud) {
   const points = Array.isArray(voxels.points) ? voxels.points : [];
   const pathPoints = Array.isArray(path.points) ? path.points : [];
   const cloudPoints = Array.isArray(cloud.points) ? cloud.points : [];
-  const mapHasGeometry = Boolean(cloudPoints.length || points.length || pathPoints.length);
+  const traversablePoints = Array.isArray(navigationTerrain.traversable_points)
+    ? navigationTerrain.traversable_points : [];
+  const obstaclePoints = Array.isArray(navigationTerrain.obstacle_points)
+    ? navigationTerrain.obstacle_points : [];
+  const mapHasGeometry = Boolean(
+    cloudPoints.length || points.length || traversablePoints.length ||
+    obstaclePoints.length || pathPoints.length
+  );
   const mappingOrigin = [0, 0, 0];
   const all = cloudPoints.concat(
     points,
+    traversablePoints,
+    obstaclePoints,
     pathPoints,
     selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : [],
     mapHasGeometry && navigationShowMappingOrigin.checked ? [mappingOrigin] : [],
@@ -636,8 +649,38 @@ function drawNavigationMap(voxels, path, cloud) {
       context.fillRect(x - 1, y - 1, 2, 2);
     }
   }
+  const terrainResolution = Number(navigationTerrain.resolution) || 0.1;
+  if (navigationShowObstacles.checked) {
+    context.fillStyle = "rgba(216, 59, 72, .78)";
+    for (const point of obstaclePoints) {
+      const [x, y] = toCanvas(point);
+      const size = Math.max(2, Math.min(15, terrainResolution * scale));
+      context.fillRect(x - size * 0.5, y - size * 0.5, size, size);
+    }
+  }
+  if (navigationShowTraversable.checked) {
+    context.fillStyle = "rgba(101, 227, 181, .38)";
+    for (const point of traversablePoints) {
+      const [x, y] = toCanvas(point);
+      const size = Math.max(1.5, Math.min(14, terrainResolution * scale));
+      context.fillRect(x - size * 0.5, y - size * 0.5, size, size);
+    }
+  }
+  if (navigationShowCostmap.checked) {
+    for (const point of traversablePoints) {
+      const cost = Math.max(0, Math.min(1, Number(point[3]) || 0));
+      if (cost <= 0) continue;
+      const red = 255;
+      const green = Math.round(209 - 71 * cost);
+      const blue = Math.round(102 - 41 * cost);
+      context.fillStyle = `rgba(${red}, ${green}, ${blue}, ${0.35 + 0.55 * cost})`;
+      const size = Math.max(2, Math.min(15, terrainResolution * scale));
+      const [x, y] = toCanvas(point);
+      context.fillRect(x - size * 0.5, y - size * 0.5, size, size);
+    }
+  }
   if (navigationShowVoxels.checked) {
-    context.fillStyle = "rgba(101, 227, 181, .54)";
+    context.fillStyle = "rgba(190, 203, 218, .42)";
     const ground = semanticGround();
     const filterHighVoxels = (
       semanticAnnotation && ["rock", "wall"].includes(semanticTool.value)
@@ -778,17 +821,26 @@ async function refreshVoxelMap() {
   if (voxelRefreshPending) return;
   voxelRefreshPending = true;
   try {
-    const [voxelResponse, pathResponse] = await Promise.all([
+    const [voxelResponse, pathResponse, terrainResponse] = await Promise.all([
       fetch("/api/navigation/voxels", {cache: "no-store"}),
       fetch("/api/navigation/path", {cache: "no-store"}),
+      fetch("/api/navigation/terrain", {cache: "no-store"}),
     ]);
-    if (!voxelResponse.ok || !pathResponse.ok) throw new Error("preview unavailable");
+    if (!voxelResponse.ok || !pathResponse.ok || !terrainResponse.ok) {
+      throw new Error("preview unavailable");
+    }
     navigationVoxels = (await voxelResponse.json()).voxels || {};
     navigationPath = (await pathResponse.json()).path || {};
+    navigationTerrain = (await terrainResponse.json()).terrain || {};
     drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
     voxelMapHint.classList.toggle(
       "hidden",
-      Boolean((navigationVoxels.points || []).length || (navigationCloud.points || []).length),
+      Boolean(
+        (navigationVoxels.points || []).length ||
+        (navigationCloud.points || []).length ||
+        (navigationTerrain.traversable_points || []).length ||
+        (navigationTerrain.obstacle_points || []).length
+      ),
     );
   } catch (_error) {
     voxelMapHint.classList.remove("hidden");
@@ -812,7 +864,12 @@ async function refreshNavigationCloud() {
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   voxelMapHint.classList.toggle(
     "hidden",
-    Boolean((navigationVoxels.points || []).length || (navigationCloud.points || []).length),
+    Boolean(
+      (navigationVoxels.points || []).length ||
+      (navigationCloud.points || []).length ||
+      (navigationTerrain.traversable_points || []).length ||
+      (navigationTerrain.obstacle_points || []).length
+    ),
   );
 }
 
@@ -861,6 +918,7 @@ async function loadNavigationMap(automatic = false) {
   selectedGoal = null;
   navigationCloud = {};
   navigationVoxels = {};
+  navigationTerrain = {};
   navigationPath = {};
   navigationView = null;
   navigationPose = null;
@@ -950,6 +1008,7 @@ navigationMapSelect.addEventListener("change", () => {
   selectedGoal = null;
   navigationCloud = {};
   navigationVoxels = {};
+  navigationTerrain = {};
   navigationPath = {};
   navigationView = null;
   navigationPose = null;
@@ -960,6 +1019,9 @@ navigationMapSelect.addEventListener("change", () => {
   loadNavigationMap(true);
 });
 navigationShowCloud.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowTraversable.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowCostmap.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowObstacles.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowVoxels.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowSemantics.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowMappingOrigin.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));

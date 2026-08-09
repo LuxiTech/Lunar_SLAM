@@ -101,6 +101,8 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"semanticSaveButton" in page
             assert b"semanticGroundZ" in page
             assert b"navigationShowSemantics" in page
+            assert b"navigationShowTraversable" in page
+            assert b"navigationShowCostmap" in page
             assert b"navigationFilterButton" in page
 
         with urlopen(base_url + "/app.js", timeout=2.0) as response:
@@ -109,6 +111,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"/api/semantic/save" in app
             assert b"applySemanticBrush" in app
             assert b"semanticAnnotation && navigationShowSemantics.checked" in app
+            assert b"/api/navigation/terrain" in app
             assert b"[...maps].reverse().find" in app
             assert b"navigationDrag.yaw +" in app
             assert b'filtered: navigationUseFiltered' in app
@@ -130,6 +133,11 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
                 "error": None,
                 "points": [[0.0, 1.0, 2.0, 3, 4, 5], [6.0, 7.0, 8.0, 9, 10, 11]],
             }
+        with urlopen(base_url + "/api/navigation/terrain", timeout=2.0) as response:
+            assert response.status == 200
+            terrain = json.load(response)["terrain"]
+            assert terrain["traversable_points"] == []
+            assert terrain["obstacle_points"] == []
         try:
             urlopen(base_url + "/api/preview/rgb", timeout=2.0)
             assert False, "an RGB endpoint without camera input must return 404"

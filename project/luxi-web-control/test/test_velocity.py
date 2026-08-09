@@ -18,6 +18,8 @@ import math
 import os
 import struct
 import subprocess
+import threading
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -39,8 +41,10 @@ from luxi_web_control.web_control_node import make_access_urls
 from luxi_web_control.web_control_node import mapping_graph_conflicts
 from luxi_web_control.web_control_node import NavigationController
 from luxi_web_control.web_control_node import parse_octomap_point_output
+from luxi_web_control.web_control_node import parse_terrain_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
 from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
+from luxi_web_control.web_control_node import WebControlNode
 
 
 LIMITS = VelocityCommand(0.25, 0.1, 0.8)
@@ -55,6 +59,18 @@ def test_saved_map_browser_preview_is_bounded_by_default():
     )
     limit = config["web_control"]["ros__parameters"]["max_saved_cloud_points"]
     assert 10_000 <= limit <= 50_000
+
+
+def test_navigation_preview_uses_ten_centimeter_robot_radius():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    radius = config["web_control"]["ros__parameters"][
+        "navigation_robot_radius"
+    ]
+    assert radius == 0.10
 
 
 def test_map_export_filters_isolated_depth_outliers():
@@ -424,6 +440,55 @@ def test_octomap_converter_output_keeps_occupied_voxel_size():
         0.1,
         [(1.234, -2.0, 3.0, 0.1), (0.0, 0.0, 0.0, 0.2)],
     )
+
+
+def test_terrain_converter_output_separates_obstacles_and_costs():
+    assert parse_terrain_point_output(
+        "resolution 0.1\n"
+        "traversable 1.2345 -2 0.1 0.75\n"
+        "obstacle 0 0 0.2 1\n"
+    ) == (
+        0.1,
+        [(1.234, -2.0, 0.1, 0.75)],
+        [(0.0, 0.0, 0.2)],
+    )
+
+
+def test_terrain_loader_fits_the_matching_point_cloud(monkeypatch, tmp_path):
+    node = WebControlNode.__new__(WebControlNode)
+    node.terrain_points_executable = Path("/test/terrain_map_to_points")
+    node.max_terrain_points = 12000
+    node.navigation_robot_radius = 0.10
+    node.navigation_costmap_margin = 0.60
+    node.navigation_ground_normal_radius = 0.30
+    node.navigation_ground_max_slope_degrees = 35.0
+    node.navigation_obstacle_min_height = 0.15
+    node.navigation = SimpleNamespace(octomap_library_path=tmp_path)
+    node._navigation_lock = threading.Lock()
+
+    def fake_run(command, **kwargs):
+        assert command == [
+            "/test/terrain_map_to_points", "/maps/map042.bt", "12000",
+            "0.1", "0.6", "/maps/map042_cloud.ply", "0.3", "35.0",
+            "0.15",
+        ]
+        assert kwargs["timeout"] == 20.0
+        return subprocess.CompletedProcess(
+            command, 0,
+            stdout=(
+                "resolution 0.1\n"
+                "traversable 1 2 0.1 0.25\n"
+                "obstacle 3 4 0.2 1\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert node._load_navigation_terrain(
+        "map042", "/maps/map042.bt", "/maps/map042_cloud.ply"
+    ) == ""
+    assert node._terrain_traversable_points == [(1.0, 2.0, 0.1, 0.25)]
+    assert node._terrain_obstacle_points == [(3.0, 4.0, 0.2)]
 
 
 def test_localization_requires_confident_xyz_yaw_covariance():
