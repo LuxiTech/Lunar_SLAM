@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import copy
 import os
 from pathlib import Path
+import sys
 import time
 from typing import Any
 import warnings
@@ -18,6 +19,40 @@ from .tensorrt_superpoint import (
     engine_filename,
     engine_profile,
 )
+
+
+def _configure_workspace_dependencies() -> Path:
+    """Expose pinned HLoc/LightGlue sources and their shared model cache."""
+    configured = os.environ.get("LUXI_WORKSPACE_ROOT", "").strip()
+    candidates = [Path(configured).expanduser()] if configured else []
+    resolved_file = Path(__file__).resolve()
+    candidates.extend(resolved_file.parents)
+    workspace = next(
+        (
+            candidate.resolve()
+            for candidate in candidates
+            if (candidate / "3parts/hloc").is_dir()
+            and (candidate / "3parts/lightglue").is_dir()
+        ),
+        None,
+    )
+    if workspace is None:
+        raise RuntimeError(
+            "Cannot locate pinned HLoc/LightGlue sources; initialize the "
+            "3parts submodules or set LUXI_WORKSPACE_ROOT"
+        )
+    dependency_paths = (
+        workspace / "3parts/hloc_gpu_python",
+        workspace / "3parts/hloc_python",
+        workspace / "3parts/hloc",
+        workspace / "3parts/hloc/third_party",
+        workspace / "3parts/lightglue",
+    )
+    for dependency in reversed(dependency_paths):
+        if dependency.is_dir() and str(dependency) not in sys.path:
+            sys.path.insert(0, str(dependency))
+    os.environ.setdefault("TORCH_HOME", str(workspace / "3parts/hloc_models"))
+    return workspace
 
 
 @dataclass(frozen=True)
@@ -64,6 +99,7 @@ class SuperPointLightGlueBackend:
         lightglue_cuda_graph_layers: int = 3,
     ) -> None:
         """Load SuperPoint and LightGlue on the requested Torch device."""
+        _configure_workspace_dependencies()
         import torch
         from hloc import extractors, matchers
         from hloc.utils.base_model import dynamic_load

@@ -197,3 +197,36 @@ def test_tracker_preserves_imu_rotation_when_reseeding_keyframe():
         recovered.odom_from_camera[:3, :3], rotation_20deg, atol=1e-6
     )
     np.testing.assert_allclose(recovered.odom_from_camera[:3, 3], 0.0, atol=1e-6)
+
+
+def test_tracker_refines_pnp_translation_with_current_depth():
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
+    )
+    features = [_features(pixels), _features(pixels)]
+    tracker = VisualOdometryTracker(
+        SequenceBackend(features),
+        TrackerConfig(
+            minimum_keypoints=8,
+            minimum_matches=8,
+            minimum_depth_matches=8,
+            minimum_inliers=6,
+            minimum_grid_coverage=0.0,
+            use_depth_translation_refinement=True,
+            minimum_depth_consistency_matches=6,
+        ),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    initialized = tracker.process(rgb, depth, intrinsics, 0.001, 1.0)
+    refined = tracker.process(rgb, depth, intrinsics, 0.001, 1.1)
+
+    assert initialized.accepted
+    assert refined.accepted
+    assert refined.pose_source == "PNP_DEPTH"
+    assert refined.depth_consistency_inliers >= 6
+    np.testing.assert_allclose(refined.odom_from_camera, np.eye(4), atol=1e-6)

@@ -16,7 +16,9 @@
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler
+from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -30,16 +32,14 @@ def generate_launch_description():
         "config",
         "web_control.yaml",
     )
-    return LaunchDescription([
-        DeclareLaunchArgument("config", default_value=default_config),
-        DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
-        DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
-        DeclareLaunchArgument("http_port", default_value="8080"),
-        Node(
+
+    def web_control_node(condition=None):
+        return Node(
             package="luxi_web_control",
             executable="web_control_node",
             name="web_control",
             output="screen",
+            condition=condition,
             parameters=[
                 LaunchConfiguration("config"),
                 {
@@ -57,5 +57,42 @@ def generate_launch_description():
                     ),
                 },
             ],
+        )
+
+    # A long-lived ros2cli daemon can retain stale Fast DDS graph/SHM state
+    # after camera and RTAB-Map processes are killed.  The symptom is an
+    # endless ParticipantEntitiesInfo Fast CDR / Bad alloc loop in every new
+    # rclpy node.  The daemon is not needed by running ROS nodes, so stopping
+    # it before this appliance-style service starts is safe; ros2cli starts a
+    # fresh daemon automatically on the next graph command.
+    reset_daemon = ExecuteProcess(
+        cmd=["ros2", "daemon", "stop"],
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("reset_ros_daemon")),
+    )
+
+    return LaunchDescription([
+        DeclareLaunchArgument("config", default_value=default_config),
+        DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
+        DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
+        DeclareLaunchArgument("http_port", default_value="8080"),
+        DeclareLaunchArgument(
+            "reset_ros_daemon",
+            default_value="true",
+            description=(
+                "Stop a stale ros2cli daemon before starting the web node; "
+                "running ROS nodes are not affected"
+            ),
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=reset_daemon,
+                on_exit=[web_control_node()],
+            ),
+            condition=IfCondition(LaunchConfiguration("reset_ros_daemon")),
+        ),
+        reset_daemon,
+        web_control_node(
+            condition=UnlessCondition(LaunchConfiguration("reset_ros_daemon"))
         ),
     ])

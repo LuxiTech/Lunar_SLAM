@@ -1,0 +1,9 @@
+build/
+install/
+log/
+
+# Keep calibration parameters and text summaries in Git, not raw recordings
+# or generated reports.
+calibration/data/*_ros2/
+calibration/data/*.bag
+calibration/data/*-report-imucam.pdf

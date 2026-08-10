@@ -103,10 +103,25 @@ def _wait_for_camera_inputs(context: object) -> list[LogInfo]:
         ) from error
     if result.returncode != 0:
         raise RuntimeError(
-            "RGB-D/IMU synchronization check failed. "
-            "RTAB-Map was not started; inspect the active luxi_adapter profile and trigger source."
+            "RGB-D/IMU synchronization or IMU health check failed. "
+            "RTAB-Map was not started; inspect the active luxi_adapter profile, "
+            "trigger source, orientation covariance, and three-axis gyro output."
         )
     return [LogInfo(msg="Canonical RGB-D/IMU synchronization check passed.")]
+
+
+def _rviz_display(context: object) -> str:
+    """Resolve a usable local X11 display when launched outside a desktop shell."""
+    requested = LaunchConfiguration("rviz_display").perform(context).strip()
+    if requested:
+        return requested
+    inherited = os.environ.get("DISPLAY", "").strip()
+    if inherited:
+        return inherited
+    # Codex/system services commonly run without DISPLAY although the local
+    # Orin desktop is active.  Prefer the local X socket only when it exists;
+    # headless users can still select rviz:=false or pass rviz_display:=... .
+    return ":0" if Path("/tmp/.X11-unix/X0").exists() else ""
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -216,11 +231,14 @@ def generate_launch_description() -> LaunchDescription:
             "qos_camera_info": LaunchConfiguration("qos"),
             "qos_imu": LaunchConfiguration("qos_imu"),
             "subscribe_rgbd": True,
-            "always_process_most_recent_frame": True,
+            "always_process_most_recent_frame": ParameterValue(
+                LaunchConfiguration("always_process_most_recent_frame"),
+                value_type=bool,
+            ),
         }],
         remappings=[
-            ("rgbd_image", LaunchConfiguration("rgbd_topic")),
-            ("odom", LaunchConfiguration("odom_topic")),
+            ("rgbd_image", LaunchConfiguration("odom_rgbd_topic")),
+            ("odom", LaunchConfiguration("odom_output_topic")),
             ("imu", LaunchConfiguration("imu_topic")),
         ],
         arguments=[
@@ -262,6 +280,18 @@ def generate_launch_description() -> LaunchDescription:
                 LaunchConfiguration("map_always_update"), value_type=bool),
             "cloud_output_voxelized": ParameterValue(
                 LaunchConfiguration("cloud_output_voxelized"), value_type=bool),
+            "cloud_subtract_filtering": ParameterValue(
+                LaunchConfiguration("cloud_subtract_filtering"), value_type=bool),
+            "cloud_subtract_filtering_min_neighbors": ParameterValue(
+                LaunchConfiguration("cloud_subtract_filtering_min_neighbors"),
+                value_type=int,
+            ),
+            "gen_depth_decimation": ParameterValue(
+                LaunchConfiguration("gen_depth_decimation"), value_type=int),
+            "map_filter_radius": ParameterValue(
+                LaunchConfiguration("map_filter_radius"), value_type=float),
+            "map_filter_angle": ParameterValue(
+                LaunchConfiguration("map_filter_angle"), value_type=float),
             "Mem/IncrementalMemory": ParameterValue(
                 PythonExpression([
                     "'false' if '", LaunchConfiguration("localization"),
@@ -283,7 +313,10 @@ def generate_launch_description() -> LaunchDescription:
             ("imu", LaunchConfiguration("imu_topic")),
         ],
         arguments=[
-            effective_rtabmap_args, "--ros-args", "--log-level",
+            effective_rtabmap_args,
+            "--Reg/Force3DoF", LaunchConfiguration("force_3dof"),
+            "--RGBD/ForceOdom3DoF", LaunchConfiguration("force_3dof"),
+            "--ros-args", "--log-level",
             LaunchConfiguration("log_level"),
         ],
     )
@@ -311,16 +344,6 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
-    rviz = Node(
-        package="rviz2",
-        executable="rviz2",
-        name="luxi_mapping_rviz",
-        arguments=["-d", rviz_config],
-        condition=IfCondition(LaunchConfiguration("rviz")),
-        output="screen",
-        additional_env=rtabmap_environment,
-    )
-
     learned_frontend = Node(
         package="luxi_visual_frontend",
         executable="visual_odometry_node",
@@ -337,6 +360,32 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration("visual_frontend_maximum_depth"),
                     value_type=float,
                 ),
+                "depth_sampling_radius": ParameterValue(
+                    LaunchConfiguration("visual_frontend_depth_sampling_radius"),
+                    value_type=int,
+                ),
+                "depth_sampling_minimum_valid": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_depth_sampling_minimum_valid"
+                    ),
+                    value_type=int,
+                ),
+                "use_depth_translation_refinement": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_use_depth_translation_refinement"
+                    ),
+                    value_type=bool,
+                ),
+                "rgbd_features_rate": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_rgbd_features_rate"
+                    ),
+                    value_type=float,
+                ),
+                "publish_tf": ParameterValue(
+                    LaunchConfiguration("visual_frontend_publish_tf"),
+                    value_type=bool,
+                ),
                 "imu_topic": LaunchConfiguration("imu_topic"),
                 "use_imu_rotation": ParameterValue(
                     LaunchConfiguration("use_imu"), value_type=bool),
@@ -344,37 +393,97 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration("visual_frontend_camera_to_imu_time_offset"),
                     value_type=float,
                 ),
+                "superpoint_cuda_graph": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_superpoint_cuda_graph"
+                    ),
+                    value_type=bool,
+                ),
             },
         ],
         condition=IfCondition(LaunchConfiguration("learned_frontend")),
     )
 
-    delayed_rtabmap = TimerAction(
-        period=LaunchConfiguration("rtabmap_start_delay"),
-        actions=[rgbd_sync, rgbd_sync_component, rgbd_odometry, rtabmap, rtabmap_viz],
-    )
-    delayed_rviz = TimerAction(period=2.0, actions=[rviz])
-    publish_map = TimerAction(
-        period=4.0,
-        actions=[
-            ExecuteProcess(
-                cmd=[
-                    "ros2",
-                    "service",
-                    "call",
-                    "/rtabmap/rtabmap/publish_map",
-                    "rtabmap_msgs/srv/PublishMap",
-                    "{global_map: false, optimized: true, graph_only: false}",
-                ],
-                condition=IfCondition(LaunchConfiguration("load_saved_map")),
-                output="screen",
-            )
+    def delayed_rviz_action(context: object) -> list[object]:
+        if LaunchConfiguration("rviz").perform(context).lower() not in {
+            "1", "true", "yes", "on"
+        }:
+            return []
+        display = _rviz_display(context)
+        environment = dict(rtabmap_environment)
+        if display:
+            environment["DISPLAY"] = display
+        return [
+            LogInfo(msg=f"Starting RViz on DISPLAY={display or '<unset>'}"),
+            TimerAction(
+                period=2.0,
+                actions=[Node(
+                    package="rviz2",
+                    executable="rviz2",
+                    name="luxi_mapping_rviz",
+                    arguments=["-d", rviz_config],
+                    output="screen",
+                    additional_env=environment,
+                    remappings=[
+                        (
+                            "/sensors/rgbd/color/image_raw",
+                            LaunchConfiguration("rviz_rgb_topic"),
+                        ),
+                        (
+                            "/sensors/rgbd/depth/image_raw",
+                            LaunchConfiguration("rviz_depth_topic"),
+                        ),
+                    ],
+                )],
+            ),
+        ]
+
+    delayed_rviz = OpaqueFunction(function=delayed_rviz_action)
+    publish_map_process = ExecuteProcess(
+        cmd=[
+            "ros2",
+            "service",
+            "call",
+            "/rtabmap/rtabmap/publish_map",
+            "rtabmap_msgs/srv/PublishMap",
+            "{global_map: false, optimized: true, graph_only: false}",
         ],
+        output="screen",
+    )
+    publish_map = OpaqueFunction(
+        function=lambda context: [TimerAction(period=4.0, actions=[publish_map_process])]
+        if LaunchConfiguration("load_saved_map").perform(context).lower()
+        in {"1", "true", "yes", "on"}
+        else []
     )
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("rviz", default_value="true"),
+            DeclareLaunchArgument(
+                "rviz_display",
+                default_value="",
+                description=(
+                    "X11 display for RViz. Empty uses DISPLAY, or local :0 when "
+                    "the active X11 socket is available."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "rviz_rgb_topic",
+                default_value="/sensors/rgbd/color/image_raw",
+                description=(
+                    "RGB image shown by RViz. Hardware wrappers may select a "
+                    "lightweight full-field preview without changing SLAM input."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "rviz_depth_topic",
+                default_value="/sensors/rgbd/depth/image_raw",
+                description=(
+                    "Depth image shown by RViz. Hardware wrappers may select "
+                    "a display-only valid-ROI crop without changing SLAM input."
+                ),
+            ),
             DeclareLaunchArgument("rtabmap_viz", default_value="false"),
             DeclareLaunchArgument(
                 "localization",
@@ -412,19 +521,57 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "visual_frontend_maximum_depth", default_value="6.0"),
             DeclareLaunchArgument(
+                "visual_frontend_depth_sampling_radius", default_value="0"),
+            DeclareLaunchArgument(
+                "visual_frontend_depth_sampling_minimum_valid", default_value="1"),
+            DeclareLaunchArgument(
+                "visual_frontend_use_depth_translation_refinement",
+                default_value="false",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_rgbd_features_rate", default_value="1.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_publish_tf", default_value="true"),
+            DeclareLaunchArgument(
                 "visual_frontend_camera_to_imu_time_offset", default_value="0.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_superpoint_cuda_graph", default_value="true"),
             DeclareLaunchArgument("visual_odometry", default_value="true"),
             DeclareLaunchArgument("icp_odometry", default_value="false"),
             DeclareLaunchArgument("odom_topic", default_value="odom"),
+            DeclareLaunchArgument(
+                "odom_output_topic",
+                default_value=LaunchConfiguration("odom_topic"),
+                description=(
+                    "Visual odometry output topic. It can differ from odom_topic "
+                    "when an odometry post-processor is inserted."
+                ),
+            ),
             DeclareLaunchArgument("rgbd_sync", default_value="true"),
             DeclareLaunchArgument("rgbd_sync_component", default_value="false"),
             DeclareLaunchArgument("rgbd_sync_container", default_value="/luxi_sensor_container"),
             DeclareLaunchArgument("subscribe_rgbd", default_value="false"),
             DeclareLaunchArgument("rgbd_topic", default_value="rgbd_image"),
+            DeclareLaunchArgument(
+                "odom_rgbd_topic",
+                default_value=LaunchConfiguration("rgbd_topic"),
+                description=(
+                    "Optional RGB-D input dedicated to visual odometry. "
+                    "The map may consume a feature-enriched RGBDImage topic."
+                ),
+            ),
             DeclareLaunchArgument("qos", default_value="2"),
             DeclareLaunchArgument("qos_imu", default_value="2"),
             DeclareLaunchArgument("qos_odom", default_value="2"),
             DeclareLaunchArgument("approx_sync", default_value="true"),
+            DeclareLaunchArgument(
+                "always_process_most_recent_frame",
+                default_value="true",
+                description=(
+                    "Drop queued sensor frames in favor of the newest one. "
+                    "Disable for deterministic hardware streams that can arrive in bursts."
+                ),
+            ),
             DeclareLaunchArgument("topic_queue_size", default_value="20"),
             DeclareLaunchArgument("sync_queue_size", default_value="10"),
             DeclareLaunchArgument("approx_sync_max_interval", default_value="0.05"),
@@ -438,7 +585,21 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("subscribe_odom_info", default_value="true"),
             DeclareLaunchArgument("map_always_update", default_value="false"),
             DeclareLaunchArgument("cloud_output_voxelized", default_value="true"),
+            DeclareLaunchArgument("cloud_subtract_filtering", default_value="false"),
+            DeclareLaunchArgument(
+                "cloud_subtract_filtering_min_neighbors", default_value="2"),
+            DeclareLaunchArgument("gen_depth_decimation", default_value="1"),
+            DeclareLaunchArgument("map_filter_radius", default_value="0.0"),
+            DeclareLaunchArgument("map_filter_angle", default_value="30.0"),
             DeclareLaunchArgument("use_imu", default_value="true"),
+            DeclareLaunchArgument(
+                "force_3dof",
+                default_value="true",
+                description=(
+                    "Constrain registration and map optimization to x/y/yaw for "
+                    "a level ground robot. Disable for a hand-carried camera."
+                ),
+            ),
             DeclareLaunchArgument("imu_topic", default_value="/sensors/imu/data"),
             DeclareLaunchArgument("wait_for_camera", default_value="true"),
             DeclareLaunchArgument(
@@ -486,7 +647,14 @@ def generate_launch_description() -> LaunchDescription:
             OpaqueFunction(function=_prepare_database_path),
             OpaqueFunction(function=_wait_for_camera_inputs),
             learned_frontend,
-            delayed_rtabmap,
+            # The input check above already blocks until the sensor is ready.
+            # Launching these actions in the include scope also keeps their
+            # LaunchConfiguration values available on ROS 2 Lyrical.
+            rgbd_sync,
+            rgbd_sync_component,
+            rgbd_odometry,
+            rtabmap,
+            rtabmap_viz,
             delayed_rviz,
             publish_map,
         ]

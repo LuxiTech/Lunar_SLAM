@@ -18,13 +18,31 @@ web_control:
     max_angular_z: 0.8
     enable_output: true
 
-    # The web node can start/stop the project's device-independent RTAB-Map launch.
-    # Hardware is started separately through luxi_adapter and publishes /sensors/*.
+    # Start the complete NX USB stereo -> RGB-D -> RTAB-Map chain. The launch
+    # owns the camera, so a second hardware profile must not be started.
     enable_mapping_control: true
-    mapping_launch_package: luxi_rtab_map
-    mapping_launch_file: rgbd_mapping_learned.launch.py
-    # The mapping child uses the same RMW as the sensor pipeline.
-    mapping_rmw_implementation: rmw_cyclonedds_cpp
+    mapping_launch_package: lunar_usb_rtabmap_bringup
+    mapping_launch_file: usb_rtabmap.launch.py
+    mapping_launch_arguments:
+      - mode:=stable
+      - new_map:=true
+      - rviz:=false
+      - rtabmap_viz:=false
+      - use_imu:=true
+      - planar_mode:=false
+    # The browser selects only one server-side profile. VPI/Luxi is the default
+    # after the same-NX 2026-08-10 A/B; stable remains an explicit fallback.
+    mapping_default_mode: vpi_learned
+    enable_vpi_learned_mapping: true
+    vpi_learned_mapping_launch_file: usb_rtabmap.launch.py
+    vpi_learned_mapping_launch_arguments:
+      - mode:=vpi_learned
+      - new_map:=true
+      - rviz:=false
+      - use_imu:=true
+    # Match the USB camera profile and LeKiwi web launch on the NX.
+    mapping_rmw_implementation: rmw_fastrtps_cpp
+    mapping_sensor_setup: device/USBCameraSDK/ros2_ws/install/setup.bash
 
     # Map pairs are discovered as rtab_maps/mapNNN.db and
     # octo_maps/mapNNN_octomap/mapNNN.bt. Loading also reads the saved
@@ -56,7 +74,7 @@ web_control:
 
     # Read-only RGB and RTAB-Map cloud previews for the web page.
     enable_preview: true
-    rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
+    rgb_preview_topic: /left_camera/image/compressed
     cloud_preview_topic: /rtabmap/cloud_map
     max_cloud_points: 0
     # Canvas preview only: zero forwards every finite point. Set a positive cap

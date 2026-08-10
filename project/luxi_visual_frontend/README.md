@@ -37,6 +37,13 @@ ros2 run luxi_visual_frontend build_superpoint_tensorrt.py \
   --height 480 --width 640 --precision fp16
 ```
 
+For the USB stereo chain's `480x270` RGB-D stream, build:
+
+```bash
+ros2 run luxi_visual_frontend build_superpoint_tensorrt.py \
+  --height 270 --width 480 --precision fp16
+```
+
 TensorRT plans are GPU/TensorRT-version specific and are therefore generated
 locally under `3parts/hloc_models/tensorrt/`, not committed to Git.  The
 `superpoint_backend` parameter accepts `auto` (default), `pytorch` or
@@ -46,13 +53,29 @@ silently changing inference backends. Diagnostics expose both active paths,
 for example `superpoint_backend=tensorrt_fp16` and
 `lightglue_backend=pytorch_amp_fp16`.
 
-On Jetson Orin NX, CUDA Graph is enabled for the fixed-shape TensorRT enqueue
-and for the common LightGlue temporal path (up to 512 points, first three
-layers). It does not change SuperPoint resolution, NMS, thresholds, feature
-limit or weights. Frames above 512 points and LightGlue layers after the
-captured prefix automatically retain the original adaptive FlashAttention
-path. Diagnostics append `_cudagraph` to the active backend and report
+On Jetson Orin NX, CUDA Graph is enabled for the common LightGlue temporal path
+(up to 512 points, first three layers) and may also be enabled for a validated
+fixed-shape TensorRT engine. The USB `270x480` experiment locally disables the
+TensorRT graph: capturing that TensorRT 10.3 context in a PyTorch 2.5 CUDA
+Graph caused its first frame to remain in `PROCESSING`. HIK and D435i keep
+their existing profile setting. This does not change SuperPoint resolution,
+NMS, thresholds, feature limit or weights. Frames above 512 points and
+LightGlue layers after the captured prefix automatically retain the original
+adaptive FlashAttention path. Diagnostics report the selected backends plus
 `extract_seconds`, `match_seconds` and `match_layers`.
+
+Depth sampling is independently configurable. `depth_sampling_radius=0` keeps
+the original exact-pixel projection. A hardware profile may select a local
+median and `use_depth_translation_refinement=true` to use current-frame depth
+to robustly refine the PnP translation. Both options default off, so enabling
+the USB VPI profile does not alter HIK or D435i behavior. Diagnostics report
+`pose_source=PNP_DEPTH` and `depth_consistency_inliers` when refinement is used.
+
+In the final USB VPI profile this PnP result is diagnostic only: the frontend
+does not publish TF, and RTAB F2M owns `/rtabmap/odom` from the canonical RGB-D
+stream. SuperPoint/LightGlue messages are still published at 1 Hz as external
+map descriptors. This prevents two-frame PnP rotation bias from accumulating
+in the production trajectory while keeping the learned loop features.
 
 INT8 building is supported only for controlled experiments and requires at
 least 16 representative normalized images in an NPZ `images` array. The

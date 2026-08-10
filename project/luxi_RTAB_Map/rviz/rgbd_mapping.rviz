@@ -8,7 +8,7 @@ Panels:
         - /RGBImage1
         - /DepthPreview1
       Splitter Ratio: 0.5
-    Tree Height: 110
+    Tree Height: 157
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -42,8 +42,6 @@ Visualization Manager:
         All Enabled: true
         base_link:
           Value: true
-        imu_link:
-          Value: true
         left_camera_optical_frame:
           Value: true
         map:
@@ -60,8 +58,7 @@ Visualization Manager:
           odom:
             base_link:
               left_camera_optical_frame:
-                imu_link:
-                  {}
+                {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/Axes
@@ -91,7 +88,7 @@ Visualization Manager:
       Median window: 5
       Min Value: 0.44999998807907104
       Name: DepthPreview
-      Normalize Range: false
+      Normalize Range: true
       Topic:
         Depth: 1
         Durability Policy: Volatile
@@ -116,7 +113,7 @@ Visualization Manager:
           Scale: 1
           Value: false
         Value: false
-      Enabled: true
+      Enabled: false
       Keep: 100
       Name: CameraOdometry
       Position Tolerance: 0.05000000074505806
@@ -136,13 +133,47 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /luxi_visual_frontend/odom
-      Value: true
+        Value: /rtabmap/odom
+      Value: false
+    - Alpha: 0.18000000715255737
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: rgb
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: CurrentUSBDepthCloud
+      Position Transformer: XYZ
+      Selectable: false
+      Size (Pixels): 1
+      Size (m): 0.014999999664723873
+      Style: Points
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        Filter size: 2
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /rtabmap/usb_points_stable
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 255; 85; 0
-      Enabled: false
+      Enabled: true
       Head Diameter: 0.07999999821186066
       Head Length: 0.05999999865889549
       Length: 0.30000001192092896
@@ -165,7 +196,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /rtabmap/mapPath
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -186,7 +217,7 @@ Visualization Manager:
       Min Intensity: 0
       Name: Accumulated3DCloud
       Position Transformer: XYZ
-      Selectable: true
+      Selectable: false
       Size (Pixels): 2
       Size (m): 0.019999999552965164
       Style: Points
@@ -196,23 +227,23 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /rtabmap/cloud_map
+        Value: /rtabmap/cloud_map_visual
       Use Fixed Frame: true
       Use rainbow: false
       Value: true
-    - Alpha: 0.699999988079071
+    - Alpha: 0.3499999940395355
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
       Enabled: true
       Name: OccupancyGrid
       Topic:
-        Depth: 5
-        Durability Policy: Volatile
+        Depth: 1
+        Durability Policy: Transient Local
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /rtabmap/map
+        Value: /rtabmap/map_visual
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -262,7 +293,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 5
+      Distance: 18.470693588256836
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -277,24 +308,24 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: -0.039999913424253464
+      Pitch: 1.5697963237762451
       Target Frame: map
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.945002317428589
+      Yaw: 1.7900071144104004
     Saved: ~
 Window Geometry:
   DepthPreview:
     collapsed: false
   Displays:
     collapsed: false
-  Height: 800
+  Height: 1016
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001cb000002c6fc0200000004fb000000100052004700420049006d006100670065010000003d0000008f0000002800fffffffb0000001800440065007000740068005000720065007600690065007701000000d2000000900000002800fffffffb000000100044006900730070006c0061007900730100000168000000f1000000c900fffffffb0000000a00560069006500770073010000025f000000a4000000a400ffffff0000032f000002c600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000002cf000003a2fc0200000004fb000000100052004700420049006d006100670065010000003b0000013b0000002800fffffffb00000018004400650070007400680050007200650076006900650077010000017c0000013d0000002800fffffffb000000100044006900730070006c00610079007301000002bf0000011e000000c700fffffffb0000000a005600690065007700730000000305000000d8000000a000ffffff00000465000003a200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   RGBImage:
     collapsed: false
   Views:
     collapsed: false
-  Width: 1280
-  X: 37
-  Y: 64
+  Width: 1850
+  X: 70
+  Y: 27

@@ -13,6 +13,7 @@ if RUNTIME not in {"auto", "gpu", "cpu"}:
 dependencies = [
     WORKSPACE / "3parts/hloc_python",
     WORKSPACE / "3parts/hloc",
+    WORKSPACE / "3parts/hloc/third_party",
     WORKSPACE / "3parts/lightglue",
     WORKSPACE / "install/luxi_visual_frontend/local/lib/python3.10/dist-packages",
     WORKSPACE / "project/luxi_visual_frontend",
@@ -21,7 +22,19 @@ gpu_runtime = WORKSPACE / "3parts/hloc_gpu_python"
 if RUNTIME != "cpu" and gpu_runtime.is_dir():
     dependencies.insert(0, gpu_runtime)
 elif RUNTIME == "gpu":
-    raise RuntimeError(f"GPU runtime not found: {gpu_runtime}")
+    # JetPack ships a CUDA-enabled PyTorch build system-wide.  The isolated
+    # overlay is optional on target hardware, so accept the system build when
+    # it can actually see CUDA instead of failing solely on a missing folder.
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("system PyTorch cannot access CUDA")
+    except Exception as exc:
+        raise RuntimeError(
+            f"GPU runtime is unavailable (no overlay at {gpu_runtime} and "
+            f"system CUDA PyTorch failed: {exc})"
+        ) from exc
 sys.path[:0] = [str(path) for path in dependencies]
 os.environ.setdefault("TORCH_HOME", str(WORKSPACE / "3parts/hloc_models"))
 

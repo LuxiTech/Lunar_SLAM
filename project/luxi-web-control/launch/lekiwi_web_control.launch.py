@@ -38,6 +38,7 @@ def generate_launch_description():
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
         DeclareLaunchArgument("http_port", default_value="8080"),
+        DeclareLaunchArgument("reset_ros_daemon", default_value="true"),
         DeclareLaunchArgument(
             "config",
             default_value=os.path.join(
@@ -61,6 +62,7 @@ def generate_launch_description():
                 "bind_address": LaunchConfiguration("bind_address"),
                 "http_port": LaunchConfiguration("http_port"),
                 "config": LaunchConfiguration("config"),
+                "reset_ros_daemon": LaunchConfiguration("reset_ros_daemon"),
             }.items(),
         ),
     ])

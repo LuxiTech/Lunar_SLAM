@@ -97,7 +97,14 @@
             </div>
             <strong id="mappingState" class="mapping-state stopped">未启动</strong>
           </div>
-          <p id="mappingDetail" class="mapping-detail">需要先启动 luxi_adapter 硬件 profile。</p>
+          <label class="mapping-mode-row" for="mappingModeSelect">
+            <span>建图方案</span>
+            <select id="mappingModeSelect">
+              <option value="vpi_learned" selected>VPI + Luxi 学习前端（首选）</option>
+              <option value="stable">稳定 CUDA + 经典前端（回退）</option>
+            </select>
+          </label>
+          <p id="mappingDetail" class="mapping-detail">点击开始后将自动启动 USB 双目相机和 RTAB-Map。</p>
           <div class="mapping-actions">
             <button id="mappingStartButton" class="mapping-start">开始建图</button>
             <button id="mappingStopButton" class="mapping-stop" disabled>停止建图</button>

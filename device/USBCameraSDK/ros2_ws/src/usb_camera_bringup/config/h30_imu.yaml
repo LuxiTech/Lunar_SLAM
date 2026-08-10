@@ -1,0 +1,24 @@
+yesense_pub:
+  ros__parameters:
+    # QinHeng 1a86:55d4, serial 5A6C092260. The matching udev rule creates
+    # this alias and prevents ModemManager from probing the IMU.
+    serial_port: /dev/imu-H30
+    baud_rate: 921600
+    frame_id: imu_link
+    driver_type: ros_serial
+    # Data ID 0x51 resets on the shared external trigger. Use it to preserve
+    # the approximately 200 Hz device spacing instead of UART receive jitter.
+    use_sample_timestamp: true
+    # INT32_MAX * 1e-6 is the H30 invalid/saturated gyro sentinel. The fused
+    # quaternion depends on that gyro, so keep both signals out of odometry
+    # until all three axes are healthy.
+    invalid_gyro_threshold_dps: 2100.0
+    # H30 encodes an invalid signed 32-bit channel as INT32_MIN/MAX. At the
+    # protocol scale this becomes about 2147.48 m/s^2, far outside its range.
+    invalid_accel_threshold_mps2: 200.0
+    invalidate_orientation_with_invalid_gyro: true
+    # The packet exactly at the 10 Hz external-trigger reset is occasionally
+    # only partially updated. It is still used internally as the time anchor.
+    drop_trigger_reset_sample: true
+    imu_topic_ros: /imu/data
+    imu_topic: /imu/data_extend

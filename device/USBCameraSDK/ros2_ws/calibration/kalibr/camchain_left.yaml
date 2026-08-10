@@ -1,0 +1,10 @@
+# Left camera intrinsics from the fixed OpenCV stereo calibration.
+# Estimate one camera/IMU transform and derive the right transform from the
+# fixed stereo baseline after calibration.
+cam0:
+  camera_model: pinhole
+  intrinsics: [1086.9510026071866, 1086.5290209605575, 935.4910298335383, 476.5718412224771]
+  distortion_model: radtan
+  distortion_coeffs: [0.087870651008914, -0.1211659517213676, 0.000549150552528473, -0.000610809375972345]
+  resolution: [1920, 1080]
+  rostopic: /left_camera/image

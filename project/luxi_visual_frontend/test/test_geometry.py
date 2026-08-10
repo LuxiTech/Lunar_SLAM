@@ -61,6 +61,25 @@ def test_depth_projection_preserves_invalid_rows():
     assert np.isnan(points[1:]).all()
 
 
+def test_depth_projection_uses_robust_local_median():
+    depth = np.zeros((9, 9), dtype=np.uint16)
+    depth[2:7, 2:7] = 2000
+    depth[4, 4] = 4700
+    depth[3, 3] = 0
+    points, valid = project_depth_points(
+        np.array([[4.0, 4.0], [0.0, 0.0]]),
+        depth,
+        np.array([[100.0, 0.0, 4.0], [0.0, 100.0, 4.0], [0.0, 0.0, 1.0]]),
+        0.001,
+        0.4,
+        6.0,
+        sampling_radius=2,
+        minimum_valid_samples=5,
+    )
+    np.testing.assert_array_equal(valid, [True, False])
+    np.testing.assert_allclose(points[0], [0.0, 0.0, 2.0])
+
+
 def test_relative_pose_recovers_metric_transform_with_outliers():
     random = np.random.default_rng(12)
     reference = random.uniform((-2.0, -1.0, 3.0), (2.0, 1.0, 7.0), (100, 3))

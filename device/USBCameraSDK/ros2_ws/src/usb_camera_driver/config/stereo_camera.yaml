@@ -1,0 +1,19 @@
+stereo_node:
+  ros__parameters:
+    # Stable Jetson Orin NX UVC paths.  Do not use /dev/videoN because the
+    # index may change whenever another camera is connected.
+    left_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.1:1.0-video-index0
+    right_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.3:1.0-video-index0
+    pixel_format: MJPG
+    output_encoding: bgr8
+    width: 1920
+    height: 1080
+    frame_rate_hz: 10.0
+    trigger_mode: hardware
+    # run03_left Kalibr result: t_imu = t_camera + offset.
+    timestamp_offset_sec: -0.0843437124012959
+    auto_exposure: true
+    exposure_absolute: -1
+    gain: -1
+    left_frame_id: left_camera_optical_frame
+    right_frame_id: right_camera_optical_frame

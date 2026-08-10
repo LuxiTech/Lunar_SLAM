@@ -1,0 +1,9 @@
+opencv_stereo_calibrator:
+  ros__parameters:
+    board_cols: 11
+    board_rows: 8
+    square_size: 0.010
+    minimum_samples: 20
+    detection_scale: 0.5
+    detection_rate_hz: 5.0
+    output_file: ''

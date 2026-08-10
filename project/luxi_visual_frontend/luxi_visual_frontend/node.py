@@ -183,6 +183,9 @@ class VisualOdometryNode(Node):
             "ransac_confidence": 0.999,
             "minimum_depth": 0.2,
             "maximum_depth": 6.0,
+            "depth_sampling_radius": 0,
+            "depth_sampling_minimum_valid": 1,
+            "use_depth_translation_refinement": False,
             "keyframe_min_translation": 0.10,
             "keyframe_min_rotation_deg": 8.0,
             "keyframe_max_age": 1.0,
@@ -207,7 +210,10 @@ class VisualOdometryNode(Node):
             raise ValueError("minimum_depth_consistency_matches must be at least 3")
         if parameters["maximum_depth_consistency_error"] <= 0.0:
             raise ValueError("maximum_depth_consistency_error must be positive")
-
+        if parameters["depth_sampling_radius"] < 0:
+            raise ValueError("depth_sampling_radius must not be negative")
+        if parameters["depth_sampling_minimum_valid"] < 1:
+            raise ValueError("depth_sampling_minimum_valid must be positive")
         self.get_logger().info("Loading SuperPoint and LightGlue models")
         backend = SuperPointLightGlueBackend(
             str(parameters["device"]),
@@ -239,6 +245,13 @@ class VisualOdometryNode(Node):
             ransac_confidence=float(parameters["ransac_confidence"]),
             minimum_depth=float(parameters["minimum_depth"]),
             maximum_depth=float(parameters["maximum_depth"]),
+            depth_sampling_radius=int(parameters["depth_sampling_radius"]),
+            depth_sampling_minimum_valid=int(
+                parameters["depth_sampling_minimum_valid"]
+            ),
+            use_depth_translation_refinement=bool(
+                parameters["use_depth_translation_refinement"]
+            ),
             keyframe_min_translation=float(parameters["keyframe_min_translation"]),
             keyframe_min_rotation=math.radians(float(parameters["keyframe_min_rotation_deg"])),
             keyframe_max_age=float(parameters["keyframe_max_age"]),

@@ -753,6 +753,15 @@ class SemanticAnnotationStore:
         }
 
 
+@dataclass(frozen=True)
+class MappingProfile:
+    """One server-approved mapping launch selectable by the browser."""
+
+    launch_file: str
+    launch_arguments: Tuple[str, ...]
+    label: str
+
+
 class MappingController:
     """Own the RTAB-Map launch process started from the web interface."""
 
@@ -765,6 +774,9 @@ class MappingController:
         sensor_setup: Optional[Path],
         workspace_setup: Path,
         log_path: Path,
+        launch_arguments: Optional[Tuple[str, ...]] = None,
+        additional_profiles: Optional[Dict[str, MappingProfile]] = None,
+        default_mode: str = "stable",
     ) -> None:
         self.enabled = enabled
         self.package = package
@@ -773,42 +785,69 @@ class MappingController:
         self.sensor_setup = sensor_setup
         self.workspace_setup = workspace_setup
         self.log_path = log_path
+        self.launch_arguments = (
+            launch_arguments if launch_arguments is not None else (
+                "new_map:=true",
+                "rviz:=false",
+                "rtabmap_viz:=false",
+            )
+        )
+        self.profiles = {
+            "stable": MappingProfile(
+                self.launch_file,
+                self.launch_arguments,
+                "稳定 CUDA + 经典前端",
+            ),
+            **(additional_profiles or {}),
+        }
+        if default_mode not in self.profiles:
+            raise ValueError(f"unknown default mapping mode: {default_mode}")
+        self.default_mode = default_mode
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
         self._started_at: Optional[float] = None
         self._last_exit_code: Optional[int] = None
         self._last_error = ""
         self._stop_requested = False
+        self._active_mode: Optional[str] = None
+        self._last_mode = default_mode
 
-    def _command(self) -> list:
+    def _command(self, mode: Optional[str] = None) -> list:
         """Build a shell-free, source-aware RTAB-Map launch command."""
-        source_commands = []
-        if self.sensor_setup is not None:
-            source_commands.append(
-                f"source {shlex.quote(str(self.sensor_setup))}"
-            )
-        source_commands.extend([
+        selected_mode = mode or self.default_mode
+        profile = self.profiles.get(selected_mode)
+        if profile is None:
+            raise ValueError(f"unsupported mapping mode: {selected_mode}")
+        source_commands = [
             f"source {shlex.quote(str(self.workspace_setup))}",
             "export ROS_LOCALHOST_ONLY=0",
-            "export RMW_IMPLEMENTATION="
-            + shlex.quote(self.rmw_implementation),
-        ])
+        ]
+        if self.sensor_setup is not None:
+            source_commands.insert(
+                1, f"source {shlex.quote(str(self.sensor_setup))}"
+            )
+        if self.rmw_implementation:
+            source_commands.append(
+                "export RMW_IMPLEMENTATION="
+                + shlex.quote(self.rmw_implementation)
+            )
         launch_command = shlex.join([
             "ros2",
             "launch",
             self.package,
-            self.launch_file,
-            "new_map:=true",
-            "rviz:=false",
-            "rtabmap_viz:=false",
+            profile.launch_file,
+            *profile.launch_arguments,
         ])
         script = "set -e; " + "; ".join(source_commands)
         script += f"; exec {launch_command}"
         return ["/bin/bash", "-c", script]
 
-    def start(self) -> Tuple[bool, str]:
+    def start(self, mode: Optional[str] = None) -> Tuple[bool, str]:
         """Start a fresh managed RTAB-Map process when prerequisites exist."""
         with self._lock:
+            selected_mode = mode or self.default_mode
+            if selected_mode not in self.profiles:
+                return False, f"unsupported mapping mode: {selected_mode}"
             if not self.enabled:
                 return False, "mapping control is disabled"
             if self._process is not None and self._process.poll() is None:
@@ -829,7 +868,7 @@ class MappingController:
                         "\n===== RTAB-Map started by luxi_web_control =====\n"
                     )
                     self._process = subprocess.Popen(
-                        self._command(),
+                        self._command(selected_mode),
                         stdout=log_file,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
@@ -843,7 +882,9 @@ class MappingController:
             self._last_exit_code = None
             self._last_error = ""
             self._stop_requested = False
-            return True, "RTAB-Map launch process started"
+            self._active_mode = selected_mode
+            self._last_mode = selected_mode
+            return True, f"RTAB-Map {selected_mode} launch process started"
 
     def stop(self) -> Tuple[bool, str]:
         """Gracefully stop only this controller's RTAB-Map process."""
@@ -854,7 +895,11 @@ class MappingController:
                 return True, "RTAB-Map mapping is already stopped"
             self._stop_requested = True
             try:
-                os.killpg(process.pid, signal.SIGINT)
+                # Signal only the top-level ROS launch process. It will stop
+                # each child once and in dependency order. Signalling the
+                # whole process group here makes launch forward a second
+                # SIGINT to RTAB-Map, which can skip its graceful DB save.
+                process.send_signal(signal.SIGINT)
             except ProcessLookupError:
                 self._update_exit_state_locked()
                 return True, "RTAB-Map mapping is already stopped"
@@ -884,6 +929,7 @@ class MappingController:
         if not self._stop_requested:
             self._last_error = self._latest_log_error()
         self._stop_requested = False
+        self._active_mode = None
         self._process = None
 
     def _latest_log_error(self) -> str:
@@ -912,6 +958,8 @@ class MappingController:
             started_at = self._started_at
             exit_code = self._last_exit_code
             error = self._last_error
+            active_mode = self._active_mode
+            last_mode = self._last_mode
         if not self.enabled:
             state = "disabled"
         elif running:
@@ -920,6 +968,13 @@ class MappingController:
             state = "failed"
         else:
             state = "stopped"
+        mode_order = [
+            self.default_mode,
+            *(
+                mode for mode in self.profiles
+                if mode != self.default_mode
+            ),
+        ]
         return {
             "enabled": self.enabled,
             "state": state,
@@ -931,6 +986,13 @@ class MappingController:
             "last_exit_code": exit_code,
             "last_error": error,
             "log_path": str(self.log_path),
+            "active_mode": active_mode,
+            "selected_mode": active_mode or last_mode,
+            "default_mode": self.default_mode,
+            "modes": [
+                {"id": mode, "label": self.profiles[mode].label}
+                for mode in mode_order
+            ],
         }
 
 
@@ -1347,7 +1409,14 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/mapping/start":
-            started, message = node.start_mapping()
+            mode = payload.get("mode")
+            if mode is not None and not isinstance(mode, str):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST,
+                    "mapping mode must be a string",
+                )
+                return
+            started, message = node.start_mapping(mode)
             if not started:
                 self._send_error_json(HTTPStatus.CONFLICT, message)
                 return
@@ -1462,11 +1531,33 @@ class WebControlNode(Node):
         self.declare_parameter("enable_output", True)
         self.declare_parameter("web_root", "")
         self.declare_parameter("enable_mapping_control", True)
-        self.declare_parameter("mapping_launch_package", "luxi_rtab_map")
-        self.declare_parameter("mapping_launch_file", "rgbd_mapping_learned.launch.py")
+        self.declare_parameter(
+            "mapping_launch_package", "lunar_usb_rtabmap_bringup"
+        )
+        self.declare_parameter("mapping_launch_file", "usb_rtabmap.launch.py")
+        self.declare_parameter("mapping_launch_arguments", [
+            "mode:=stable",
+            "new_map:=true",
+            "rviz:=false",
+            "rtabmap_viz:=false",
+            "use_imu:=true",
+            "planar_mode:=false",
+        ])
+        self.declare_parameter("mapping_default_mode", "vpi_learned")
+        self.declare_parameter("enable_vpi_learned_mapping", True)
+        self.declare_parameter(
+            "vpi_learned_mapping_launch_file",
+            "usb_rtabmap.launch.py",
+        )
+        self.declare_parameter("vpi_learned_mapping_launch_arguments", [
+            "mode:=vpi_learned",
+            "new_map:=true",
+            "rviz:=false",
+            "use_imu:=true",
+        ])
         self.declare_parameter(
             "mapping_rmw_implementation",
-            "rmw_cyclonedds_cpp",
+            "rmw_fastrtps_cpp",
         )
         self.declare_parameter("mapping_sensor_setup", "")
         self.declare_parameter("mapping_d435_setup", "")
@@ -1546,10 +1637,33 @@ class WebControlNode(Node):
             self.get_parameter("mapping_d435_setup").value
         )
         mapping_sensor_setup = mapping_sensor_setup or legacy_mapping_setup
+        if mapping_sensor_setup:
+            expanded_setup = Path(
+                os.path.expandvars(mapping_sensor_setup)
+            ).expanduser()
+            if not expanded_setup.is_absolute():
+                expanded_setup = workspace_root / expanded_setup
+            mapping_sensor_setup = str(expanded_setup.resolve())
         workspace_setup = str(
             self.get_parameter("mapping_workspace_setup").value
         )
         mapping_log_path = str(self.get_parameter("mapping_log_path").value)
+        additional_mapping_profiles: Dict[str, MappingProfile] = {}
+        if bool(self.get_parameter("enable_vpi_learned_mapping").value):
+            additional_mapping_profiles["vpi_learned"] = MappingProfile(
+                launch_file=str(
+                    self.get_parameter(
+                        "vpi_learned_mapping_launch_file"
+                    ).value
+                ),
+                launch_arguments=tuple(
+                    str(argument) for argument in
+                    self.get_parameter(
+                        "vpi_learned_mapping_launch_arguments"
+                    ).value
+                ),
+                label="VPI OFA/PVA/VIC + Luxi 学习前端",
+            )
         self.mapping = MappingController(
             enabled=bool(self.get_parameter("enable_mapping_control").value),
             package=str(self.get_parameter("mapping_launch_package").value),
@@ -1558,7 +1672,7 @@ class WebControlNode(Node):
                 self.get_parameter("mapping_rmw_implementation").value
             ),
             sensor_setup=(
-                Path(mapping_sensor_setup).resolve()
+                Path(mapping_sensor_setup)
                 if mapping_sensor_setup else None
             ),
             workspace_setup=Path(
@@ -1568,6 +1682,14 @@ class WebControlNode(Node):
                 mapping_log_path
                 or workspace_root / "log/luxi_web_control_rtabmap.log"
             ).resolve(),
+            launch_arguments=tuple(
+                str(argument) for argument in
+                self.get_parameter("mapping_launch_arguments").value
+            ),
+            additional_profiles=additional_mapping_profiles,
+            default_mode=str(
+                self.get_parameter("mapping_default_mode").value
+            ),
         )
         navigation_sensor_setup = str(
             self.get_parameter("navigation_sensor_setup").value
@@ -2195,7 +2317,7 @@ class WebControlNode(Node):
             self._timed_out = False
         self._publish(VelocityCommand())
 
-    def start_mapping(self) -> Tuple[bool, str]:
+    def start_mapping(self, mode: Optional[str] = None) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
         if self.mapping.status()["state"] != "running":
             conflicts = mapping_graph_conflicts(
@@ -2206,7 +2328,7 @@ class WebControlNode(Node):
                     "mapping nodes are already active outside web control: "
                     + ", ".join(conflicts)
                 )
-        started, message = self.mapping.start()
+        started, message = self.mapping.start(mode)
         if started:
             self._clear_cloud_preview()
         return started, message

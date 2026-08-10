@@ -14,7 +14,8 @@ luxi_visual_frontend:
     superpoint_engine_directory: ""
     superpoint_precision: fp16
     # Preserve model quality while reducing repeated CUDA kernel launches.
-    # Frames above 512 points automatically retain the original eager path.
+    # Hardware profiles may disable this for a TensorRT/shape combination that
+    # is not safe to capture.
     superpoint_cuda_graph: true
     lightglue_cuda_graph: true
     lightglue_cuda_graph_keypoints: 512
@@ -60,6 +61,13 @@ luxi_visual_frontend:
     ransac_confidence: 0.999
     minimum_depth: 0.2
     maximum_depth: 6.0
+    # Hardware profiles may enable robust local depth sampling. Defaults keep
+    # the original exact-pixel behavior for HIK and D435i.
+    depth_sampling_radius: 0
+    depth_sampling_minimum_valid: 1
+    use_depth_translation_refinement: false
+    # USB VPI may also combine forward and reverse RGB-D PnP rotations. Keep
+    # this disabled globally so HIK and D435i retain their validated behavior.
 
     keyframe_min_translation: 0.10
     keyframe_min_rotation_deg: 8.0

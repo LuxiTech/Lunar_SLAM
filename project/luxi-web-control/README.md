@@ -84,11 +84,11 @@ echo "Luxi 旧进程已清理，可以启动硬件和网页。"
 HIK 双目 + H30 IMU（当前推荐测试命令）：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
+cd /home/nvidia/Desktop/lunar_-slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=0
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 ```
 
@@ -99,11 +99,11 @@ ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 D435i 使用完全相同的入口，只替换一个参数：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
+cd /home/nvidia/Desktop/lunar_-slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=0
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 ```
 
@@ -118,7 +118,7 @@ ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 连接 LeKiwi 底盘时使用：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
+cd /home/nvidia/Desktop/lunar_-slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch luxi_web_control lekiwi_web_control.launch.py \
@@ -151,7 +151,14 @@ ros2 launch luxi_web_control web_control.launch.py \
 
 若提示 `Address already in use`，先访问现有 8080 服务；也可改用
 `http_port:=8081`。若提示 `Package 'luxi_web_control' not found`，重新执行
-`source /home/nvidia/Desktop/lunar_slam/install/setup.bash`。
+`source /home/nvidia/Desktop/lunar_-slam/install/setup.bash`。
+
+网页 launch 默认先执行一次 `ros2 daemon stop`，再启动网页节点。该操作只清理
+`ros2cli` 的图发现缓存，不会停止相机、建图或底盘 ROS 节点；下一次执行 `ros2 node
+list` 等命令时会自动创建干净的 daemon。如果日志曾连续刷出
+`ParticipantEntitiesInfo`、`Fast CDR exception` 或 `Bad alloc`，这是旧 Fast DDS
+daemon/共享内存发现状态损坏，本预检会自动恢复。只有在确认 daemon 状态健康且不希望
+重启它时，才显式传入 `reset_ros_daemon:=false`。
 
 ## 与不同小车连接
 
@@ -202,23 +209,32 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 网页顶部“ROS 订阅者”应大于 0。为 0 时网页服务仍可访问，但速度消息还没有接入
 底盘，需要检查两端的 ROS domain、RMW、网卡防火墙和话题名。
 
-## 网页控制 RTAB-Map 建图
+## 网页控制 RTAB-Map 建图（当前 NX USB 双目配置）
 
-网页中的“开始建图”只管理算法建图进程，**不会启动或关闭相机硬件**。因此必须先按
-“终端一”启动唯一选定的 `luxi_adapter` profile，再按“终端二”启动网页。硬件型号不
-会改变这里使用的算法 launch。
+当前网页的“建图方案”可选择两条完整链路；两者都拥有 USB 相机、适配层、里程计和
+RTAB-Map，不要再单独启动相机 profile。算法、性能与复测方法见
+[USB 双目相机 README](../../device/USBCameraSDK/ros2_ws/README.md)。
+
+| 网页选项 | 模式 ID | 用途 |
+| --- | --- | --- |
+| VPI + Luxi 学习特征建图 | `vpi_learned` | 默认；闭环更多、低倾斜、GPU 高峰持续率低 |
+| 稳定 CUDA + 经典前端 | `stable` | 显式回退；静止漂移、瞬时帧率和低内存更好 |
+
+浏览器只发送 `stable` 或 `vpi_learned` 模式 ID，实际 launch 和参数由服务端白名单决定，
+不能通过 HTTP 传入任意命令。当前 H30 已接入 10 Hz 外触发，两条链路都默认传入
+`use_imu:=true`；IMU 六轴或四元数健康门禁失败时建图不会启动。仅做无 IMU 诊断时，
+才在服务端白名单参数中显式关闭融合。
 
 打开网页后按以下顺序操作：
 
-1. 确认“ROS 订阅者”为 `1` 或更大。
-2. 点击“开始建图”，状态变为“建图中”。网页会以无 RViz 模式启动
-   `luxi_rtab_map/rgbd_mapping_learned.launch.py`。该流程使用
-   SuperPoint + LightGlue 外部里程计，并将 SuperPoint 局部特征交给 RTAB 后端。
+1. 确认 USB 双目模组已连接，且没有其他进程占用相机。
+2. 在“建图方案”中选择稳定模式或 VPI 学习特征模式，再点击“开始建图”。状态和
+   说明栏会显示当前实际运行的方案，两者均以无 RViz 模式启动。
 3. 使用虚拟摇杆缓慢运动并采集环境。
-4. 点击“停止建图”。网页会向它启动的建图进程发送 `SIGINT`，RTAB-Map 正常关闭并
-   保存数据库。
+4. 点击“停止建图”。网页只向顶层 launch 发送一次 `SIGINT`，由 launch 按顺序关闭
+   子节点；等待 RTAB-Map 打印保存完成后，状态才返回“未启动”。
 
-网页下方会同时显示两块只读预览：当前硬件 profile 的 RGB 图像，以及来自
+网页下方会同时显示两块只读预览：USB 左相机 RGB 图像，以及来自
 `/rtabmap/cloud_map` 的彩色点云。RGB 在相机驱动运行后即可显示；点云需要建图
 成功启动并收到 RTAB-Map 地图数据后才会出现。当前 `max_cloud_points=0`，网页不再对
 实时点云抽样；其显示采用固定等轴视角，适合确认重建是否持续更新。大地图若导致网页
@@ -226,8 +242,8 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 
 每一次新建图默认写入 `/home/nvidia/Desktop/lunar_slam/maps/rtab_maps/mapNNN.db`。如果启动失败，
 网页会显示失败状态；详细日志位于
-`/home/nvidia/Desktop/lunar_slam/log/luxi_web_control_rtabmap.log`。常见原因是硬件
-profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
+`/home/nvidia/Desktop/lunar_-slam/log/luxi_web_control_rtabmap.log`。常见原因是相机
+被旧进程占用、USB 热插拔后仍在恢复，或没有同步双目数据。
 
 网页只停止它自己启动的 RTAB-Map 进程，不会停止手工终端中已经运行的建图任务。
 启动前还会检查 ROS 图中的 `/luxi_visual_frontend` 和 `/rtabmap/rtabmap`。如果终端已
@@ -301,6 +317,7 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `cmd_vel_topic` | `/cmd_vel` | Twist 输出话题 |
 | `bind_address` | `0.0.0.0` | HTTP 监听地址 |
 | `http_port` | `8080` | HTTP 端口，测试时可设为 0 自动分配 |
+| `reset_ros_daemon` | `true` | launch 启动前清理旧 Fast DDS 图发现状态，不影响运行中的 ROS 节点 |
 | `auto_stop_existing_web_control` | `true` | 自动替换同用户、同包的旧网页控制实例 |
 | `publish_rate` | `20.0` | Twist 发布频率（Hz） |
 | `command_timeout` | `0.6` | 运动命令失效时间（秒） |
@@ -310,13 +327,17 @@ profile 尚未运行、热插拔后仍在恢复，或没有 RGB-D/IMU 数据。
 | `enable_output` | `true` | 设为 false 时仅发布零速度 |
 | `web_root` | 安装目录 | 自定义网页资源目录，主要用于开发测试 |
 | `enable_mapping_control` | `true` | 是否显示并允许 RTAB-Map 建图开关 |
-| `mapping_launch_package` | `luxi_rtab_map` | 被网页管理的建图 ROS 包 |
-| `mapping_launch_file` | `rgbd_mapping_learned.launch.py` | 被网页管理的学习型前端建图 launch 文件 |
-| `mapping_sensor_setup` | 空 | 可选的额外设备环境；统一工作区构建时保持为空 |
+| `mapping_launch_package` | `lunar_usb_rtabmap_bringup` | 与 D435i 同层级的 USB 专属建图入口包 |
+| `mapping_launch_file` | `usb_rtabmap.launch.py` | stable/VPI 共用的唯一完整建图入口 |
+| `mapping_launch_arguments` | `new_map/无界面/H30 IMU/自由 6DoF` | 传给建图入口的参数列表；IMU 健康门禁失败时不会启动里程计 |
+| `mapping_default_mode` | `vpi_learned` | 网页默认建图方案；基于 2026-08-10 同机 A/B |
+| `enable_vpi_learned_mapping` | `true` | 是否允许网页选择 VPI + Luxi 生产链路 |
+| `vpi_learned_mapping_launch_file` | `usb_rtabmap.launch.py` | 同一入口，通过 `mode:=vpi_learned` 选择默认链 |
+| `mapping_sensor_setup` | USB 工作区 `install/setup.bash` | 在通用算法环境之上加载 USB 设备包 |
 | `auto_build_hloc_index` | `true` | 加载地图时是否自动构建缺失的 GPU HLoc 索引 |
 | `hloc_index_build_timeout` | `900.0` | HLoc 导出和单个模型构建步骤的超时秒数 |
 | `enable_preview` | `true` | 是否订阅并提供 RGB、实时点云预览 |
-| `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
+| `rgb_preview_topic` | `/left_camera/image/compressed` | USB 左相机压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `0` | 单次浏览器点云预览的最大抽样点数；`0` 表示不抽样 |
 | `max_saved_cloud_points` | `30000` | 浏览器 Canvas 的保存点云显示上限；只限制预览，不改变 PLY、OctoMap 或定位精度 |

@@ -16,6 +16,7 @@
 
 import math
 import os
+import signal
 import struct
 import subprocess
 
@@ -32,6 +33,7 @@ from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import HlocIndexBuilder
 from luxi_web_control.web_control_node import MappingController
+from luxi_web_control.web_control_node import MappingProfile
 from luxi_web_control.web_control_node import is_managed_web_control_command
 from luxi_web_control.web_control_node import localization_covariance_ready
 from luxi_web_control.web_control_node import localization_pose_summary
@@ -146,6 +148,100 @@ def test_mapping_start_only_requires_workspace_setup(tmp_path):
     assert "new_map:=true" in command
 
 
+def test_usb_mapping_command_disables_unconnected_imu(tmp_path):
+    workspace_setup = Path(tmp_path / "workspace_setup.bash")
+    workspace_setup.touch()
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=None,
+        workspace_setup=workspace_setup,
+        log_path=Path(tmp_path / "mapping.log"),
+        launch_arguments=(
+            "mode:=stable",
+            "new_map:=true",
+            "rviz:=false",
+            "rtabmap_viz:=false",
+            "use_imu:=false",
+            "planar_mode:=false",
+        ),
+    )
+
+    command = controller._command()[-1]
+
+    assert "usb_rtabmap.launch.py" in command
+    assert "mode:=stable" in command
+    assert "use_imu:=false" in command
+    assert "planar_mode:=false" in command
+    assert "RMW_IMPLEMENTATION=rmw_fastrtps_cpp" in command
+
+
+def test_device_workspace_overlays_algorithm_workspace(tmp_path):
+    workspace_setup = Path(tmp_path / "workspace_setup.bash")
+    sensor_setup = Path(tmp_path / "usb_setup.bash")
+    workspace_setup.touch()
+    sensor_setup.touch()
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=sensor_setup,
+        workspace_setup=workspace_setup,
+        log_path=Path(tmp_path / "mapping.log"),
+    )
+
+    command = controller._command()[-1]
+
+    assert command.index(f"source {workspace_setup}") < command.index(
+        f"source {sensor_setup}"
+    )
+
+
+def test_web_mapping_profiles_select_only_approved_launches(tmp_path):
+    workspace_setup = Path(tmp_path / "workspace_setup.bash")
+    workspace_setup.touch()
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=None,
+        workspace_setup=workspace_setup,
+        log_path=Path(tmp_path / "mapping.log"),
+        launch_arguments=("mode:=stable", "use_imu:=false", "rviz:=false"),
+        additional_profiles={
+            "vpi_learned": MappingProfile(
+                "usb_rtabmap.launch.py",
+                ("mode:=vpi_learned", "new_map:=true", "rviz:=false"),
+                "VPI learned",
+            ),
+        },
+        default_mode="vpi_learned",
+    )
+
+    stable_command = controller._command("stable")[-1]
+    experimental_command = controller._command("vpi_learned")[-1]
+    status = controller.status()
+
+    assert "usb_rtabmap.launch.py" in stable_command
+    assert "mode:=stable" in stable_command
+    assert "use_imu:=false" in stable_command
+    assert "usb_rtabmap.launch.py" in experimental_command
+    assert "mode:=vpi_learned" in experimental_command
+    assert "new_map:=true" in experimental_command
+    assert status["default_mode"] == "vpi_learned"
+    assert [mode["id"] for mode in status["modes"]] == [
+        "vpi_learned", "stable"
+    ]
+    assert controller.start("arbitrary.launch.py") == (
+        False,
+        "unsupported mapping mode: arbitrary.launch.py",
+    )
+
+
 def test_mapping_graph_conflicts_detects_external_slam_nodes():
     assert mapping_graph_conflicts([
         ("web_control", "/"),
@@ -204,6 +300,44 @@ def test_mapping_status_reports_child_failure_when_launch_exits_zero(tmp_path):
     assert status["state"] == "failed"
     assert status["last_exit_code"] == 0
     assert status["last_error"] == "[ERROR] [rtabmap]: process has died"
+
+
+def test_mapping_stop_signals_only_top_level_launch(tmp_path):
+    class GracefulLaunch:
+        pid = 4242
+
+        def __init__(self):
+            self.running = True
+            self.signals = []
+
+        def poll(self):
+            return None if self.running else 0
+
+        def send_signal(self, sent_signal):
+            self.signals.append(sent_signal)
+            self.running = False
+
+        def wait(self, timeout):
+            del timeout
+            return 0
+
+    process = GracefulLaunch()
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=None,
+        workspace_setup=Path(tmp_path / "workspace_setup.bash"),
+        log_path=Path(tmp_path / "mapping.log"),
+    )
+    controller._process = process
+
+    stopped, _ = controller.stop()
+
+    assert stopped
+    assert process.signals == [signal.SIGINT]
+    assert controller.status()["last_exit_code"] == 0
 
 
 def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):

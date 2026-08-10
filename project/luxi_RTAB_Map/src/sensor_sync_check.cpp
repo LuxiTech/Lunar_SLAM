@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <deque>
@@ -48,6 +49,28 @@ public:
       imu_topic, rclcpp::SensorDataQoS(),
       [this](sensor_msgs::msg::Imu::ConstSharedPtr message) {
         ++imu_count_;
+        const auto & orientation = message->orientation;
+        const auto & angular_velocity = message->angular_velocity;
+        const auto & acceleration = message->linear_acceleration;
+        const double orientation_norm = std::sqrt(
+          orientation.x * orientation.x + orientation.y * orientation.y +
+          orientation.z * orientation.z + orientation.w * orientation.w);
+        const bool valid =
+          message->orientation_covariance[0] >= 0.0 &&
+          message->angular_velocity_covariance[0] >= 0.0 &&
+          message->linear_acceleration_covariance[0] >= 0.0 &&
+          std::isfinite(orientation_norm) && orientation_norm > 0.5 &&
+          orientation_norm < 1.5 &&
+          std::isfinite(angular_velocity.x) &&
+          std::isfinite(angular_velocity.y) &&
+          std::isfinite(angular_velocity.z) &&
+          std::isfinite(acceleration.x) && std::isfinite(acceleration.y) &&
+          std::isfinite(acceleration.z);
+        if (!valid) {
+          ++invalid_imu_count_;
+          return;
+        }
+        ++valid_imu_count_;
         imu_stamps_ns_.push_back(stamp_nanoseconds(message->header.stamp));
         if (imu_stamps_ns_.size() > 2000) {
           imu_stamps_ns_.pop_front();
@@ -87,7 +110,7 @@ private:
 
     const bool stamp_monotonic = rgb_stamp > last_rgbd_stamp_ns_;
     last_rgbd_stamp_ns_ = std::max(last_rgbd_stamp_ns_, rgb_stamp);
-    const bool imu_count_ready = !require_imu_ || imu_count_ >= required_imu_count_;
+    const bool imu_count_ready = !require_imu_ || valid_imu_count_ >= required_imu_count_;
     const bool imu_time_ready = !require_imu_ || imu_delta <= max_imu_delta_ns_;
     if (skew <= max_rgbd_skew_ns_ && stamp_monotonic && imu_count_ready && imu_time_ready) {
       ++consecutive_valid_count_;
@@ -106,9 +129,11 @@ private:
       passed_ = true;
       RCLCPP_INFO(
         get_logger(),
-        "SYNC PASS: consecutive=%d total=%d invalid=%d imu=%d valid_max_rgbd_skew=%.3f ms "
+        "SYNC PASS: consecutive=%d total=%d invalid=%d imu_valid=%d imu_invalid=%d "
+        "valid_max_rgbd_skew=%.3f ms "
         "camera_imu_delta=%.3f ms",
-        consecutive_valid_count_, total_rgbd_count_, invalid_rgbd_count_, imu_count_,
+        consecutive_valid_count_, total_rgbd_count_, invalid_rgbd_count_, valid_imu_count_,
+        invalid_imu_count_,
         largest_valid_rgbd_skew_ns_ / 1e6, imu_delta / 1e6);
       rclcpp::shutdown();
       return;
@@ -116,14 +141,28 @@ private:
 
     const double elapsed = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - started_).count();
+    if (
+      require_imu_ && elapsed >= 1.0 && valid_imu_count_ == 0 &&
+      invalid_imu_count_ >= required_imu_count_)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "IMU HEALTH FAIL: received %d packets but none had valid orientation and "
+        "three-axis angular velocity and acceleration; refusing to start odometry",
+        invalid_imu_count_);
+      rclcpp::shutdown();
+      return;
+    }
     if (elapsed >= timeout_sec_) {
       RCLCPP_ERROR(
         get_logger(),
-        "SYNC FAIL after %.1f s: consecutive=%d/%d total=%d invalid=%d imu=%d/%d "
+        "SYNC FAIL after %.1f s: consecutive=%d/%d total=%d invalid=%d "
+        "imu_valid=%d/%d imu_invalid=%d "
         "camera_imu_delta=%s",
         elapsed, consecutive_valid_count_, required_sync_count_, total_rgbd_count_,
-        invalid_rgbd_count_, imu_count_,
+        invalid_rgbd_count_, valid_imu_count_,
         require_imu_ ? required_imu_count_ : 0,
+        invalid_imu_count_,
         imu_delta == std::numeric_limits<int64_t>::max() ?
         "unavailable" : (std::to_string(imu_delta / 1e6) + " ms").c_str());
       rclcpp::shutdown();
@@ -140,6 +179,8 @@ private:
   int total_rgbd_count_{0};
   int invalid_rgbd_count_{0};
   int imu_count_{0};
+  int valid_imu_count_{0};
+  int invalid_imu_count_{0};
   int64_t max_rgbd_skew_ns_{50000000};
   int64_t max_imu_delta_ns_{100000000};
   int64_t largest_valid_rgbd_skew_ns_{0};

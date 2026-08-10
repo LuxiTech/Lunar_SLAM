@@ -92,7 +92,7 @@ def test_future_profile_uses_naming_convention_without_dispatcher_changes(tmp_pa
     )
 
 
-def test_mapping_rviz_uses_only_canonical_adapter_images():
+def test_mapping_rviz_uses_canonical_images_by_default():
     rviz_path = PACKAGE_ROOT.parent / "luxi_RTAB_Map" / "rviz" / "rgbd_mapping.rviz"
     rviz = pytest.importorskip("yaml").safe_load(rviz_path.read_text(encoding="utf-8"))
     displays = rviz["Visualization Manager"]["Displays"]
@@ -103,9 +103,32 @@ def test_mapping_rviz_uses_only_canonical_adapter_images():
 
     assert topics["RGBImage"] == "/sensors/rgbd/color/image_raw"
     assert topics["DepthPreview"] == "/sensors/rgbd/depth/image_raw"
+    assert topics["CameraOdometry"] == "/rtabmap/odom"
+    assert topics["CurrentUSBDepthCloud"] == "/rtabmap/usb_points_stable"
+    assert topics["Accumulated3DCloud"] == "/rtabmap/cloud_map_visual"
+    assert topics["OccupancyGrid"] == "/rtabmap/map_visual"
+    assert rviz["Visualization Manager"]["Global Options"]["Fixed Frame"] == "map"
+
+    camera_odometry = next(
+        display for display in displays if display["Name"] == "CameraOdometry"
+    )
+    assert camera_odometry["Enabled"] is False
+
+    current_cloud = next(
+        display for display in displays if display["Name"] == "CurrentUSBDepthCloud"
+    )
+    assert current_cloud["Topic"]["Reliability Policy"] == "Best Effort"
+    assert current_cloud["Decay Time"] == 0
+    assert current_cloud["Selectable"] is False
+    assert current_cloud["Topic"]["Filter size"] == 2
+
+    accumulated_cloud = next(
+        display for display in displays if display["Name"] == "Accumulated3DCloud"
+    )
+    assert accumulated_cloud["Selectable"] is False
 
 
-def test_hik_and_d435i_configs_share_the_algorithm_facing_topics():
+def test_all_hardware_configs_share_the_algorithm_facing_topics():
     yaml = pytest.importorskip("yaml")
     d435i = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "sensor_bringup.yaml").read_text(encoding="utf-8")

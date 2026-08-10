@@ -18,9 +18,13 @@ target_compile_features(${PROJECT_NAME}_core PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-ament_target_dependencies(
-  ${PROJECT_NAME}_core cv_bridge rclcpp rclcpp_components rtabmap_msgs sensor_msgs)
 target_link_libraries(${PROJECT_NAME}_core ${OpenCV_LIBRARIES})
+ament_target_dependencies(${PROJECT_NAME}_core
+  cv_bridge
+  rclcpp
+  rclcpp_components
+  rtabmap_msgs
+  sensor_msgs)
 rclcpp_components_register_nodes(${PROJECT_NAME}_core "luxi_adapter::SensorAdapter")
 
 add_executable(sensor_adapter_node src/sensor_adapter_main.cpp)
@@ -39,7 +43,6 @@ if(BUILD_TESTING)
   ament_add_gtest(test_sensor_adapter test/test_sensor_adapter.cpp)
   if(TARGET test_sensor_adapter)
     target_link_libraries(test_sensor_adapter ${PROJECT_NAME}_core)
-    ament_target_dependencies(test_sensor_adapter rclcpp rtabmap_msgs sensor_msgs)
   endif()
   ament_add_pytest_test(test_sensor_bringup_launch test/test_sensor_bringup_launch.py)
 endif()

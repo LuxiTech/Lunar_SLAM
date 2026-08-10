@@ -52,6 +52,9 @@ class TrackerConfig:
     ransac_confidence: float = 0.999
     minimum_depth: float = 0.2
     maximum_depth: float = 6.0
+    depth_sampling_radius: int = 0
+    depth_sampling_minimum_valid: int = 1
+    use_depth_translation_refinement: bool = False
     keyframe_min_translation: float = 0.10
     keyframe_min_rotation: float = math.radians(8.0)
     keyframe_max_age: float = 1.0
@@ -240,6 +243,8 @@ class VisualOdometryTracker:
             depth_scale,
             self.config.minimum_depth,
             self.config.maximum_depth,
+            self.config.depth_sampling_radius,
+            self.config.depth_sampling_minimum_valid,
         )
         if len(features.keypoints) < self.config.minimum_keypoints:
             return self._result(
@@ -324,6 +329,43 @@ class VisualOdometryTracker:
         pose_source = "PNP"
         imu_rotation_error = 0.0
         depth_consistency_inliers = 0
+        if self.config.use_depth_translation_refinement:
+            pnp_match_indices = pose.inlier_indices
+            pnp_current_indices = current_indices[pnp_match_indices]
+            current_depth_mask = valid_depth[pnp_current_indices]
+            consistent_match_positions = np.flatnonzero(current_depth_mask)
+            if (
+                len(consistent_match_positions)
+                >= self.config.minimum_depth_consistency_matches
+            ):
+                depth_refined_pose = estimate_translation_with_rotation(
+                    reference.points3d[
+                        reference_indices[pnp_match_indices[consistent_match_positions]]
+                    ],
+                    points3d[pnp_current_indices[consistent_match_positions]],
+                    features.keypoints[pnp_current_indices[consistent_match_positions]],
+                    intrinsics,
+                    pose.current_from_reference[:3, :3],
+                    self.config.maximum_depth_consistency_error,
+                    self.config.minimum_depth_consistency_matches,
+                )
+                if (
+                    depth_refined_pose is not None
+                    and depth_refined_pose.reprojection_rmse
+                    <= self.config.maximum_reprojection_rmse
+                ):
+                    remapped_inliers = pnp_match_indices[
+                        consistent_match_positions[
+                            depth_refined_pose.inlier_indices
+                        ]
+                    ]
+                    pose = type(pose)(
+                        depth_refined_pose.current_from_reference,
+                        remapped_inliers,
+                        depth_refined_pose.reprojection_rmse,
+                    )
+                    pose_source = "PNP_DEPTH"
+                    depth_consistency_inliers = len(remapped_inliers)
         if imu_rotation is not None and reference.world_from_camera_rotation is not None:
             imu_current_from_reference = (
                 imu_rotation.T @ reference.world_from_camera_rotation

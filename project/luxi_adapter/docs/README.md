@@ -36,7 +36,28 @@ Names are case-insensitive. `hardware:=hik` selects `launch/hik.launch.py` and
 `config/hik_sensor_bringup.yaml`; `hardware:=d435i` selects
 `launch/d435i.launch.py` and the current default `config/sensor_bringup.yaml`.
 An explicit `config:=...` is an optional full-profile override, and launch fails
-immediately if that file declares a different `hardware_profile`.
+immediately if that file declares a different `hardware_profile`. USB uses the
+device-owned `lunar_usb_rtabmap_bringup` entry instead of adding another branch
+to this generic dispatcher.
+
+## USB stereo + H30 profile
+
+The USB device package starts the UVC stereo driver, depth frontend and this
+package's `sensor_adapter_node` directly. This matches the D435i device-owned
+bringup structure and avoids a nested generic-dispatcher subprocess.
+
+```bash
+cd /home/changxin/lunar_-slam
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+source device/USBCameraSDK/ros2_ws/install/setup.bash
+ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py mode:=stable
+```
+
+The USB profile uses the calibrated 90.3 mm stereo baseline and a 480x270
+mapping stream. Set the measured `base_link` to camera translation in
+`device/USBCameraSDK/ros2_ws/src/lunar_usb_rtabmap_bringup/config/usb_adapter.yaml`
+before using the resulting map for navigation.
 
 To add a future sensor named `<profile>`, add
 `launch/<profile>.launch.py` and `config/<profile>_sensor_bringup.yaml`. The

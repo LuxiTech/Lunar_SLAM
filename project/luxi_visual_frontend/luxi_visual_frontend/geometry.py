@@ -43,8 +43,16 @@ def project_depth_points(
     depth_scale: float,
     minimum_depth: float,
     maximum_depth: float,
+    sampling_radius: int = 0,
+    minimum_valid_samples: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Project image keypoints to camera 3D; invalid rows remain NaN."""
+    """Project image keypoints to camera 3D; invalid rows remain NaN.
+
+    A non-zero ``sampling_radius`` uses the median of valid samples around a
+    keypoint.  Learned keypoints often land on a stereo pixel whose single
+    disparity estimate is noisy or missing; a small local median is much more
+    stable while still preserving foreground/background boundaries.
+    """
     pixels = np.asarray(keypoints, dtype=np.float64)
     image = np.asarray(depth)
     camera = np.asarray(intrinsics, dtype=np.float64)
@@ -56,6 +64,8 @@ def project_depth_points(
         raise ValueError("intrinsics must be 3x3")
     if depth_scale <= 0.0 or minimum_depth < 0.0 or maximum_depth <= minimum_depth:
         raise ValueError("invalid depth limits")
+    if sampling_radius < 0 or minimum_valid_samples < 1:
+        raise ValueError("invalid depth sampling parameters")
 
     rounded = np.rint(pixels).astype(np.int64)
     valid_pixels = (
@@ -66,11 +76,44 @@ def project_depth_points(
     )
     metric_depth = np.full(len(pixels), np.nan, dtype=np.float64)
     indexes = np.flatnonzero(valid_pixels)
-    if len(indexes):
+    if len(indexes) and sampling_radius == 0:
         metric_depth[indexes] = (
             image[rounded[indexes, 1], rounded[indexes, 0]].astype(np.float64)
             * depth_scale
         )
+    elif len(indexes):
+        # Gather every keypoint patch in one small NxK array. This avoids a
+        # Python/NumPy allocation for each SuperPoint keypoint and keeps robust
+        # sampling below the neural frontend's frame budget on Jetson.
+        offset_y, offset_x = np.mgrid[
+            -sampling_radius:sampling_radius + 1,
+            -sampling_radius:sampling_radius + 1,
+        ]
+        sample_x = rounded[indexes, 0, None] + offset_x.reshape(1, -1)
+        sample_y = rounded[indexes, 1, None] + offset_y.reshape(1, -1)
+        inside = (
+            (sample_x >= 0)
+            & (sample_x < image.shape[1])
+            & (sample_y >= 0)
+            & (sample_y < image.shape[0])
+        )
+        samples = image[
+            np.clip(sample_y, 0, image.shape[0] - 1),
+            np.clip(sample_x, 0, image.shape[1] - 1),
+        ].astype(np.float64)
+        samples *= depth_scale
+        usable = (
+            inside
+            & np.isfinite(samples)
+            & (samples >= minimum_depth)
+            & (samples <= maximum_depth)
+        )
+        enough = usable.sum(axis=1) >= minimum_valid_samples
+        if np.any(enough):
+            robust_depth = np.nanmedian(
+                np.where(usable[enough], samples[enough], np.nan), axis=1
+            )
+            metric_depth[indexes[enough]] = robust_depth
     valid = (
         valid_pixels
         & np.isfinite(metric_depth)

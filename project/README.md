@@ -1,7 +1,7 @@
 # Lunar SLAM 算法项目
 
-`project/` 存放与具体相机解耦的 ROS 2 算法包。当前主链路支持海康双目相机与
-Intel RealSense D435i 替换接入；两类设备经过 `luxi_adapter` 后使用相同的 RGB-D、
+`project/` 存放与具体相机解耦的 ROS 2 算法包。当前主链路支持海康双目、USB 双目
+与 Intel RealSense D435i 替换接入；三类设备经过 `luxi_adapter` 后使用相同的 RGB-D、
 IMU 和 TF 接口。正式建图使用 `luxi_visual_frontend` 和项目维护的
 `luxi_rtab_map`，不使用海康工程附带的 RTAB-Map 前端或建图配置。
 
@@ -18,9 +18,9 @@ IMU 和 TF 接口。正式建图使用 `luxi_visual_frontend` 和项目维护的
 ## 系统链路
 
 ```text
-Hik 双目 + H30                         D435i
-       │                                 │
-       └────────── luxi_adapter ─────────┘
+Hik 双目 + H30       USB 双目 + H30       D435i
+       │                    │               │
+       └──────────── luxi_adapter ──────────┘
                          │
              /sensors/rgbd/rgbd_image
              /sensors/imu/data
@@ -56,7 +56,7 @@ Hik 双目 + H30                         D435i
 
 | 包 | 职责 |
 | --- | --- |
-| `luxi_adapter` | 选择 Hik/D435i 硬件 profile，发布统一 RGB-D、IMU 和 TF |
+| `luxi_adapter` | 提供统一 RGB-D/IMU 适配节点，并管理 Hik/D435i 通用 profile |
 | `luxi_visual_frontend` | SuperPoint + LightGlue RGB-D 视觉里程计与 RTAB 外部特征 |
 | `luxi_RTAB_Map` | 同步门禁、RTAB-Map 建图/定位、数据库保护和 RViz |
 | `luxi_hloc` | NetVLAD/HLoc 全局检索与粗定位，不参与实时建图前端 |
@@ -87,8 +87,9 @@ source install/setup.bash
 
 ## 统一硬件选择与建图
 
-正式链路只在 `luxi_adapter` 启动时选择硬件。Hik 与 D435i 后面的视觉前端、RTAB、
-RViz、定位和导航命令完全一致。终端一启动所选硬件：
+Hik 与 D435i 可通过 `luxi_adapter` 选择硬件；USB 按 D435i 的设备包结构由
+`lunar_usb_rtabmap_bringup` 直接组合采集、Adapter 和 RTAB-Map。Hik/D435i 的通用
+硬件入口为：
 
 ```bash
 cd /home/nvidia/Desktop/lunar_slam
@@ -131,6 +132,35 @@ ros2 launch luxi_rtab_map hik_mapping.launch.py \
   rviz:=true rtabmap_viz:=false \
   database_path:=/tmp/hik_mapping_test.db
 ```
+
+USB 双目与 H30 一键建图使用独立入口。该入口直接消费 USB 深度前端发布的原子
+RGB-D，避免再次拆分同步，并针对 480×270 图像关闭里程计二次降采样：
+
+```bash
+source device/USBCameraSDK/ros2_ws/install/setup.bash
+ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py \
+  rviz:=true rtabmap_viz:=false new_map:=true use_imu:=true
+```
+
+该入口默认使用 `vpi_learned`（VPI OFA/PVA/VIC 深度、RTAB F2M 里程计与 Luxi
+SuperPoint/LightGlue 建图特征）；需要低内存 CUDA 回退链时显式追加 `mode:=stable`。
+当前固定为 `/dev/imu-H30` 的设备已完成零偏恢复，并通过 921600 baud / 200 Hz 独立
+六轴验收及 10 Hz 外触发动态建图验收。USB 网页与终端链路默认使用
+`use_imu:=true`；驱动和启动健康门禁会拒绝任何无效轴，无 IMU 诊断时可显式传入
+`use_imu:=false`。
+
+当前 NX 完整链路（VPI + Luxi + H30 + RTAB-Map + RViz）实测约占 2.35 个 CPU 核，
+最高单进程 0.78 核，所列进程 RSS 合计约 2.69 GiB；GR3D 平均 37.2%、峰值 98%，
+31 次采样没有达到 99%。动态回停 10 秒漂移为 2.2 mm / 0.082°，详细的精细度、
+闭环、深度填充率和逐模块资源占比见
+[USB 相机工作区 README](../device/USBCameraSDK/ros2_ws/README.md#当前默认-vpi--luxi--h30-全链路验收2026-08-10)。
+
+历史 x86 主机、ROS 2 Lyrical 实测：USB 采集与实时彩色点云约 10 Hz，单帧约 2.9 万
+有效点，深度处理约 11 ms；连续原子 RGB-D/IMU 同步检查通过。针对该相机固定数据调参
+后，有效深度由 13.1/17.8/13.2% 提升到 14.5/19.2/14.1%，实机常见约 20–31%。
+GFTT+ORB 网格特征下里程计质量通常为 120–150；78 秒实机测试保存了 58 个数据库
+节点，优化图包含 3 个有效位姿，并生成 133×100（5 cm/格）占据栅格。正式评价仍应
+在纹理充足、0.4–5 m 范围内缓慢走一圈。
 
 终端手工建图和网页“开始建图”二选一。网页控制节点会在启动前检查
 `/luxi_visual_frontend` 和 `/rtabmap/rtabmap`；发现外部建图链路时拒绝再次启动，避免
@@ -209,6 +239,8 @@ ros2 launch luxi_rtab_map hik_mapping.launch.py \
 | `/luxi_visual_frontend/rgbd_image` | 带 SuperPoint 特征的 RTAB 输入 |
 | `/stereo/preview/left_color` | RViz 低延迟 RGB 预览 |
 | `/stereo/preview/depth_visual` | RViz 彩色深度预览 |
+| `/usb_stereo/points` | USB 当前帧实时彩色点云（约 10 Hz） |
+| `/rtabmap/odom` | 标准 RTAB RGB-D 视觉里程计 |
 | `/rtabmap/cloud_map` | 累积三维点云 |
 | `/rtabmap/map` | 二维占据栅格 |
 

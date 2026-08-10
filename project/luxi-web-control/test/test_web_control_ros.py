@@ -19,7 +19,7 @@ from pathlib import Path
 import threading
 import time
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 from geometry_msgs.msg import Twist
 import rclpy
@@ -29,6 +29,11 @@ from rclpy.parameter import Parameter
 from luxi_web_control.web_control_node import WebControlNode
 
 
+# This test talks exclusively to the local HTTP server.  Do not let a host-wide
+# proxy configuration route 127.0.0.1 through an external proxy.
+_LOCAL_OPENER = build_opener(ProxyHandler({}))
+
+
 def _post(base_url, path, body):
     request = Request(
         base_url + path,
@@ -36,7 +41,7 @@ def _post(base_url, path, body):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=2.0) as response:
+    with _LOCAL_OPENER.open(request, timeout=2.0) as response:
         return response.status, json.load(response)
 
 
@@ -88,21 +93,23 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
 
     try:
         assert node.web_root == source_web.resolve()
-        with urlopen(base_url + "/", timeout=2.0) as response:
+        with _LOCAL_OPENER.open(base_url + "/", timeout=2.0) as response:
             assert response.status == 200
             assert b"Luxi" in response.read()
 
-        with urlopen(base_url + "/map_projection.js", timeout=2.0) as response:
+        with _LOCAL_OPENER.open(base_url + "/map_projection.js", timeout=2.0) as response:
             assert response.status == 200
             assert b"unprojectGround" in response.read()
 
-        with urlopen(base_url + "/", timeout=2.0) as response:
+        with _LOCAL_OPENER.open(base_url + "/", timeout=2.0) as response:
             page = response.read()
             assert b"semanticSaveButton" in page
             assert b"semanticGroundZ" in page
             assert b"navigationShowSemantics" in page
+            assert b"mappingModeSelect" in page
+            assert b"vpi_learned" in page
 
-        with urlopen(base_url + "/app.js", timeout=2.0) as response:
+        with _LOCAL_OPENER.open(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
             app = response.read()
             assert b"/api/semantic/save" in app
@@ -110,15 +117,16 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"semanticAnnotation && navigationShowSemantics.checked" in app
             assert b"[...maps].reverse().find" in app
             assert b"navigationDrag.yaw +" in app
+            assert b'{mode: mappingModeSelect.value}' in app
 
-        with urlopen(base_url + "/api/preview/cloud", timeout=2.0) as response:
+        with _LOCAL_OPENER.open(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200
             preview = json.load(response)["cloud"]
             assert preview["point_count"] == 0
             assert preview["points"] == []
 
         assert node._load_navigation_cloud("map011", str(static_cloud)) == ""
-        with urlopen(base_url + "/api/navigation/cloud", timeout=2.0) as response:
+        with _LOCAL_OPENER.open(base_url + "/api/navigation/cloud", timeout=2.0) as response:
             assert response.status == 200
             saved_cloud = json.load(response)["cloud"]
             assert saved_cloud == {
@@ -128,7 +136,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
                 "points": [[0.0, 1.0, 2.0, 3, 4, 5], [6.0, 7.0, 8.0, 9, 10, 11]],
             }
         try:
-            urlopen(base_url + "/api/preview/rgb", timeout=2.0)
+            _LOCAL_OPENER.open(base_url + "/api/preview/rgb", timeout=2.0)
             assert False, "an RGB endpoint without camera input must return 404"
         except HTTPError as error:
             assert error.code == 404

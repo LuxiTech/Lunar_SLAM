@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Local transport sized for two 1920x1080 mono8 calibration streams. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>usb_camera_large_shm</transport_id>
+      <type>SHM</type>
+      <segment_size>33554432</segment_size>
+      <maxMessageSize>8388608</maxMessageSize>
+      <port_queue_capacity>512</port_queue_capacity>
+      <healthy_check_timeout_ms>1000</healthy_check_timeout_ms>
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>usb_camera_udp_fallback</transport_id>
+      <type>UDPv4</type>
+      <sendBufferSize>8388608</sendBufferSize>
+      <receiveBufferSize>8388608</receiveBufferSize>
+      <non_blocking_send>true</non_blocking_send>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="usb_camera_large_image_participant" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>usb_camera_large_shm</transport_id>
+        <transport_id>usb_camera_udp_fallback</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>
