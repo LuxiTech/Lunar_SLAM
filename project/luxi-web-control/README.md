@@ -55,29 +55,21 @@ Luxi 网页、建图和相机链路，防止重复占用 8080 端口、D435i USB
 重复发布 TF/话题。
 
 ```bash
-bash -lc '
-set +e
-curl -fsS -X POST -H "Content-Type: application/json" -d "{}" \
-  http://127.0.0.1:8080/api/mapping/stop >/dev/null 2>&1
-curl -fsS -X POST -H "Content-Type: application/json" -d "{}" \
-  http://127.0.0.1:8080/api/navigation/stop >/dev/null 2>&1
-sleep 2
-current_uid=$(id -u)
-process_pattern="[/](luxi_web_control/lib/luxi_web_control/web_control_node|luxi_visual_frontend/lib/luxi_visual_frontend/visual_odometry_node|rtabmap_slam/rtabmap|luxi_adapter/lib/luxi_adapter/sensor_adapter_node|realsense2_camera/lib/realsense2_camera/realsense2_camera_node|imu_filter_madgwick/lib/imu_filter_madgwick/imu_filter_madgwick_node|yesense_std_ros2/lib/yesense_std_ros2/yesense_node_publisher|stereo_depth/lib/stereo_depth/stereo_depth_node|hikrobot_camera_driver/lib/hikrobot_camera_driver/stereo_node)|__node:=[l]uxi_sensor_container|[s]ensor_bringup\.launch\.py|[d]435i\.launch\.py|[s]tereo_camera_bringup\.launch\.py|[l]ekiwi_web_control\.launch\.py|[w]eb_control\.launch\.py"
-pkill -INT -u "$current_uid" -f "$process_pattern"
-sleep 3
-if pgrep -u "$current_uid" -af "$process_pattern"; then
-  echo "仍有 Luxi 旧进程，请先检查上面列出的 PID。"
-  exit 1
-fi
-echo "Luxi 旧进程已清理，可以启动硬件和网页。"
-'
+cd /home/nvidia/Desktop/lunar_slam
+bash scripts/stop_luxi_system.sh
 ```
 
-上面整个代码块是一条命令，可直接完整复制执行。如果命令列出残留 PID 并返回失败，
-不要再次启动；先确认残留 PID 属于本工作区并正常结束。
+脚本先请求网页停止运动、建图和导航，等待数据库保存，然后只向当前用户启动且命令行
+匹配本工程的进程发送 `SIGINT`。若进程继承了“忽略 SIGINT”的状态，5 秒后会升级为
+`SIGTERM`。最后只有在相关 PID 全部退出且 8080 已释放时才报告成功；若列出残留 PID，
+不要再次启动，应先检查这些 PID。
 不要直接使用不带匹配条件的 `killall python3`、`killall component_container_mt`，它们会
 误停桌面或其他 ROS 任务。
+
+切换 HIK/D435i 或重新启动整套系统时必须执行上述完整清理。若只是重复执行网页 launch，
+新网页节点会先让旧网页正常停止建图和导航、释放 8080，并联动结束旧的速度仲裁节点；
+最多等待 30 秒供 RTAB-Map 保存数据库。不要在旧实例未退出时改用 8081 绕过检查，否则
+两套网页和速度仲裁节点会同时发布 ROS 话题。
 
 ### 终端一：选择并启动硬件
 
@@ -87,7 +79,7 @@ HIK 双目 + H30 IMU（当前推荐测试命令）：
 cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-export ROS_DOMAIN_ID=0
+export ROS_DOMAIN_ID=42
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 ```
@@ -102,7 +94,7 @@ D435i 使用完全相同的入口，只替换一个参数：
 cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-export ROS_DOMAIN_ID=0
+export ROS_DOMAIN_ID=42
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 ```
@@ -149,8 +141,10 @@ ros2 launch luxi_web_control web_control.launch.py \
 关闭顺序：网页“停止建图” → 等待状态停止 → 终端二 `Ctrl-C` → 终端一 `Ctrl-C`。
 网页只管理自己启动的算法进程，不会停止硬件 profile。
 
-若提示 `Address already in use`，先访问现有 8080 服务；也可改用
-`http_port:=8081`。若提示 `Package 'luxi_web_control' not found`，重新执行
+若提示 `previous web controller did not release port 8080`，说明旧版本或异常进程没有
+完成退出；执行本页“启动前：结束旧进程”的完整清理命令，确认没有残留 PID 后仍使用
+8080 重新启动。不要改用 8081 掩盖重复进程。若提示
+`Package 'luxi_web_control' not found`，重新执行
 `source /home/nvidia/Desktop/lunar_slam/install/setup.bash`。
 
 ## 与不同小车连接
@@ -168,22 +162,25 @@ ros2 run luxi_web_control web_control_node --ros-args \
   -r /cmd_vel:=/robot/cmd_vel
 ```
 
-### 已连接的 LeKiwi 小车（192.168.123.49）
+### 已连接的 D1 机器人（192.168.123.49）
 
-树莓派的 `lekiwi-base.service` 已设为开机自启，直接由
-`/lekiwi_base_node` 订阅 `/cmd_vel`。该底盘使用 Fast DDS、Domain 0 和子网发现；
-推荐在控制电脑上一键启动：
+控制目标使用 Fast DDS、Domain 42 和子网发现。网页与导航先输出标准
+`geometry_msgs/msg/Twist`，再由 `slam_d1_bridge` 转换为厂家接口
+`/d15041873/command/user_command`。启动网页和速度仲裁：
 
 ```bash
 ros2 launch luxi_web_control lekiwi_web_control.launch.py
 ```
 
-该 LeKiwi 专用启动会保持网页和导航侧的 ROS 标准方向，并通过 C++ 适配器把
-网页 `/lekiwi/cmd_vel_standard` 与导航 `/navigation/cmd_vel` 仲裁后转发到 `/cmd_vel`。
+该启动文件名因兼容已有部署仍保留 `lekiwi`，当前配置面向 D1：它通过 C++ 适配器把
+网页 `/d1/cmd_vel_standard` 与导航 `/navigation/cmd_vel` 仲裁后转发到 `/cmd_vel`。
 导航只有在路径跟随器发布 `/navigation/active=true` 时才能接管；非零手动指令、急停、停止、
-定位失效或导航指令超过 0.3 秒未更新都会取消接管并输出零速度。由于当前底盘角速度方向与
-ROS 标准相反，最终输出只反转 `angular.z`；线速度及其余分量保持不变。通用
-`web_control.launch.py` 不做这个硬件修正。
+定位失效或导航指令超过 0.3 秒未更新都会取消接管并输出零速度。厂家 SDK 定义
+`angular.z > 0` 为左转，因此 D1 链路不再反转 `angular.z`。
+
+页面中的“机器人控制”开关管理 D1 权限和姿态流程。开启完成前以及关闭过程中，服务端
+拒绝所有非零运动命令；关闭会先停车，再让机器人趴下并释放 SDK。出于安全考虑，刷新
+页面不会自动站立，切换时浏览器会再次要求现场确认。
 
 实车导航操作顺序为：加载地图、自动定位、选择目标点、等待“规划完成”，再点击“出发”。
 “停止行驶”保留定位和当前路径；“停止定位”和软件急停都会先停止行驶。当前速度上限为
@@ -192,26 +189,46 @@ ROS 标准相反，最终输出只反转 `angular.z`；线速度及其余分量�
 它会自动设置所需 DDS 环境变量。若使用通用 launch，则应在本机设置：
 
 ```bash
-export ROS_DOMAIN_ID=0
+export ROS_DOMAIN_ID=42
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
-unset ROS_LOCALHOST_ONLY
+export ROS_LOCALHOST_ONLY=0
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 ```
 
-确认发现底盘订阅者：
+D1 端 `d1_bringup.service` 必须使用相同设置。建议在它加载的 ROS 环境中设置：
+
+```ini
+Environment=ROS_DOMAIN_ID=42
+Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+Environment=ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+Environment=ROS_LOCALHOST_ONLY=0
+Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+```
+
+修改环境后仅在机器人安全趴下且有人持急停时重启 D1 bringup。控制机地址为
+`192.168.123.51/24`，机器人地址为
+`192.168.123.49/24`；两端应允许 Fast DDS 的 UDP 发现和数据流量。
+
+`/cmd_vel` 是本工程内部接口，D1 不直接订阅它。必须另启本工程中的厂家桥；完整构建、
+SDK 模式、站立、停止和测试步骤见
+[`docs/d1_robot_control.md`](../../docs/d1_robot_control.md)。
+
+确认厂家命令订阅者：
 
 ```bash
-ros2 topic info /cmd_vel --verbose
+ros2 topic info /d15041873/command/user_command --verbose
 ```
 
-在树莓派上可以同时观察网页节点发出的指令：
+启动桥之前应为 `Publisher count: 0`、`Subscription count: 1`；`http_ros_gateway` 与
+`slam_d1_bridge` 不能同时发布。可以观察本工程送入桥的标准速度：
 
 ```bash
 ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 ```
 
-网页顶部“ROS 订阅者”应大于 0。为 0 时网页服务仍可访问，但速度消息还没有接入
-底盘，需要检查两端的 ROS domain、RMW、网卡防火墙和话题名。
+桥启动后，网页顶部 `/cmd_vel` 的“ROS 订阅者”应大于 0。为 0 时网页服务仍可访问，
+但命令没有进入 D1 桥，需要检查桥进程和 ROS 环境。
 
 ## 网页控制 RTAB-Map 建图
 

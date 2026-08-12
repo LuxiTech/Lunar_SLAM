@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Launch web control with the DDS settings used by the LeKiwi base."""
+"""Launch web control with the DDS settings used by the connected D1 robot."""
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -40,7 +40,7 @@ def generate_launch_description():
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
         DeclareLaunchArgument(
             "standard_cmd_vel_topic",
-            default_value="/lekiwi/cmd_vel_standard",
+            default_value="/d1/cmd_vel_standard",
         ),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
         DeclareLaunchArgument("http_port", default_value="8080"),
@@ -52,7 +52,7 @@ def generate_launch_description():
                 "web_control.yaml",
             ),
         ),
-        SetEnvironmentVariable("ROS_DOMAIN_ID", "0"),
+        SetEnvironmentVariable("ROS_DOMAIN_ID", "42"),
         SetEnvironmentVariable("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         SetEnvironmentVariable(
             "ROS_AUTOMATIC_DISCOVERY_RANGE",
@@ -77,7 +77,7 @@ def generate_launch_description():
         Node(
             package="luxi_3d_navigation",
             executable="velocity_command_mux_node",
-            name="lekiwi_velocity_command_mux",
+            name="d1_velocity_command_mux",
             output="screen",
             parameters=[{
                 "manual_input_topic": LaunchConfiguration(
@@ -88,7 +88,7 @@ def generate_launch_description():
                 "navigation_active_topic": "/navigation/active",
                 "navigation_stop_topic": "/navigation/stop",
                 "emergency_stop_topic": "/navigation/emergency_stop",
-                "invert_angular_z": True,
+                "invert_angular_z": False,
             }],
         ),
     ])

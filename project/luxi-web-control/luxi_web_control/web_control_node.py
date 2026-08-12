@@ -40,8 +40,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import GetParameters
 from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
 from std_msgs.msg import Bool, Float32, String
+from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker
 
 
@@ -58,6 +61,23 @@ MAPPING_NODE_PATHS = frozenset({
     "/luxi_visual_frontend",
     "/rtabmap/rtabmap",
 })
+
+
+def classify_d1_posture(fsm_state: str) -> str:
+    """Classify the D1's reported locomotion FSM without hiding its raw value."""
+    normalized = fsm_state.strip().lower()
+    if not normalized:
+        return "unknown"
+    if normalized in {"idle", "transform_down"}:
+        return "prone"
+    if normalized == "transform_up":
+        return "standing_up"
+    if (
+        normalized in {"loco", "car", "joint_pd"}
+        or normalized.startswith("rl_")
+    ):
+        return "standing"
+    return "unknown"
 
 
 def mapping_graph_conflicts(
@@ -480,7 +500,7 @@ def _process_command(pid: int) -> str:
 
 def stop_existing_web_control(
     port: int,
-    timeout: float = 5.0,
+    timeout: float = 30.0,
 ) -> Tuple[bool, str]:
     """Stop only same-user luxi_web_control listeners on a requested port."""
     pids = _listening_process_ids(port)
@@ -830,6 +850,113 @@ class SemanticAnnotationStore:
             "annotation": canonical,
             "saved": True,
             "path": str(output),
+        }
+
+
+class D1ControlManager:
+    """Run the validated D1 stand-up and lie-down procedures asynchronously."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        start_script: Path,
+        stop_script: Path,
+        bridge_pid_file: Path,
+        log_path: Path,
+    ) -> None:
+        self.enabled = enabled
+        self.start_script = start_script
+        self.stop_script = stop_script
+        self.bridge_pid_file = bridge_pid_file
+        self.log_path = log_path
+        self._lock = threading.Lock()
+        self._worker: Optional[threading.Thread] = None
+        self._state = "active" if self._bridge_running() else "inactive"
+        self._last_error = ""
+
+    def _bridge_running(self) -> bool:
+        try:
+            pid = int(self.bridge_pid_file.read_text(encoding="ascii").strip())
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def set_active(self, active: bool, force: bool = False) -> Tuple[bool, str]:
+        """Start a background transition unless already in the requested state."""
+        with self._lock:
+            if not self.enabled:
+                return False, "D1 control is disabled"
+            if self._worker is not None and self._worker.is_alive():
+                return False, "D1 control is already transitioning"
+            currently_active = self._bridge_running()
+            if active == currently_active and not force:
+                self._state = "active" if active else "inactive"
+                self._last_error = ""
+                return True, "D1 control is already in the requested state"
+            self._state = "enabling" if active else "disabling"
+            self._last_error = ""
+            self._worker = threading.Thread(
+                target=self._run_transition,
+                args=(active,),
+                daemon=True,
+            )
+            self._worker.start()
+        return True, "D1 control transition started"
+
+    def _run_transition(self, active: bool) -> None:
+        script = self.start_script if active else self.stop_script
+        try:
+            if not script.is_file():
+                raise FileNotFoundError(f"D1 control script is missing: {script}")
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(
+                    "\n===== D1 control "
+                    + ("enable" if active else "disable")
+                    + " requested by luxi_web_control =====\n"
+                )
+                result = subprocess.run(
+                    [str(script), "--yes"],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    timeout=30.0,
+                    check=False,
+                    env=sanitized_subprocess_environment(),
+                )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"D1 control script exited with code {result.returncode}"
+                )
+            if self._bridge_running() != active:
+                raise RuntimeError("D1 bridge state does not match the request")
+            state = "active" if active else "inactive"
+            error = ""
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            state = "failed"
+            error = str(exc)
+        with self._lock:
+            self._state = state
+            self._last_error = error
+
+    def status(self) -> Dict[str, Any]:
+        """Return the transition state and independently observed bridge state."""
+        with self._lock:
+            state = self._state
+            error = self._last_error
+            transitioning = self._worker is not None and self._worker.is_alive()
+        bridge_running = self._bridge_running()
+        if not self.enabled:
+            state = "disabled"
+        elif not transitioning and state not in ("failed",):
+            state = "active" if bridge_running else "inactive"
+        return {
+            "enabled": self.enabled,
+            "state": state,
+            "active": bridge_running,
+            "transitioning": transitioning,
+            "last_error": error,
+            "log_path": str(self.log_path),
         }
 
 
@@ -1432,6 +1559,28 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 {"ok": True, "estop_active": active},
             )
             return
+        if path == "/api/robot/control":
+            active = payload.get("active")
+            if not isinstance(active, bool):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST,
+                    "active must be boolean",
+                )
+                return
+            node.stop_motion()
+            accepted, message = node.set_d1_control(active)
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.ACCEPTED,
+                {
+                    "ok": True,
+                    "message": message,
+                    "robot_control": node.d1_control_status(),
+                },
+            )
+            return
         if path == "/api/mapping/start":
             started, message = node.start_mapping()
             if not started:
@@ -1573,6 +1722,23 @@ class WebControlNode(Node):
         self.declare_parameter("max_angular_z", 0.8)
         self.declare_parameter("enable_output", True)
         self.declare_parameter("web_root", "")
+        self.declare_parameter("enable_d1_control", False)
+        self.declare_parameter("d1_start_script", "")
+        self.declare_parameter("d1_stop_script", "")
+        self.declare_parameter("d1_bridge_pid_file", "")
+        self.declare_parameter("d1_control_log_path", "")
+        self.declare_parameter(
+            "d1_fsm_topic", "/d15041873/rl_controller/fsm"
+        )
+        self.declare_parameter(
+            "d1_controller_status_service",
+            "/d15041873/command/get_controller_status",
+        )
+        self.declare_parameter(
+            "d1_parameter_service",
+            "/d15041873/teleop_command/get_parameters",
+        )
+        self.declare_parameter("d1_feedback_timeout", 3.0)
         self.declare_parameter("enable_mapping_control", True)
         self.declare_parameter("mapping_launch_package", "luxi_rtab_map")
         self.declare_parameter("mapping_launch_file", "rgbd_mapping_learned.launch.py")
@@ -1668,6 +1834,55 @@ class WebControlNode(Node):
         self.web_root = Path(web_root).resolve()
 
         workspace_root = package_share.parents[3]
+        d1_start_script = str(self.get_parameter("d1_start_script").value)
+        d1_stop_script = str(self.get_parameter("d1_stop_script").value)
+        d1_bridge_pid_file = str(
+            self.get_parameter("d1_bridge_pid_file").value
+        )
+        d1_control_log_path = str(
+            self.get_parameter("d1_control_log_path").value
+        )
+        self.d1_control = D1ControlManager(
+            enabled=bool(self.get_parameter("enable_d1_control").value),
+            start_script=Path(
+                d1_start_script
+                or workspace_root
+                / "project/slam_d1_bridge/scripts/start_slam_d1_bridge.sh"
+            ).resolve(),
+            stop_script=Path(
+                d1_stop_script
+                or workspace_root
+                / "project/slam_d1_bridge/scripts/stop_slam_d1_bridge.sh"
+            ).resolve(),
+            bridge_pid_file=Path(
+                d1_bridge_pid_file
+                or "/tmp/slam_d1_bridge_d15041873.pid"
+            ).resolve(),
+            log_path=Path(
+                d1_control_log_path
+                or workspace_root / "log/luxi_web_control_d1.log"
+            ).resolve(),
+        )
+        self.d1_fsm_topic = str(self.get_parameter("d1_fsm_topic").value)
+        self.d1_controller_status_service = str(
+            self.get_parameter("d1_controller_status_service").value
+        )
+        self.d1_parameter_service = str(
+            self.get_parameter("d1_parameter_service").value
+        )
+        self.d1_feedback_timeout = float(
+            self.get_parameter("d1_feedback_timeout").value
+        )
+        self._d1_status_lock = threading.Lock()
+        self._d1_fsm_state = ""
+        self._d1_fsm_received_at: Optional[float] = None
+        self._d1_controller_mode = ""
+        self._d1_controller_received_at: Optional[float] = None
+        self._d1_sdk_active: Optional[bool] = None
+        self._d1_sdk_received_at: Optional[float] = None
+        self._d1_feedback_error = ""
+        self._d1_controller_future = None
+        self._d1_parameter_future = None
         mapping_sensor_setup = str(
             self.get_parameter("mapping_sensor_setup").value
         )
@@ -1923,6 +2138,31 @@ class WebControlNode(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         self.publisher = self.create_publisher(Twist, self.cmd_vel_topic, qos)
+        self.d1_fsm_subscription = None
+        self.d1_controller_status_client = None
+        self.d1_parameter_client = None
+        self.d1_feedback_timer = None
+        if self.d1_control.enabled:
+            d1_feedback_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.d1_fsm_subscription = self.create_subscription(
+                String,
+                self.d1_fsm_topic,
+                self._on_d1_fsm,
+                d1_feedback_qos,
+            )
+            self.d1_controller_status_client = self.create_client(
+                Trigger, self.d1_controller_status_service
+            )
+            self.d1_parameter_client = self.create_client(
+                GetParameters, self.d1_parameter_service
+            )
+            self.d1_feedback_timer = self.create_timer(
+                1.0, self._poll_d1_feedback
+            )
         self.navigation_goal_publisher = self.create_publisher(
             PoseStamped, self.navigation_goal_topic, qos
         )
@@ -2054,6 +2294,8 @@ class WebControlNode(Node):
             raise ValueError("publish_rate must be greater than zero")
         if self.command_timeout <= 0.0:
             raise ValueError("command_timeout must be greater than zero")
+        if self.d1_feedback_timeout <= 0.0:
+            raise ValueError("d1_feedback_timeout must be greater than zero")
         if self.max_cloud_points != 0 and not 100 <= self.max_cloud_points <= 20000:
             raise ValueError(
                 "max_cloud_points must be zero or between 100 and 20000"
@@ -2106,6 +2348,75 @@ class WebControlNode(Node):
                 self._timed_out = True
             command = self._command
         self._publish(command)
+
+    def _on_d1_fsm(self, message: String) -> None:
+        """Cache the robot controller's transient-local FSM feedback."""
+        with self._d1_status_lock:
+            self._d1_fsm_state = message.data.strip()
+            self._d1_fsm_received_at = time.monotonic()
+            self._d1_feedback_error = ""
+
+    def _poll_d1_feedback(self) -> None:
+        """Poll the vendor's morphology and SDK-mode services at 1 Hz."""
+        if (
+            self.d1_controller_status_client is not None
+            and self.d1_controller_status_client.service_is_ready()
+            and (
+                self._d1_controller_future is None
+                or self._d1_controller_future.done()
+            )
+        ):
+            future = self.d1_controller_status_client.call_async(
+                Trigger.Request()
+            )
+            self._d1_controller_future = future
+            future.add_done_callback(self._on_d1_controller_status)
+        if (
+            self.d1_parameter_client is not None
+            and self.d1_parameter_client.service_is_ready()
+            and (
+                self._d1_parameter_future is None
+                or self._d1_parameter_future.done()
+            )
+        ):
+            request = GetParameters.Request()
+            request.names = ["use_sdk"]
+            future = self.d1_parameter_client.call_async(request)
+            self._d1_parameter_future = future
+            future.add_done_callback(self._on_d1_parameters)
+
+    def _on_d1_controller_status(self, future) -> None:
+        try:
+            response = future.result()
+            if response is None or not response.success:
+                raise RuntimeError(
+                    response.message if response is not None
+                    else "empty controller status response"
+                )
+            with self._d1_status_lock:
+                self._d1_controller_mode = response.message.strip()
+                self._d1_controller_received_at = time.monotonic()
+                self._d1_feedback_error = ""
+        except Exception as exc:  # ROS futures surface transport errors here.
+            with self._d1_status_lock:
+                self._d1_feedback_error = str(exc)
+
+    def _on_d1_parameters(self, future) -> None:
+        try:
+            response = future.result()
+            if (
+                response is None
+                or len(response.values) != 1
+                or response.values[0].type != ParameterType.PARAMETER_BOOL
+            ):
+                raise RuntimeError("invalid D1 parameter response")
+            with self._d1_status_lock:
+                self._d1_sdk_active = bool(response.values[0].bool_value)
+                self._d1_sdk_received_at = time.monotonic()
+                self._d1_feedback_error = ""
+        except Exception as exc:  # ROS futures surface transport errors here.
+            with self._d1_status_lock:
+                self._d1_feedback_error = str(exc)
 
     def _on_rgb_preview(self, message: CompressedImage) -> None:
         """Keep the newest compressed camera image for HTTP preview requests."""
@@ -2468,6 +2779,13 @@ class WebControlNode(Node):
 
     def accept_command(self, command: VelocityCommand) -> Tuple[bool, str]:
         """Store and immediately publish a validated browser command."""
+        d1_status = self.d1_control_status()
+        if (
+            d1_status["enabled"]
+            and not d1_status["control_ready"]
+            and command.moving
+        ):
+            return False, "D1 is not standing with SDK control and bridge ready"
         with self._lock:
             if self._estop_active and command.moving:
                 return False, "emergency stop is active"
@@ -2500,6 +2818,111 @@ class WebControlNode(Node):
         self.navigation_emergency_stop_publisher.publish(message)
         if active:
             self.halt_navigation_motion()
+
+    def set_d1_control(self, active: bool) -> Tuple[bool, str]:
+        """Start a safe asynchronous D1 enable or disable transition."""
+        self.stop_motion()
+        if not active:
+            self.halt_navigation_motion()
+        status = self.d1_control_status()
+        if active and not status["feedback_online"]:
+            return False, "D1 state feedback is offline; refusing to stand up"
+        if active and status["control_ready"]:
+            return True, "D1 is already standing and ready"
+        if not active and status["posture"] == "prone" and not status["bridge_active"]:
+            return True, "D1 is already prone with control released"
+        force = not active and not status["bridge_active"]
+        return self.d1_control.set_active(active, force=force)
+
+    def d1_control_status(self) -> Dict[str, Any]:
+        """Combine actual D1 FSM/SDK feedback with the local bridge state."""
+        managed = self.d1_control.status()
+        now = time.monotonic()
+        with self._d1_status_lock:
+            fsm_state = self._d1_fsm_state
+            fsm_received_at = self._d1_fsm_received_at
+            controller_mode = self._d1_controller_mode
+            controller_received_at = self._d1_controller_received_at
+            sdk_active = self._d1_sdk_active
+            sdk_received_at = self._d1_sdk_received_at
+            feedback_error = self._d1_feedback_error
+
+        def age(received_at: Optional[float]) -> Optional[float]:
+            return None if received_at is None else round(now - received_at, 2)
+
+        fsm_age = age(fsm_received_at)
+        controller_age = age(controller_received_at)
+        sdk_age = age(sdk_received_at)
+        fsm_online = bool(
+            managed["enabled"]
+            and fsm_state
+            and fsm_age is not None
+            and self.count_publishers(self.d1_fsm_topic) > 0
+        )
+        controller_online = bool(
+            managed["enabled"]
+            and controller_age is not None
+            and controller_age <= self.d1_feedback_timeout
+        )
+        sdk_online = bool(
+            managed["enabled"]
+            and sdk_age is not None
+            and sdk_age <= self.d1_feedback_timeout
+        )
+        feedback_online = fsm_online and controller_online and sdk_online
+        posture = classify_d1_posture(fsm_state) if fsm_online else "offline"
+        bridge_active = bool(managed["active"])
+        transitioning = bool(managed["transitioning"])
+        control_ready = bool(
+            feedback_online
+            and posture == "standing"
+            and sdk_online
+            and sdk_active is True
+            and bridge_active
+            and not transitioning
+        )
+        switch_active = bool(
+            bridge_active or posture in {"standing", "standing_up"}
+        )
+
+        if not managed["enabled"]:
+            state = "disabled"
+        elif transitioning:
+            state = managed["state"]
+        elif managed["state"] == "failed":
+            state = "failed"
+        elif not feedback_online:
+            state = "offline"
+        elif control_ready:
+            state = "active"
+        elif posture == "prone" and not bridge_active and sdk_active is False:
+            state = "inactive"
+        elif posture == "standing_up":
+            state = "standing_up"
+        elif posture == "standing":
+            state = "standing_uncontrolled"
+        else:
+            state = "unknown"
+
+        return {
+            **managed,
+            "state": state,
+            "active": switch_active,
+            "bridge_active": bridge_active,
+            "control_ready": control_ready,
+            "feedback_online": feedback_online,
+            "fsm_online": fsm_online,
+            "posture": posture,
+            "fsm_state": fsm_state or None,
+            "fsm_age_seconds": fsm_age,
+            "controller_online": controller_online,
+            "controller_mode": controller_mode or None,
+            "controller_age_seconds": controller_age,
+            "sdk_online": sdk_online,
+            "sdk_active": sdk_active,
+            "sdk_age_seconds": sdk_age,
+            "feedback_error": feedback_error or None,
+        }
 
     def start_mapping(self) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
@@ -2940,6 +3363,7 @@ class WebControlNode(Node):
             "command": command.as_dict(),
             "limits": self.limits.as_dict(),
             "subscriber_count": self.publisher.get_subscription_count(),
+            "robot_control": self.d1_control_status(),
             "mapping": self.mapping_status(),
             "navigation": self.navigation_status(),
             "preview": self.preview_status(),
@@ -2968,6 +3392,9 @@ def main(args: Optional[list] = None) -> None:
     """Run the web control ROS node."""
     # Keep ROS alive during Ctrl+C so close() can publish zero first.
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    # ros2 launch children inherit SIGINT as ignored. Restore Python's handler
+    # so automatic port takeover can run close() instead of waiting forever.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     node: Optional[WebControlNode] = None
     try:
         node = WebControlNode()

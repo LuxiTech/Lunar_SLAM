@@ -30,6 +30,8 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from sensor_msgs.msg import PointCloud2, PointField
 
 from luxi_web_control.web_control_node import discover_navigation_maps
+from luxi_web_control.web_control_node import D1ControlManager
+from luxi_web_control.web_control_node import classify_d1_posture
 from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import HlocIndexBuilder
@@ -71,6 +73,108 @@ def test_navigation_preview_uses_ten_centimeter_robot_radius():
         "navigation_robot_radius"
     ]
     assert radius == 0.10
+
+
+def test_lekiwi_launch_uses_vehicle_domain_42():
+    launch_source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/launch/lekiwi_web_control.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'SetEnvironmentVariable("ROS_DOMAIN_ID", "42")' in launch_source
+
+
+def test_d1_control_keeps_standard_yaw_direction():
+    launch_source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/launch/lekiwi_web_control.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"invert_angular_z": False' in launch_source
+    assert 'default_value="/d1/cmd_vel_standard"' in launch_source
+
+
+def test_d1_control_scripts_do_not_depend_on_ros_daemon_discovery():
+    scripts = WORKSPACE_ROOT / "project/slam_d1_bridge/scripts"
+    for script_name in (
+        "start_slam_d1_bridge.sh",
+        "stop_slam_d1_bridge.sh",
+    ):
+        source = (scripts / script_name).read_text(encoding="utf-8")
+        assert "topic info --no-daemon --spin-time 5.0" in source
+        assert "rcl_interfaces/srv/SetParameters" in source
+        assert "successful=True" in source
+
+
+def test_d1_web_control_is_enabled_and_exposes_switch():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )
+    assert config["web_control"]["ros__parameters"]["enable_d1_control"] is True
+
+    page = (WORKSPACE_ROOT / "project/luxi-web-control/web/index.html").read_text(
+        encoding="utf-8"
+    )
+    app = (WORKSPACE_ROOT / "project/luxi-web-control/web/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'id="robotControlToggle"' in page
+    assert 'api("/api/robot/control", {active: requested})' in app
+
+
+def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
+    pid_file = tmp_path / "bridge.pid"
+    start_script = tmp_path / "start.sh"
+    stop_script = tmp_path / "stop.sh"
+    start_script.write_text(
+        f"#!/bin/sh\necho {os.getpid()} > {pid_file}\n",
+        encoding="utf-8",
+    )
+    stop_script.write_text(
+        f"#!/bin/sh\nrm -f {pid_file}\n",
+        encoding="utf-8",
+    )
+    start_script.chmod(0o755)
+    stop_script.chmod(0o755)
+    manager = D1ControlManager(
+        enabled=True,
+        start_script=start_script,
+        stop_script=stop_script,
+        bridge_pid_file=pid_file,
+        log_path=tmp_path / "d1.log",
+    )
+
+    assert manager.set_active(True)[0]
+    for _ in range(100):
+        if not manager.status()["transitioning"]:
+            break
+        threading.Event().wait(0.01)
+    assert manager.status()["state"] == "active"
+
+    assert manager.set_active(False)[0]
+    for _ in range(100):
+        if not manager.status()["transitioning"]:
+            break
+        threading.Event().wait(0.01)
+    assert manager.status()["state"] == "inactive"
+
+
+@pytest.mark.parametrize(
+    ("fsm_state", "posture"),
+    [
+        ("loco", "standing"),
+        ("car", "standing"),
+        ("rl_3", "standing"),
+        ("transform_up", "standing_up"),
+        ("transform_down", "prone"),
+        ("idle", "prone"),
+        ("", "unknown"),
+        ("unexpected", "unknown"),
+    ],
+)
+def test_d1_posture_is_derived_from_actual_fsm(fsm_state, posture):
+    assert classify_d1_posture(fsm_state) == posture
 
 
 def test_map_export_filters_isolated_depth_outliers():
@@ -128,6 +232,37 @@ def test_only_our_own_web_control_command_can_be_auto_stopped():
         "web_control_node"
     )
     assert not is_managed_web_control_command("python3 -m http.server 8080")
+
+
+def test_web_launch_shuts_down_when_the_web_node_exits():
+    launch_source = (
+        WORKSPACE_ROOT / "project/luxi-web-control/launch/web_control.launch.py"
+    ).read_text(encoding="utf-8")
+    assert 'on_exit=Shutdown(reason="web control node exited")' in launch_source
+
+
+def test_web_main_restores_sigint_for_automatic_port_takeover():
+    source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/luxi_web_control/web_control_node.py"
+    ).read_text(encoding="utf-8")
+    assert "signal.signal(signal.SIGINT, signal.default_int_handler)" in source
+
+
+def test_documented_cleanup_uses_the_bounded_workspace_script():
+    readme = (
+        WORKSPACE_ROOT / "project/luxi-web-control/README.md"
+    ).read_text(encoding="utf-8")
+    cleanup = WORKSPACE_ROOT / "scripts/stop_luxi_system.sh"
+    source = cleanup.read_text(encoding="utf-8")
+    assert "bash scripts/stop_luxi_system.sh" in readme
+    assert "post_if_available /api/stop" in source
+    assert "post_if_available /api/mapping/stop" in source
+    assert "post_if_available /api/navigation/stop" in source
+    assert "signal_matches INT" in source
+    assert "signal_matches TERM" in source
+    assert "velocity_command_mux_node" in source
+    assert "sport = :8080" in source
 
 
 def test_map_export_sanitizes_camera_sdk_libraries():

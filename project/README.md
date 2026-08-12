@@ -65,6 +65,7 @@ Hik 双目 + H30                         D435i
 | `luxi_3d_navigation` | 保存 OctoMap 上的地面支撑型三维 A* 规划 |
 | `luxi_navigation` | 键盘遥控和手工语义地图标注 |
 | `luxi-web-control` | 网页遥控，发布标准 `geometry_msgs/Twist` |
+| `slam_d1_bridge` | 将 `/cmd_vel` 转为 D1 厂家 `ddt_msgs/UserCommand`，并负责限幅与超时清零 |
 | `luxi_semantic_annotation` | 保存地图的离线语义标注验证 |
 
 ## 构建

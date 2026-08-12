@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,9 @@ struct TerrainCloudPoint
   float x{};
   float y{};
   float z{};
+  float normal_x{std::numeric_limits<float>::quiet_NaN()};
+  float normal_y{std::numeric_limits<float>::quiet_NaN()};
+  float normal_z{std::numeric_limits<float>::quiet_NaN()};
 };
 
 struct TerrainCloudParameters

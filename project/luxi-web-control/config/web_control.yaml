@@ -18,6 +18,13 @@ web_control:
     max_angular_z: 0.8
     enable_output: true
 
+    # D1 stand/lie-down and C++ /cmd_vel bridge control shown as a web switch.
+    enable_d1_control: true
+    d1_fsm_topic: /d15041873/rl_controller/fsm
+    d1_controller_status_service: /d15041873/command/get_controller_status
+    d1_parameter_service: /d15041873/teleop_command/get_parameters
+    d1_feedback_timeout: 3.0
+
     # The web node can start/stop the project's device-independent RTAB-Map launch.
     # Hardware is started separately through luxi_adapter and publishes /sensors/*.
     enable_mapping_control: true

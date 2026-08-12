@@ -12,6 +12,9 @@ const linearInput = $("#linearSpeed");
 const angularInput = $("#angularSpeed");
 const linearValue = $("#linearValue");
 const angularValue = $("#angularValue");
+const robotControlToggle = $("#robotControlToggle");
+const robotControlState = $("#robotControlState");
+const robotControlDetail = $("#robotControlDetail");
 const estopButton = $("#estopButton");
 const releaseButton = $("#releaseButton");
 const toast = $("#toast");
@@ -65,6 +68,8 @@ let estopActive = false;
 let online = false;
 let toastTimer = null;
 let commandRequestPending = false;
+let robotControlReady = true;
+let robotControlRequestPending = false;
 let joystickPointerId = null;
 let joystickX = 0;
 let joystickY = 0;
@@ -160,7 +165,7 @@ function controlActive() {
 }
 
 async function sendCommand() {
-  if (!controlActive() || estopActive || commandRequestPending) return;
+  if (!controlActive() || !robotControlReady || estopActive || commandRequestPending) return;
   commandRequestPending = true;
   const command = currentCommand();
   updateReadout(command);
@@ -186,6 +191,10 @@ function stop(options = {}) {
 function beginAction(action) {
   if (estopActive) {
     showToast("请先解除急停");
+    return;
+  }
+  if (!robotControlReady) {
+    showToast("请先开启机器人控制");
     return;
   }
   joystickPointerId = null;
@@ -249,6 +258,10 @@ joystickPad.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   if (estopActive) {
     showToast("请先解除急停");
+    return;
+  }
+  if (!robotControlReady) {
+    showToast("请先开启机器人控制");
     return;
   }
   held.clear();
@@ -339,6 +352,83 @@ function setEstopUi(active) {
 }
 estopButton.addEventListener("click", activateEstop);
 releaseButton.addEventListener("click", releaseEstop);
+
+const robotControlStateNames = {
+  disabled: "不可用",
+  inactive: "已趴下",
+  enabling: "正在站立",
+  active: "站立且可控制",
+  disabling: "正在趴下",
+  standing_up: "正在站立",
+  standing_uncontrolled: "站立但控制未就绪",
+  offline: "状态离线",
+  unknown: "未知姿态",
+  failed: "切换失败",
+};
+
+const robotPostureNames = {
+  prone: "趴下",
+  standing_up: "站立转换中",
+  standing: "非趴下",
+  offline: "离线",
+  unknown: "未知",
+};
+
+function updateRobotControl(control) {
+  if (!control) return;
+  const managed = Boolean(control.enabled);
+  const active = Boolean(control.active);
+  const transitioning = Boolean(control.transitioning);
+  robotControlReady = !managed || Boolean(control.control_ready);
+  robotControlToggle.checked = managed && active;
+  robotControlToggle.disabled = !managed || transitioning || robotControlRequestPending
+    || (!control.feedback_online && !active);
+  robotControlState.textContent = robotControlStateNames[control.state] || control.state;
+  robotControlState.className = `mapping-state ${control.state}`;
+  const posture = robotPostureNames[control.posture] || control.posture || "未知";
+  const fsm = control.fsm_state || "无反馈";
+  const sdk = control.sdk_active === true ? "SDK 已开启"
+    : control.sdk_active === false ? "SDK 已关闭" : "SDK 未知";
+  const bridge = control.bridge_active ? "桥已连接" : "桥未连接";
+  const morphology = control.controller_mode ? ` · 形态 ${control.controller_mode}` : "";
+  const actualState = `姿态 ${posture} · FSM ${fsm} · ${sdk} · ${bridge}${morphology}`;
+  if (!managed) {
+    robotControlDetail.textContent = "当前启动配置未启用 D1 控制";
+  } else if (control.last_error || control.feedback_error) {
+    robotControlDetail.textContent = `${actualState} · ${control.last_error || control.feedback_error}`;
+  } else if (transitioning) {
+    const action = control.state === "enabling"
+      ? "正在启用 SDK 并让机器人站立"
+      : "正在清零、趴下并释放 SDK";
+    robotControlDetail.textContent = `${action} · ${actualState}`;
+  } else {
+    robotControlDetail.textContent = actualState;
+  }
+}
+
+async function toggleRobotControl() {
+  const requested = robotControlToggle.checked;
+  robotControlToggle.checked = !requested;
+  const prompt = requested
+    ? "机器人将站立并开放网页运动控制。确认场地已清空且有人持急停？"
+    : "机器人将立即停车、趴下并释放 SDK 控制。确认继续？";
+  if (!window.confirm(prompt)) return;
+  stop();
+  robotControlRequestPending = true;
+  robotControlToggle.disabled = true;
+  try {
+    const result = await api("/api/robot/control", {active: requested});
+    updateRobotControl(result.robot_control);
+    showToast(requested ? "正在开启机器人控制" : "正在结束机器人控制");
+  } catch (error) {
+    showToast(`机器人控制切换失败：${error.message}`);
+  } finally {
+    robotControlRequestPending = false;
+    refreshStatus();
+  }
+}
+
+robotControlToggle.addEventListener("change", toggleRobotControl);
 
 function setConnection(isOnline) {
   online = isOnline;
@@ -1549,6 +1639,7 @@ async function refreshStatus() {
     subscribers.textContent = String(data.subscriber_count);
     state.textContent = stateNames[data.state] || data.state;
     setEstopUi(Boolean(data.estop_active));
+    updateRobotControl(data.robot_control);
     updateMapping(data.mapping);
     updateNavigation(data.navigation);
     updatePreviewStatus(data.preview);

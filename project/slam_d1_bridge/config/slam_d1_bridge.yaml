@@ -1,0 +1,11 @@
+/**:
+    ros__parameters:
+        input_topic: "cmd_vel"
+        slam_pose_topic: "slam/pose"
+        output_topic: "command/user_command"
+        publish_period_ms: 50
+        command_timeout_ms: 300
+        max_linear_x: 0.5
+        max_angular_z: 0.5
+        lateral_velocity_tolerance: 0.001
+        fsm_mode: "loco"

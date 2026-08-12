@@ -1,4 +1,5 @@
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -92,4 +93,27 @@ TEST(TerrainCloudClassifier, DoesNotTreatRaisedHorizontalObstacleAsGround)
   }
   EXPECT_EQ(raised_ground, 0U);
   EXPECT_GT(raised_obstacles, 10U);
+}
+
+TEST(TerrainCloudClassifier, UsesFiniteNormalsAlreadyStoredInMapCloud)
+{
+  std::vector<luxi_3d_navigation::TerrainCloudPoint> points;
+  for (int x = -10; x <= 10; ++x) {
+    for (int y = -10; y <= 10; ++y) {
+      points.push_back({
+        0.05F * static_cast<float>(x),
+        0.05F * static_cast<float>(y), 0.0F,
+        1.0F, 0.0F, 0.0F});
+    }
+  }
+
+  luxi_3d_navigation::TerrainCloudParameters parameters;
+  parameters.resolution = 0.10;
+  parameters.normal_radius = 0.25;
+  parameters.maximum_ground_slope_degrees = 35.0;
+  parameters.obstacle_min_height = 0.15;
+
+  EXPECT_THROW(
+    luxi_3d_navigation::classifyTerrainPoints(points, parameters),
+    std::runtime_error);
 }

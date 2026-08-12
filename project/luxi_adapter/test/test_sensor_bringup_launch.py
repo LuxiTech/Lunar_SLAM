@@ -56,6 +56,17 @@ def test_d435i_argument_selects_d435i_driver_and_complete_config():
     assert selection.config_path == PACKAGE_ROOT / "config" / "sensor_bringup.yaml"
 
 
+def test_d435i_uses_project_domain_42():
+    yaml = pytest.importorskip("yaml")
+    parameters = yaml.safe_load(
+        (PACKAGE_ROOT / "config" / "sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["luxi_adapter"]["ros__parameters"]
+
+    assert parameters["ros_domain_id"] == 42
+
+
 def test_explicit_hardware_rejects_mismatched_config():
     module = _load_launch_module()
 

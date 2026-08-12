@@ -106,6 +106,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"navigationFilterButton" in page
             assert b"navigationStartButton" in page
             assert b"navigationHaltButton" in page
+            assert b"robotControlToggle" in page
 
         with urlopen(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -119,6 +120,17 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b'filtered: navigationUseFiltered' in app
             assert b'api("/api/navigation/start")' in app
             assert b'api("/api/navigation/halt")' in app
+            assert b'api("/api/robot/control", {active: requested})' in app
+
+        robot_control = node.status()["robot_control"]
+        assert robot_control["state"] == "disabled"
+        assert robot_control["posture"] == "offline"
+        assert robot_control["control_ready"] is False
+        try:
+            _post(base_url, "/api/robot/control", {"active": True})
+            assert False, "disabled D1 control must reject enable requests"
+        except HTTPError as error:
+            assert error.code == 409
 
         with urlopen(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200

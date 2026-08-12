@@ -46,10 +46,30 @@ TerrainObservation classifyTerrainPoints(
 {
   validateParameters(parameters);
   auto input = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+  auto input_with_normals =
+    std::make_shared<pcl::PointCloud<pcl::PointXYZRGBNormal>>();
   input->reserve(points.size());
+  input_with_normals->reserve(points.size());
+  bool all_points_have_normals = true;
   for (const auto & point : points) {
     if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
       input->push_back(pcl::PointXYZ(point.x, point.y, point.z));
+      pcl::PointXYZRGBNormal point_with_normal;
+      point_with_normal.x = point.x;
+      point_with_normal.y = point.y;
+      point_with_normal.z = point.z;
+      point_with_normal.normal_x = point.normal_x;
+      point_with_normal.normal_y = point.normal_y;
+      point_with_normal.normal_z = point.normal_z;
+      point_with_normal.rgba = 0U;
+      point_with_normal.curvature = 0.0F;
+      input_with_normals->push_back(point_with_normal);
+      const double normal_norm = std::sqrt(
+        static_cast<double>(point.normal_x) * point.normal_x +
+        static_cast<double>(point.normal_y) * point.normal_y +
+        static_cast<double>(point.normal_z) * point.normal_z);
+      all_points_have_normals = all_points_have_normals &&
+        std::isfinite(normal_norm) && normal_norm >= 1e-6;
     }
   }
   if (input->empty()) {
@@ -57,28 +77,45 @@ TerrainObservation classifyTerrainPoints(
   }
 
   auto downsampled = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-  pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-  voxel_filter.setInputCloud(input);
   const float leaf_size = static_cast<float>(parameters.resolution);
-  voxel_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
-  voxel_filter.filter(*downsampled);
-
   auto normals = std::make_shared<pcl::PointCloud<pcl::Normal>>();
-  pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimator;
-  auto search = std::make_shared<pcl::search::KdTree<pcl::PointXYZ>>();
-  normal_estimator.setInputCloud(downsampled);
-  normal_estimator.setSearchMethod(search);
-  normal_estimator.setRadiusSearch(parameters.normal_radius);
-  normal_estimator.compute(*normals);
+  if (all_points_have_normals) {
+    auto downsampled_with_normals =
+      std::make_shared<pcl::PointCloud<pcl::PointXYZRGBNormal>>();
+    pcl::VoxelGrid<pcl::PointXYZRGBNormal> voxel_filter;
+    voxel_filter.setInputCloud(input_with_normals);
+    voxel_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
+    voxel_filter.setDownsampleAllData(true);
+    voxel_filter.filter(*downsampled_with_normals);
+    downsampled->reserve(downsampled_with_normals->size());
+    normals->reserve(downsampled_with_normals->size());
+    for (const auto & point : *downsampled_with_normals) {
+      downsampled->push_back(pcl::PointXYZ(point.x, point.y, point.z));
+      pcl::Normal normal;
+      normal.normal_x = point.normal_x;
+      normal.normal_y = point.normal_y;
+      normal.normal_z = point.normal_z;
+      normals->push_back(normal);
+    }
+  } else {
+    pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+    voxel_filter.setInputCloud(input);
+    voxel_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
+    voxel_filter.filter(*downsampled);
+    pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimator;
+    auto search = std::make_shared<pcl::search::KdTree<pcl::PointXYZ>>();
+    normal_estimator.setInputCloud(downsampled);
+    normal_estimator.setSearchMethod(search);
+    normal_estimator.setRadiusSearch(parameters.normal_radius);
+    normal_estimator.compute(*normals);
+  }
 
   constexpr double kPi = 3.14159265358979323846;
   const double minimum_vertical_normal = std::cos(
     parameters.maximum_ground_slope_degrees * kPi / 180.0);
   std::vector<bool> ground_candidates(downsampled->size(), false);
-  std::unordered_map<GridCell3D, std::size_t, GridCell3DHash> point_indices;
   std::size_t ground_candidate_count = 0U;
   for (std::size_t index = 0; index < downsampled->size(); ++index) {
-    point_indices[worldToGrid((*downsampled)[index], parameters.resolution)] = index;
     const auto & normal = (*normals)[index];
     const double norm = std::sqrt(
       static_cast<double>(normal.normal_x) * normal.normal_x +
@@ -102,6 +139,10 @@ TerrainObservation classifyTerrainPoints(
     parameters.maximum_ground_slope_degrees * kPi / 180.0);
   const int continuity_radius_cells = std::max(
     2, static_cast<int>(std::ceil(parameters.normal_radius / parameters.resolution)));
+  auto connectivity_search = std::make_shared<pcl::search::KdTree<pcl::PointXYZ>>();
+  connectivity_search->setInputCloud(downsampled);
+  const double connectivity_search_radius =
+    static_cast<double>(continuity_radius_cells + 2) * parameters.resolution;
   std::vector<bool> visited(downsampled->size(), false);
   std::vector<std::size_t> largest_component;
   for (std::size_t seed = 0U; seed < downsampled->size(); ++seed) {
@@ -118,39 +159,41 @@ TerrainObservation classifyTerrainPoints(
       component.push_back(current_index);
       const auto & current_point = (*downsampled)[current_index];
       const auto current_cell = worldToGrid(current_point, parameters.resolution);
-      for (int dx = -continuity_radius_cells; dx <= continuity_radius_cells; ++dx) {
-        for (int dy = -continuity_radius_cells; dy <= continuity_radius_cells; ++dy) {
-          if ((dx == 0 && dy == 0) ||
-            dx * dx + dy * dy > continuity_radius_cells * continuity_radius_cells)
-          {
-            continue;
-          }
-          for (int dz = -1; dz <= 1; ++dz) {
-            const auto found = point_indices.find(
-              GridCell3D{current_cell.x + dx, current_cell.y + dy, current_cell.z + dz});
-            if (found == point_indices.end()) {
-              continue;
-            }
-            const std::size_t next_index = found->second;
-            if (!ground_candidates[next_index] || visited[next_index]) {
-              continue;
-            }
-            const auto & next_point = (*downsampled)[next_index];
-            const double horizontal = std::hypot(
-              static_cast<double>(next_point.x - current_point.x),
-              static_cast<double>(next_point.y - current_point.y));
-            const double maximum_height_change = std::min(
-              parameters.resolution * 1.1,
-              parameters.resolution * 0.5 + maximum_ground_gradient * horizontal);
-            if (std::abs(static_cast<double>(next_point.z - current_point.z)) >
-              maximum_height_change)
-            {
-              continue;
-            }
-            visited[next_index] = true;
-            pending.push(next_index);
-          }
+      std::vector<int> neighbor_indices;
+      std::vector<float> squared_distances;
+      connectivity_search->radiusSearch(
+        current_point, connectivity_search_radius,
+        neighbor_indices, squared_distances);
+      for (const int raw_index : neighbor_indices) {
+        const std::size_t next_index = static_cast<std::size_t>(raw_index);
+        if (next_index == current_index || !ground_candidates[next_index] ||
+          visited[next_index])
+        {
+          continue;
         }
+        const auto & next_point = (*downsampled)[next_index];
+        const auto next_cell = worldToGrid(next_point, parameters.resolution);
+        const int dx = next_cell.x - current_cell.x;
+        const int dy = next_cell.y - current_cell.y;
+        const int dz = next_cell.z - current_cell.z;
+        if (std::abs(dz) > 1 ||
+          dx * dx + dy * dy > continuity_radius_cells * continuity_radius_cells)
+        {
+          continue;
+        }
+        const double horizontal = std::hypot(
+          static_cast<double>(next_point.x - current_point.x),
+          static_cast<double>(next_point.y - current_point.y));
+        const double maximum_height_change = std::min(
+          parameters.resolution * 1.1,
+          parameters.resolution * 0.5 + maximum_ground_gradient * horizontal);
+        if (std::abs(static_cast<double>(next_point.z - current_point.z)) >
+          maximum_height_change)
+        {
+          continue;
+        }
+        visited[next_index] = true;
+        pending.push(next_index);
       }
     }
     if (component.size() > largest_component.size()) {
@@ -237,14 +280,16 @@ TerrainObservation classifyTerrainCloudFile(
   const std::string & path,
   const TerrainCloudParameters & parameters)
 {
-  pcl::PointCloud<pcl::PointXYZ> cloud;
+  pcl::PointCloud<pcl::PointXYZRGBNormal> cloud;
   if (pcl::io::loadPLYFile(path, cloud) < 0) {
     throw std::runtime_error("cannot read terrain PLY: " + path);
   }
   std::vector<TerrainCloudPoint> points;
   points.reserve(cloud.size());
   for (const auto & point : cloud) {
-    points.push_back(TerrainCloudPoint{point.x, point.y, point.z});
+    points.push_back(TerrainCloudPoint{
+      point.x, point.y, point.z,
+      point.normal_x, point.normal_y, point.normal_z});
   }
   return classifyTerrainPoints(points, parameters);
 }

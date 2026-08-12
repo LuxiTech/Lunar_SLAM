@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <tuple>
 #include <unordered_set>
 
 namespace luxi_3d_navigation
@@ -231,40 +232,51 @@ void TerrainModel::buildLayers()
   const int height_search_cells = std::max(
     1, static_cast<int>(std::ceil(parameters_.max_step_height / r)));
   const int point_cloud_hole_tolerance = observation_ ? 1 : 0;
+  std::unordered_set<GridCell3D, GridCell3DHash> nearby_surface_cells;
+  const std::size_t nearby_cell_count = static_cast<std::size_t>(
+    (2 * point_cloud_hole_tolerance + 1) *
+    (2 * point_cloud_hole_tolerance + 1) *
+    (2 * height_search_cells + 1));
+  nearby_surface_cells.reserve(surface_cells_.size() * nearby_cell_count);
+  for (const auto & surface : surface_cells_) {
+    for (
+      int dx = -point_cloud_hole_tolerance;
+      dx <= point_cloud_hole_tolerance; ++dx)
+    {
+      for (
+        int dy = -point_cloud_hole_tolerance;
+        dy <= point_cloud_hole_tolerance; ++dy)
+      {
+        for (int dz = -height_search_cells; dz <= height_search_cells; ++dz) {
+          nearby_surface_cells.insert(
+            GridCell3D{surface.x + dx, surface.y + dy, surface.z + dz});
+        }
+      }
+    }
+  }
+  std::vector<std::tuple<int, int, double>> edge_offsets;
+  edge_offsets.reserve(static_cast<std::size_t>(
+    (2 * margin_cells + 1) * (2 * margin_cells + 1)));
+  for (int dx = -margin_cells; dx <= margin_cells; ++dx) {
+    for (int dy = -margin_cells; dy <= margin_cells; ++dy) {
+      const double distance = std::hypot(static_cast<double>(dx), static_cast<double>(dy));
+      if (distance >= 1.0 && distance <= static_cast<double>(margin_cells)) {
+        edge_offsets.emplace_back(dx, dy, distance);
+      }
+    }
+  }
+  std::sort(
+    edge_offsets.begin(), edge_offsets.end(),
+    [](const auto & lhs, const auto & rhs) {return std::get<2>(lhs) < std::get<2>(rhs);});
   for (const auto & cell : surface_cells_) {
     double nearest_edge = std::numeric_limits<double>::infinity();
-    for (int dx = -margin_cells; dx <= margin_cells; ++dx) {
-      for (int dy = -margin_cells; dy <= margin_cells; ++dy) {
-        const double distance = std::hypot(static_cast<double>(dx), static_cast<double>(dy));
-        if (distance < 1.0 || distance > static_cast<double>(margin_cells)) {
-          continue;
-        }
-        bool neighbor_surface = false;
-        for (
-          int nearby_x = -point_cloud_hole_tolerance;
-          nearby_x <= point_cloud_hole_tolerance && !neighbor_surface; ++nearby_x)
-        {
-          for (
-            int nearby_y = -point_cloud_hole_tolerance;
-            nearby_y <= point_cloud_hole_tolerance && !neighbor_surface; ++nearby_y)
-          {
-            for (int dz = -height_search_cells; dz <= height_search_cells; ++dz) {
-              if (surface_cells_.find(
-                  GridCell3D{
-                    cell.x + dx + nearby_x, cell.y + dy + nearby_y, cell.z + dz}) !=
-                surface_cells_.end())
-              {
-                neighbor_surface = true;
-                break;
-              }
-            }
-          }
-        }
-        if (!neighbor_surface) {
-          const double edge_distance = std::max(
-            1.0, distance - static_cast<double>(point_cloud_hole_tolerance));
-          nearest_edge = std::min(nearest_edge, edge_distance);
-        }
+    for (const auto & [dx, dy, distance] : edge_offsets) {
+      const bool neighbor_surface = nearby_surface_cells.find(
+        GridCell3D{cell.x + dx, cell.y + dy, cell.z}) != nearby_surface_cells.end();
+      if (!neighbor_surface) {
+        nearest_edge = std::max(
+          1.0, distance - static_cast<double>(point_cloud_hole_tolerance));
+        break;
       }
     }
     double cost = 0.0;

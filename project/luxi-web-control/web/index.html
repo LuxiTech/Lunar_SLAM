@@ -75,6 +75,18 @@
           </div>
         </div>
 
+        <section class="robot-control-panel" aria-label="D1 机器人控制权限">
+          <div>
+            <b>机器人状态与控制</b>
+            <small id="robotControlDetail">正在读取 D1 实际姿态</small>
+          </div>
+          <label class="control-switch">
+            <input id="robotControlToggle" type="checkbox" aria-label="开启或结束机器人控制">
+            <span></span>
+          </label>
+        </section>
+        <strong id="robotControlState" class="mapping-state">正在连接</strong>
+
         <label class="slider-row">
           <span><b>线速度</b><output id="linearValue">0.12 m/s</output></span>
           <input id="linearSpeed" type="range" min="0.01" max="0.25" step="0.01" value="0.12">
