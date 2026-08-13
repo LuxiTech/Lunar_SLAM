@@ -17,6 +17,7 @@
 import math
 import os
 import signal
+import sqlite3
 import struct
 import subprocess
 import threading
@@ -37,12 +38,12 @@ from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import HlocIndexBuilder
 from luxi_web_control.web_control_node import MappingController
-from luxi_web_control.web_control_node import MappingProfile
 from luxi_web_control.web_control_node import is_managed_web_control_command
 from luxi_web_control.web_control_node import localization_covariance_ready
 from luxi_web_control.web_control_node import localization_pose_summary
 from luxi_web_control.web_control_node import make_access_urls
 from luxi_web_control.web_control_node import mapping_graph_conflicts
+from luxi_web_control.web_control_node import rtabmap_database_conversion_error
 from luxi_web_control.web_control_node import NavigationController
 from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_terrain_point_output
@@ -184,10 +185,12 @@ def test_map_export_filters_isolated_depth_outliers():
         WORKSPACE_ROOT / "project/luxi_RTAB_Map/scripts/export_3d_map.sh"
     ).read_text(encoding="utf-8")
     assert "--opt 0" in script
+    assert "--decimation 2" in script
+    assert "--max_range 10.0" in script
+    assert "--noise_radius 0.35" in script
+    assert "--noise_k 3" in script
     assert "--min_range 0.35" in script
     assert "--edge_bleeding_error 0.10" in script
-    assert "--noise_radius 0.08" in script
-    assert "--noise_k 8" in script
 
 
 def test_map_export_uses_five_centimeter_octomap_resolution():
@@ -306,7 +309,7 @@ def test_mapping_start_only_requires_workspace_setup(tmp_path):
     assert "new_map:=true" in command
 
 
-def test_usb_mapping_command_disables_unconnected_imu(tmp_path):
+def test_usb_primary_mapping_command_uses_imu_by_default(tmp_path):
     workspace_setup = Path(tmp_path / "workspace_setup.bash")
     workspace_setup.touch()
     controller = MappingController(
@@ -318,20 +321,19 @@ def test_usb_mapping_command_disables_unconnected_imu(tmp_path):
         workspace_setup=workspace_setup,
         log_path=Path(tmp_path / "mapping.log"),
         launch_arguments=(
-            "mode:=stable",
             "new_map:=true",
             "rviz:=false",
             "rtabmap_viz:=false",
-            "use_imu:=false",
+            "use_imu:=true",
             "planar_mode:=false",
         ),
     )
 
     command = controller._command()[-1]
 
-    assert "usb_rtabmap.launch.py" in command
-    assert "mode:=stable" in command
-    assert "use_imu:=false" in command
+    assert "usb_crestereo_rtabmap.launch.py" in command
+    assert " mode:=" not in command
+    assert "use_imu:=true" in command
     assert "planar_mode:=false" in command
     assert "RMW_IMPLEMENTATION=rmw_fastrtps_cpp" in command
 
@@ -358,7 +360,7 @@ def test_device_workspace_overlays_algorithm_workspace(tmp_path):
     )
 
 
-def test_web_mapping_profiles_select_only_approved_launches(tmp_path):
+def test_web_mapping_controller_defaults_to_crestereo_primary(tmp_path):
     workspace_setup = Path(tmp_path / "workspace_setup.bash")
     workspace_setup.touch()
     controller = MappingController(
@@ -369,35 +371,69 @@ def test_web_mapping_profiles_select_only_approved_launches(tmp_path):
         sensor_setup=None,
         workspace_setup=workspace_setup,
         log_path=Path(tmp_path / "mapping.log"),
-        launch_arguments=("mode:=stable", "use_imu:=false", "rviz:=false"),
-        additional_profiles={
-            "vpi_learned": MappingProfile(
-                "usb_rtabmap.launch.py",
-                ("mode:=vpi_learned", "new_map:=true", "rviz:=false"),
-                "VPI learned",
-            ),
-        },
-        default_mode="vpi_learned",
+        launch_arguments=("new_map:=true", "use_imu:=true", "rviz:=false"),
     )
 
-    stable_command = controller._command("stable")[-1]
-    experimental_command = controller._command("vpi_learned")[-1]
+    command = controller._command()[-1]
     status = controller.status()
 
-    assert "usb_rtabmap.launch.py" in stable_command
-    assert "mode:=stable" in stable_command
-    assert "use_imu:=false" in stable_command
-    assert "usb_rtabmap.launch.py" in experimental_command
-    assert "mode:=vpi_learned" in experimental_command
-    assert "new_map:=true" in experimental_command
-    assert status["default_mode"] == "vpi_learned"
-    assert [mode["id"] for mode in status["modes"]] == [
-        "vpi_learned", "stable"
-    ]
-    assert controller.start("arbitrary.launch.py") == (
-        False,
-        "unsupported mapping mode: arbitrary.launch.py",
+    assert "usb_crestereo_rtabmap.launch.py" in command
+    assert " mode:=" not in command
+    assert "use_imu:=true" in command
+    assert "new_map:=true" in command
+    assert status["frontend"] == "crestereo_cuda_graph+luxi_direct_odom"
+    assert status["mode"] == "crestereo"
+    assert status["modes"] == ["crestereo", "vpi"]
+    assert status["default_mode"] == "crestereo"
+
+
+def test_web_mapping_controller_selects_crestereo_launch(tmp_path):
+    workspace_setup = Path(tmp_path / "workspace_setup.bash")
+    workspace_setup.touch()
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=None,
+        workspace_setup=workspace_setup,
+        log_path=Path(tmp_path / "mapping.log"),
+        launch_arguments=("new_map:=true", "use_imu:=true", "rviz:=false"),
+        crestereo_use_imu=True,
     )
+
+    command = controller._command("crestereo")[-1]
+    controller._mode = "crestereo"
+    status = controller.status()
+
+    assert "usb_crestereo_rtabmap.launch.py" in command
+    assert "usb_rtabmap.launch.py" not in command
+    assert "new_map:=true" in command
+    assert "use_imu:=true" in command
+    assert "use_imu:=false" not in command
+    assert status["frontend"] == "crestereo_cuda_graph+luxi_direct_odom"
+
+
+def test_web_mapping_controller_keeps_vpi_imu_setting(tmp_path):
+    workspace_setup = Path(tmp_path / "workspace_setup.bash")
+    workspace_setup.touch()
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=None,
+        workspace_setup=workspace_setup,
+        log_path=Path(tmp_path / "mapping.log"),
+        launch_arguments=("new_map:=true", "use_imu:=true", "rviz:=false"),
+        crestereo_use_imu=False,
+    )
+
+    command = controller._command("vpi")[-1]
+
+    assert "usb_rtabmap.launch.py" in command
+    assert "use_imu:=true" in command
+    assert "use_imu:=false" not in command
 
 
 def test_mapping_graph_conflicts_detects_external_slam_nodes():
@@ -430,6 +466,26 @@ def test_mapping_status_extracts_error_from_launch_log(tmp_path):
     assert controller._latest_log_error() == (
         "[ERROR] camera input is unavailable"
     )
+
+
+def test_mapping_status_prioritizes_h30_root_cause(tmp_path):
+    log_path = Path(tmp_path / "mapping.log")
+    log_path.write_text(
+        "[ERROR] IMU NO DATA: received zero packets for 8.0 s\n"
+        "[ERROR] Caught exception: sensor synchronization failed\n",
+        encoding="utf-8",
+    )
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_crestereo_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=None,
+        workspace_setup=Path(tmp_path / "workspace_setup.bash"),
+        log_path=log_path,
+    )
+
+    assert "IMU NO DATA" in controller._latest_log_error()
 
 
 def test_mapping_status_reports_child_failure_when_launch_exits_zero(tmp_path):
@@ -674,6 +730,40 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
             "filtered_localizable": False,
         },
     ]
+
+
+def test_rtabmap_database_rejects_capture_without_odometry_links(tmp_path):
+    database = tmp_path / "map066.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        "CREATE TABLE Node(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE Link(from_id INTEGER, to_id INTEGER, type INTEGER);"
+        "INSERT INTO Node VALUES(1);"
+        "INSERT INTO Node VALUES(2);"
+        "INSERT INTO Link VALUES(1, 1, 9);"
+        "INSERT INTO Link VALUES(2, 2, 9);"
+    )
+    connection.close()
+
+    error = rtabmap_database_conversion_error(database)
+
+    assert "2 nodes but no odometry links" in error
+    assert "must be recorded again" in error
+
+
+def test_rtabmap_database_accepts_neighbor_odometry_link(tmp_path):
+    database = tmp_path / "map067.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        "CREATE TABLE Node(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE Link(from_id INTEGER, to_id INTEGER, type INTEGER);"
+        "INSERT INTO Node VALUES(1);"
+        "INSERT INTO Node VALUES(2);"
+        "INSERT INTO Link VALUES(1, 2, 0);"
+    )
+    connection.close()
+
+    assert rtabmap_database_conversion_error(database) == ""
 
 
 def test_colored_ply_points_extracts_xyzrgb_from_ascii_export(tmp_path):

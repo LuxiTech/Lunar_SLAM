@@ -50,6 +50,8 @@ def process_module(pid: int) -> str | None:
             command = b""
         if b"/luxi_visual_frontend/visual_odometry_node" in command:
             return "frontend"
+        if b"/usb_camera_driver/crestereo_depth_node" in command:
+            return "depth"
     for name, suffix in MODULES.items():
         if executable.endswith(suffix):
             return name
@@ -222,7 +224,12 @@ def main() -> None:
     translations = np.linalg.norm(positions - positions[0], axis=1) * 1000.0
     rotations = [quaternion_angle(orientations[0], value) for value in orientations]
     intervals = np.diff(times)
-    accepted = [item for item in diagnostics if item.get("accepted") == "ACCEPTED"]
+    # The learned frontend reports fused successes as ACCEPTED_IMU_DEPTH.
+    # Treat every ACCEPTED* state as a successful tracking update.
+    accepted = [
+        item for item in diagnostics
+        if item.get("accepted", "").startswith("ACCEPTED")
+    ]
     numeric = lambda key: [float(item[key]) for item in accepted if key in item]
 
     print(f"odom_samples={len(odometry)} diagnostics={len(diagnostics)}")
@@ -246,12 +253,14 @@ def main() -> None:
         print("tracking_diagnostics=not_available_for_profile")
     print(
         f"gpu_mean={statistics.mean(resources.gpu):.1f}% "
+        f"median={statistics.median(resources.gpu):.1f}% "
         f"p90={percentile(resources.gpu, 90):.1f}% "
         f"max={max(resources.gpu):.0f}% "
         f"ge90={sum(value >= 90 for value in resources.gpu) / len(resources.gpu) * 100.0:.1f}%"
     )
     print(
         f"power_mean_w={statistics.mean(resources.power):.2f} "
+        f"median={statistics.median(resources.power):.2f} "
         f"ram_mean_gib={statistics.mean(resources.ram):.2f}"
     )
     for module in MODULES:

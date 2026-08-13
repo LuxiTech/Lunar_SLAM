@@ -35,4 +35,4 @@ echo "Record for 3-5 minutes, then press Ctrl+C once."
 exec ros2 bag record \
   --storage sqlite3 \
   -o "${output}" \
-  --topics /left_camera/image /right_camera/image /imu/data
+  /left_camera/image /right_camera/image /imu/data

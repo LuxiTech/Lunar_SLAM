@@ -352,6 +352,14 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[
             LaunchConfiguration("visual_frontend_config"),
             {
+                "target_rate": ParameterValue(
+                    LaunchConfiguration("visual_frontend_target_rate"),
+                    value_type=float,
+                ),
+                "upstream_rate_limited": ParameterValue(
+                    LaunchConfiguration("visual_frontend_upstream_rate_limited"),
+                    value_type=bool,
+                ),
                 "minimum_depth": ParameterValue(
                     LaunchConfiguration("visual_frontend_minimum_depth"),
                     value_type=float,
@@ -398,6 +406,38 @@ def generate_launch_description() -> LaunchDescription:
                         "visual_frontend_superpoint_cuda_graph"
                     ),
                     value_type=bool,
+                ),
+                "mapping_depth_minimum": ParameterValue(
+                    LaunchConfiguration("visual_frontend_mapping_depth_minimum"),
+                    value_type=float,
+                ),
+                "mapping_depth_dense_maximum": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_depth_dense_maximum"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_depth_medium_maximum": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_depth_medium_maximum"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_depth_medium_sparse_pixel_step": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_depth_medium_sparse_pixel_step"
+                    ),
+                    value_type=int,
+                ),
+                "mapping_depth_far_maximum": ParameterValue(
+                    LaunchConfiguration("visual_frontend_mapping_depth_far_maximum"),
+                    value_type=float,
+                ),
+                "mapping_depth_far_sparse_pixel_step": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_depth_far_sparse_pixel_step"
+                    ),
+                    value_type=int,
                 ),
             },
         ],
@@ -517,6 +557,10 @@ def generate_launch_description() -> LaunchDescription:
                 ),
             ),
             DeclareLaunchArgument(
+                "visual_frontend_target_rate", default_value="5.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_upstream_rate_limited", default_value="false"),
+            DeclareLaunchArgument(
                 "visual_frontend_minimum_depth", default_value="0.2"),
             DeclareLaunchArgument(
                 "visual_frontend_maximum_depth", default_value="6.0"),
@@ -536,6 +580,22 @@ def generate_launch_description() -> LaunchDescription:
                 "visual_frontend_camera_to_imu_time_offset", default_value="0.0"),
             DeclareLaunchArgument(
                 "visual_frontend_superpoint_cuda_graph", default_value="true"),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_depth_minimum", default_value="0.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_depth_dense_maximum", default_value="0.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_depth_medium_maximum", default_value="0.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_depth_medium_sparse_pixel_step",
+                default_value="1",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_depth_far_maximum", default_value="0.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_depth_far_sparse_pixel_step",
+                default_value="1",
+            ),
             DeclareLaunchArgument("visual_odometry", default_value="true"),
             DeclareLaunchArgument("icp_odometry", default_value="false"),
             DeclareLaunchArgument("odom_topic", default_value="odom"),

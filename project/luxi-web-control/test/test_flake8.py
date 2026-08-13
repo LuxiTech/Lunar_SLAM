@@ -21,5 +21,9 @@ import pytest
 @pytest.mark.flake8
 @pytest.mark.linter
 def test_flake8():
-    rc, errors = main_with_errors(argv=[])
+    # Restrict the scan to source trees so package-local colcon artifacts do
+    # not make lint results depend on where a previous build was run.
+    rc, errors = main_with_errors(
+        argv=["setup.py", "luxi_web_control", "launch", "test"]
+    )
     assert rc == 0, "\n".join(errors)

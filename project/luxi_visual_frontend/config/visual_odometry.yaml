@@ -41,6 +41,9 @@ luxi_visual_frontend:
     # updates per second keep total GPU duty in the 30-60% target range while
     # retaining margin over RTAB-Map's 1 Hz mapping rate.
     target_rate: 5.0
+    # Set by profiles whose upstream learned depth node already publishes at
+    # the desired rate. Generic camera profiles retain timestamp throttling.
+    upstream_rate_limited: false
     # RTAB-Map consumes one keyframe candidate per second. Keep odometry at
     # 5 Hz, but avoid sending redundant full-resolution RGB-D descriptors.
     rgbd_features_rate: 1.0
@@ -89,3 +92,11 @@ luxi_visual_frontend:
     # it agrees with PnP. Gravity is checked independently so visual yaw wins.
     maximum_imu_rotation_error_deg: 12.0
     maximum_imu_gravity_error_deg: 10.0
+
+    # Optional RTAB-only depth layering. Zero disables it for generic cameras.
+    mapping_depth_minimum: 0.0
+    mapping_depth_dense_maximum: 0.0
+    mapping_depth_medium_maximum: 0.0
+    mapping_depth_medium_sparse_pixel_step: 1
+    mapping_depth_far_maximum: 0.0
+    mapping_depth_far_sparse_pixel_step: 1

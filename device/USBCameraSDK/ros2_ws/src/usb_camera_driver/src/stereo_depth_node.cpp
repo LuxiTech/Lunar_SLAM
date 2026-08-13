@@ -14,11 +14,6 @@
 #include <message_filters/synchronizer.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
-#include <opencv2/core/cuda.hpp>
-#include <opencv2/cudaarithm.hpp>
-#include <opencv2/cudaimgproc.hpp>
-#include <opencv2/cudastereo.hpp>
-#include <opencv2/cudawarping.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -120,7 +115,8 @@ sensor_msgs::msg::CameraInfo rectifiedCameraInfo(
 sensor_msgs::msg::PointCloud2 pointCloudMessage(
     const std_msgs::msg::Header &header, const cv::Mat &color,
     const cv::Mat &depth_mm, const cv::Mat &projection,
-    const float maximum_depth_m) {
+    const float maximum_depth_m, const float far_sparse_start_m,
+    const int far_sparse_pixel_step) {
   sensor_msgs::msg::PointCloud2 cloud;
   cloud.header = header;
   cloud.height = 1;
@@ -160,6 +156,12 @@ sensor_msgs::msg::PointCloud2 pointCloudMessage(
       }
       const float z = depth_row[column] * 0.001F;
       if (maximum_depth_m > 0.0F && z > maximum_depth_m) {
+        continue;
+      }
+      if (far_sparse_start_m > 0.0F && z >= far_sparse_start_m &&
+          far_sparse_pixel_step > 1 &&
+          ((row % far_sparse_pixel_step) != 0 ||
+           (column % far_sparse_pixel_step) != 0)) {
         continue;
       }
       const float x = (static_cast<float>(column) - cx) * z / fx;
@@ -218,22 +220,6 @@ class UsbStereoDepthNode final : public rclcpp::Node {
     output_scale_ = std::clamp(
         declare_parameter<double>("output_scale", processing_scale_), 0.1,
         processing_scale_);
-    const bool legacy_use_cuda_sgm =
-        declare_parameter<bool>("use_cuda_sgm", false);
-    depth_backend_ = declare_parameter<std::string>("depth_backend", "");
-    if (depth_backend_.empty()) {
-      depth_backend_ = legacy_use_cuda_sgm ? "opencv_cuda_sgm" : "cpu_sgbm";
-    }
-    if (depth_backend_ != "opencv_cuda_sgm" &&
-        depth_backend_ != "vpi_ofa_pva_vic" &&
-        depth_backend_ != "vpi_cuda" && depth_backend_ != "cpu_sgbm") {
-      throw std::runtime_error(
-          "depth_backend must be opencv_cuda_sgm, vpi_ofa_pva_vic, "
-          "vpi_cuda or cpu_sgbm");
-    }
-    use_cuda_sgm_ = depth_backend_ == "opencv_cuda_sgm";
-    vpi_fallback_to_sgbm_ =
-        declare_parameter<bool>("vpi_fallback_to_sgbm", true);
     rectification_alpha_ = std::clamp(
         declare_parameter<double>("rectification_alpha", 1.0), 0.0, 1.0);
     min_depth_m_ = declare_parameter<double>("min_depth_m", 0.4);
@@ -250,6 +236,13 @@ class UsbStereoDepthNode final : public rclcpp::Node {
         0.0, declare_parameter<double>("point_cloud_max_fps", 0.0));
     point_cloud_max_depth_m_ = std::max(
         0.0, declare_parameter<double>("point_cloud_max_depth_m", 0.0));
+    point_cloud_far_sparse_start_m_ = std::max(
+        0.0,
+        declare_parameter<double>("point_cloud_far_sparse_start_m", 0.0));
+    point_cloud_far_sparse_pixel_step_ = std::clamp(
+        static_cast<int>(declare_parameter<int>(
+            "point_cloud_far_sparse_pixel_step", 1)),
+        1, 16);
     max_disparity_ = std::clamp(
         static_cast<int>(declare_parameter<int>("max_disparity", 128)), 16,
         256);
@@ -292,27 +285,10 @@ class UsbStereoDepthNode final : public rclcpp::Node {
     vpi_output_median_max_difference_m_ = std::max(
         0.0, declare_parameter<double>(
             "vpi_output_median_max_difference_m", 0.08));
-    const int block_size = std::clamp(
-        static_cast<int>(declare_parameter<int>("block_size", 7)) | 1, 3,
-        21);
-    const int uniqueness_ratio = std::max(
-        0, static_cast<int>(declare_parameter<int>("uniqueness_ratio", 10)));
-    const int cuda_p1 = std::max(
-        1, static_cast<int>(declare_parameter<int>("cuda_sgm_p1", 10)));
-    const int cuda_p2 = std::max(
-        cuda_p1 + 1,
-        static_cast<int>(declare_parameter<int>("cuda_sgm_p2", 120)));
-    const int cuda_lr_bm_block_size = std::clamp(
-        static_cast<int>(declare_parameter<int>(
-            "cuda_lr_bm_block_size", 15)) | 1,
-        5, 51);
-    speckle_window_size_ = std::max(
-        0,
-        static_cast<int>(declare_parameter<int>("speckle_window_size", 80)));
-    speckle_range_ = std::max(
-        0, static_cast<int>(declare_parameter<int>("speckle_range", 2)));
-    const int disp12_max_diff =
-        static_cast<int>(declare_parameter<int>("disp12_max_diff", 1));
+    vpi_output_median_max_relative_difference_ = std::clamp(
+        declare_parameter<double>(
+            "vpi_output_median_max_relative_difference", 0.0),
+        0.0, 0.1);
     disparity_median_filter_size_ = std::clamp(
         static_cast<int>(declare_parameter<int>(
             "disparity_median_filter_size", 3)) | 1,
@@ -320,12 +296,6 @@ class UsbStereoDepthNode final : public rclcpp::Node {
     disparity_median_max_difference_ = std::max(
         0.0, declare_parameter<double>(
             "disparity_median_max_difference", 1.5));
-    lr_consistency_far_depth_m_ = std::max(
-        0.0, declare_parameter<double>(
-            "lr_consistency_far_depth_m", 0.0));
-    lr_consistency_max_difference_ = std::max(
-        0.0, declare_parameter<double>(
-            "lr_consistency_max_difference", 2.0));
     const int opencv_threads = std::max(
         0, static_cast<int>(declare_parameter<int>("opencv_num_threads", 3)));
 
@@ -340,50 +310,6 @@ class UsbStereoDepthNode final : public rclcpp::Node {
       cv::setNumThreads(opencv_threads);
     }
     loadCalibration(calibration_file);
-
-    int disparities = ((max_disparity_ + 15) / 16) * 16;
-    if (use_cuda_sgm_) {
-      if (cv::cuda::getCudaEnabledDeviceCount() <= 0) {
-        RCLCPP_WARN(get_logger(),
-                    "CUDA SGM requested but no CUDA device is available; "
-                    "falling back to CPU StereoSGBM");
-        use_cuda_sgm_ = false;
-        depth_backend_ = "cpu_sgbm";
-      } else {
-        // OpenCV CUDA StereoSGM supports exactly 64, 128 or 256 disparities.
-        disparities = disparities <= 64 ? 64 : (disparities <= 128 ? 128 : 256);
-        cuda_stereo_ = cv::cuda::createStereoSGM(
-            0, disparities, cuda_p1, cuda_p2, uniqueness_ratio,
-            cv::cuda::StereoSGM::MODE_HH4);
-        if (lr_consistency_far_depth_m_ > 0.0) {
-          const int reverse_required_disparities = static_cast<int>(std::ceil(
-              disparities * static_cast<double>(output_size_.width) /
-              processing_size_.width));
-          const int reverse_disparities =
-              reverse_required_disparities <= 64
-                  ? 64
-                  : (reverse_required_disparities <= 128 ? 128 : 256);
-          cuda_reverse_bm_ = cv::cuda::createStereoBM(
-              reverse_disparities, cuda_lr_bm_block_size);
-          cuda_reverse_bm_->setUniquenessRatio(uniqueness_ratio);
-        }
-        cuda_left_map_x_.upload(left_map_x_);
-        cuda_left_map_y_.upload(left_map_y_);
-        cuda_right_map_x_.upload(right_map_x_);
-        cuda_right_map_y_.upload(right_map_y_);
-      }
-    }
-    if (!use_cuda_sgm_) {
-      stereo_ = cv::StereoSGBM::create(0, disparities, block_size);
-      stereo_->setP1(8 * block_size * block_size);
-      stereo_->setP2(32 * block_size * block_size);
-      stereo_->setPreFilterCap(31);
-      stereo_->setUniquenessRatio(uniqueness_ratio);
-      stereo_->setSpeckleWindowSize(speckle_window_size_);
-      stereo_->setSpeckleRange(speckle_range_);
-      stereo_->setDisp12MaxDiff(disp12_max_diff);
-      stereo_->setMode(cv::StereoSGBM::MODE_SGBM_3WAY);
-    }
 
     const auto qos = rclcpp::SensorDataQoS().keep_last(2);
     color_publisher_ = create_publisher<Image>(color_topic, qos);
@@ -426,23 +352,23 @@ class UsbStereoDepthNode final : public rclcpp::Node {
     RCLCPP_INFO(
         get_logger(),
         "USB stereo depth ready: calibration=%s input=%dx%d stereo=%dx%d "
-        "output=%dx%d backend=%s far_lr_check=%.1f_m "
+        "output=%dx%d backend=vpi_ofa_pva_vic "
         "baseline=%.4f m fx=%.2f disparity=%d rectification_alpha=%.2f "
         "horizontal_fov=%.1f deg depth_preview_roi=%d,%d %dx%d "
-        "cloud_max_depth=%.1f m input_mode=%s",
+        "cloud_max_depth=%.1f m far_sparse=%.1f_m/%dx input_mode=%s",
         calibration_file.c_str(), calibration_size_.width,
         calibration_size_.height, processing_size_.width,
         processing_size_.height, output_size_.width, output_size_.height,
-        depth_backend_.c_str(),
-        use_cuda_sgm_ ? lr_consistency_far_depth_m_ : 0.0, baseline_m_,
-        projection_output_left_.at<double>(0, 0), disparities,
+        baseline_m_, projection_output_left_.at<double>(0, 0),
+        max_disparity_,
         rectification_alpha_,
         2.0 * std::atan(
                   output_size_.width /
                   (2.0 * projection_output_left_.at<double>(0, 0))) *
             180.0 / CV_PI, depth_preview_roi_.x, depth_preview_roi_.y,
         depth_preview_roi_.width, depth_preview_roi_.height,
-        point_cloud_max_depth_m_,
+        point_cloud_max_depth_m_, point_cloud_far_sparse_start_m_,
+        point_cloud_far_sparse_pixel_step_,
         compressed_input_ ? "jpeg" : "raw");
   }
 
@@ -460,20 +386,6 @@ class UsbStereoDepthNode final : public rclcpp::Node {
         "USB VPI stereo %s failed: %s (%s)", operation,
         vpiStatusGetName(status), message);
     return false;
-  }
-
-  bool isVpiOfaPvaVic() const {
-    return depth_backend_ == "vpi_ofa_pva_vic";
-  }
-
-  bool isVpiBackend() const {
-    return depth_backend_ == "vpi_cuda" || isVpiOfaPvaVic();
-  }
-
-  uint64_t vpiBackendFlags() const {
-    return isVpiOfaPvaVic()
-               ? (VPI_BACKEND_OFA | VPI_BACKEND_PVA | VPI_BACKEND_VIC)
-               : VPI_BACKEND_CUDA;
   }
 
   void destroyVpi() {
@@ -528,36 +440,32 @@ class UsbStereoDepthNode final : public rclcpp::Node {
       return false;
     }
     create_params.maxDisparity = max_disparity_;
-    const bool ofa_pva_vic = isVpiOfaPvaVic();
-    const uint64_t backend_flags = vpiBackendFlags();
-    const VPIImageFormat input_format =
-        ofa_pva_vic ? VPI_IMAGE_FORMAT_Y8_ER_BL : VPI_IMAGE_FORMAT_U8;
+    constexpr uint64_t backend_flags =
+        VPI_BACKEND_OFA | VPI_BACKEND_PVA | VPI_BACKEND_VIC;
 
     if (!checkVpiStatus(vpiStreamCreate(0, &vpi_stream_),
                         "stream creation") ||
         !checkVpiStatus(vpiCreateStereoDisparityEstimator(
                             backend_flags, size.width, size.height,
-                            input_format, &create_params, &vpi_payload_),
+                            VPI_IMAGE_FORMAT_Y8_ER_BL, &create_params,
+                            &vpi_payload_),
                         "payload creation") ||
         !checkVpiStatus(vpiImageCreate(size.width, size.height,
                                        VPI_IMAGE_FORMAT_S16, 0,
                                        &vpi_disparity_),
                         "output allocation") ||
-        (ofa_pva_vic &&
-         !checkVpiStatus(vpiImageCreate(size.width, size.height,
-                                        VPI_IMAGE_FORMAT_Y8_ER_BL, 0,
-                                        &vpi_stereo_left_),
-                         "left OFA input allocation")) ||
-        (ofa_pva_vic &&
-         !checkVpiStatus(vpiImageCreate(size.width, size.height,
-                                        VPI_IMAGE_FORMAT_Y8_ER_BL, 0,
-                                        &vpi_stereo_right_),
-                         "right OFA input allocation")) ||
-        (ofa_pva_vic &&
-         !checkVpiStatus(vpiImageCreate(size.width, size.height,
-                                        VPI_IMAGE_FORMAT_U16, 0,
-                                        &vpi_confidence_),
-                         "confidence allocation")) ||
+        !checkVpiStatus(vpiImageCreate(size.width, size.height,
+                                       VPI_IMAGE_FORMAT_Y8_ER_BL, 0,
+                                       &vpi_stereo_left_),
+                        "left OFA input allocation") ||
+        !checkVpiStatus(vpiImageCreate(size.width, size.height,
+                                       VPI_IMAGE_FORMAT_Y8_ER_BL, 0,
+                                       &vpi_stereo_right_),
+                        "right OFA input allocation") ||
+        !checkVpiStatus(vpiImageCreate(size.width, size.height,
+                                       VPI_IMAGE_FORMAT_U16, 0,
+                                       &vpi_confidence_),
+                        "confidence allocation") ||
         !checkVpiStatus(vpiInitStereoDisparityEstimatorParams(&vpi_params_),
                         "submit parameter initialization")) {
       destroyVpi();
@@ -567,23 +475,20 @@ class UsbStereoDepthNode final : public rclcpp::Node {
     vpi_params_.maxDisparity = max_disparity_;
     vpi_params_.confidenceThreshold = vpi_confidence_threshold_;
     vpi_params_.p1 = vpi_p1_;
-    vpi_params_.p2 =
-        ofa_pva_vic ? std::min(vpi_p2_, 89 - vpi_p1_) : vpi_p2_;
+    vpi_params_.p2 = std::min(vpi_p2_, 89 - vpi_p1_);
     vpi_params_.uniqueness = vpi_uniqueness_;
-    if (ofa_pva_vic) {
-      vpi_params_.windowSize = vpi_ofa_window_size_;
-      vpi_params_.numPasses = vpi_ofa_num_passes_;
-      vpi_params_.confidenceType =
-          vpi_confidence_type_ == "absolute"
-              ? VPI_STEREO_CONFIDENCE_ABSOLUTE
-              : (vpi_confidence_type_ == "relative"
-                     ? VPI_STEREO_CONFIDENCE_RELATIVE
-                     : VPI_STEREO_CONFIDENCE_INFERENCE);
-    }
+    vpi_params_.windowSize = vpi_ofa_window_size_;
+    vpi_params_.numPasses = vpi_ofa_num_passes_;
+    vpi_params_.confidenceType =
+        vpi_confidence_type_ == "absolute"
+            ? VPI_STEREO_CONFIDENCE_ABSOLUTE
+            : (vpi_confidence_type_ == "relative"
+                   ? VPI_STEREO_CONFIDENCE_RELATIVE
+                   : VPI_STEREO_CONFIDENCE_INFERENCE);
     vpi_size_ = size;
     RCLCPP_INFO(get_logger(),
-                "Initialized USB VPI %s for %dx%d, max_disparity=%d",
-                ofa_pva_vic ? "OFA+PVA+VIC SGM" : "CUDA-SGM",
+                "Initialized USB VPI OFA+PVA+VIC SGM for %dx%d, "
+                "max_disparity=%d",
                 size.width, size.height, max_disparity_);
     return true;
   }
@@ -598,14 +503,12 @@ class UsbStereoDepthNode final : public rclcpp::Node {
       return false;
     }
 
-    const bool ofa_pva_vic = isVpiOfaPvaVic();
-    const VPIImageFormat wrapper_format =
-        ofa_pva_vic ? VPI_IMAGE_FORMAT_Y8_ER : VPI_IMAGE_FORMAT_U8;
-    const uint64_t backend_flags = vpiBackendFlags();
+    constexpr uint64_t backend_flags =
+        VPI_BACKEND_OFA | VPI_BACKEND_PVA | VPI_BACKEND_VIC;
     const bool wrappers_ready =
         (vpi_input_left_wrapper_ == nullptr
              ? checkVpiStatus(vpiImageCreateWrapperOpenCVMat(
-                                  left_gray, wrapper_format, 0,
+                                  left_gray, VPI_IMAGE_FORMAT_Y8_ER, 0,
                                   &vpi_input_left_wrapper_),
                               "left image wrapping")
              : checkVpiStatus(vpiImageSetWrappedOpenCVMat(
@@ -613,7 +516,7 @@ class UsbStereoDepthNode final : public rclcpp::Node {
                               "left image wrapper update")) &&
         (vpi_input_right_wrapper_ == nullptr
              ? checkVpiStatus(vpiImageCreateWrapperOpenCVMat(
-                                  right_gray, wrapper_format, 0,
+                                  right_gray, VPI_IMAGE_FORMAT_Y8_ER, 0,
                                   &vpi_input_right_wrapper_),
                               "right image wrapping")
              : checkVpiStatus(vpiImageSetWrappedOpenCVMat(
@@ -623,35 +526,25 @@ class UsbStereoDepthNode final : public rclcpp::Node {
       return false;
     }
 
-    bool submitted = false;
-    if (ofa_pva_vic) {
-      VPIConvertImageFormatParams conversion{};
-      submitted =
-          checkVpiStatus(vpiInitConvertImageFormatParams(&conversion),
-                         "conversion parameter initialization") &&
-          checkVpiStatus(vpiSubmitConvertImageFormat(
-                             vpi_stream_, VPI_BACKEND_VIC,
-                             vpi_input_left_wrapper_, vpi_stereo_left_,
-                             &conversion),
-                         "left OFA input conversion") &&
-          checkVpiStatus(vpiSubmitConvertImageFormat(
-                             vpi_stream_, VPI_BACKEND_VIC,
-                             vpi_input_right_wrapper_, vpi_stereo_right_,
-                             &conversion),
-                         "right OFA input conversion") &&
-          checkVpiStatus(vpiSubmitStereoDisparityEstimator(
-                             vpi_stream_, backend_flags, vpi_payload_,
-                             vpi_stereo_left_, vpi_stereo_right_,
-                             vpi_disparity_, vpi_confidence_, &vpi_params_),
-                         "OFA+PVA+VIC submission");
-    } else {
-      submitted = checkVpiStatus(vpiSubmitStereoDisparityEstimator(
-                                     vpi_stream_, backend_flags, vpi_payload_,
-                                     vpi_input_left_wrapper_,
-                                     vpi_input_right_wrapper_, vpi_disparity_,
-                                     nullptr, &vpi_params_),
-                                 "CUDA submission");
-    }
+    VPIConvertImageFormatParams conversion{};
+    const bool submitted =
+        checkVpiStatus(vpiInitConvertImageFormatParams(&conversion),
+                       "conversion parameter initialization") &&
+        checkVpiStatus(vpiSubmitConvertImageFormat(
+                           vpi_stream_, VPI_BACKEND_VIC,
+                           vpi_input_left_wrapper_, vpi_stereo_left_,
+                           &conversion),
+                       "left OFA input conversion") &&
+        checkVpiStatus(vpiSubmitConvertImageFormat(
+                           vpi_stream_, VPI_BACKEND_VIC,
+                           vpi_input_right_wrapper_, vpi_stereo_right_,
+                           &conversion),
+                       "right OFA input conversion") &&
+        checkVpiStatus(vpiSubmitStereoDisparityEstimator(
+                           vpi_stream_, backend_flags, vpi_payload_,
+                           vpi_stereo_left_, vpi_stereo_right_,
+                           vpi_disparity_, vpi_confidence_, &vpi_params_),
+                       "OFA+PVA+VIC submission");
     if (!submitted ||
         !checkVpiStatus(vpiStreamSync(vpi_stream_), "synchronization")) {
       return false;
@@ -734,7 +627,7 @@ class UsbStereoDepthNode final : public rclcpp::Node {
 
     // alpha=1 keeps the calibrated field of view, so some rectified pixels
     // intentionally map outside the source images. OpenCV fills those pixels
-    // with black. Without an explicit geometry mask SGBM can assign plausible
+    // with black. Without an explicit geometry mask stereo can assign plausible
     // disparities to the black border, producing a slanted sheet of dark
     // points in RViz. Require the complete bilinear interpolation footprint
     // to remain inside each source image.
@@ -832,95 +725,27 @@ class UsbStereoDepthNode final : public rclcpp::Node {
     cv::Mat right_rectified;
     cv::Mat left_gray;
     cv::Mat right_gray;
-    if (use_cuda_sgm_) {
-      cuda_left_input_.upload(left);
-      cuda_right_input_.upload(right);
-      cv::cuda::resize(cuda_left_input_, cuda_left_scaled_, processing_size_,
-                       0.0, 0.0, cv::INTER_AREA);
-      cv::cuda::resize(cuda_right_input_, cuda_right_scaled_, processing_size_,
-                       0.0, 0.0, cv::INTER_AREA);
-      cv::cuda::remap(cuda_left_scaled_, cuda_left_rectified_,
-                      cuda_left_map_x_, cuda_left_map_y_, cv::INTER_LINEAR,
-                      cv::BORDER_CONSTANT);
-      cv::cuda::remap(cuda_right_scaled_, cuda_right_rectified_,
-                      cuda_right_map_x_, cuda_right_map_y_, cv::INTER_LINEAR,
-                      cv::BORDER_CONSTANT);
-      cv::cuda::cvtColor(cuda_left_rectified_, cuda_left_,
-                         cv::COLOR_BGR2GRAY);
-      cv::cuda::cvtColor(cuda_right_rectified_, cuda_right_,
-                         cv::COLOR_BGR2GRAY);
-      cuda_left_scaled_.download(left_scaled);
-      cuda_left_rectified_.download(left_rectified);
-    } else {
-      cv::resize(left, left_scaled, processing_size_, 0.0, 0.0,
-                 cv::INTER_AREA);
-      cv::resize(right, right_scaled, processing_size_, 0.0, 0.0,
-                 cv::INTER_AREA);
-      cv::remap(left_scaled, left_rectified, left_map_x_, left_map_y_,
-                cv::INTER_LINEAR, cv::BORDER_CONSTANT);
-      cv::remap(right_scaled, right_rectified, right_map_x_, right_map_y_,
-                cv::INTER_LINEAR, cv::BORDER_CONSTANT);
-      cv::cvtColor(left_rectified, left_gray, cv::COLOR_BGR2GRAY);
-      cv::cvtColor(right_rectified, right_gray, cv::COLOR_BGR2GRAY);
-    }
+    cv::resize(left, left_scaled, processing_size_, 0.0, 0.0,
+               cv::INTER_AREA);
+    cv::resize(right, right_scaled, processing_size_, 0.0, 0.0,
+               cv::INTER_AREA);
+    cv::remap(left_scaled, left_rectified, left_map_x_, left_map_y_,
+              cv::INTER_LINEAR, cv::BORDER_CONSTANT);
+    cv::remap(right_scaled, right_rectified, right_map_x_, right_map_y_,
+              cv::INTER_LINEAR, cv::BORDER_CONSTANT);
+    cv::cvtColor(left_rectified, left_gray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(right_rectified, right_gray, cv::COLOR_BGR2GRAY);
 
-    cv::Mat disparity_fixed;
-    cv::Mat reverse_disparity_fixed;
     cv::Mat disparity;
-    bool used_vpi = false;
-    if (use_cuda_sgm_) {
-      cuda_stereo_->compute(cuda_left_, cuda_right_, cuda_disparity_);
-      cuda_disparity_.download(disparity_fixed);
-      if (cuda_reverse_bm_) {
-        // A half-resolution reverse pass is sufficient for rejecting far
-        // mismatches and is much cheaper than a second full-resolution SGM.
-        cv::cuda::resize(cuda_left_, cuda_lr_left_, output_size_, 0.0, 0.0,
-                         cv::INTER_AREA);
-        cv::cuda::resize(cuda_right_, cuda_lr_right_, output_size_, 0.0, 0.0,
-                         cv::INTER_AREA);
-        // CUDA StereoBM publishes unsigned disparity. Flip both inputs so the
-        // right-to-left disparity becomes positive, then mirror the lookup
-        // coordinate below.
-        cv::cuda::flip(cuda_lr_right_, cuda_lr_right_flipped_, 1);
-        cv::cuda::flip(cuda_lr_left_, cuda_lr_left_flipped_, 1);
-        cuda_reverse_bm_->compute(cuda_lr_right_flipped_,
-                                  cuda_lr_left_flipped_,
-                                  cuda_reverse_disparity_,
-                                  cv::cuda::Stream::Null());
-        cuda_reverse_disparity_.download(reverse_disparity_fixed);
-      }
-      // StereoSGM does not expose StereoSGBM's internal speckle filtering.
-      // Apply the equivalent connected-component rejection on its fixed-point
-      // output before converting disparity to metres.
-      if (speckle_window_size_ > 0) {
-        cv::filterSpeckles(disparity_fixed, -16, speckle_window_size_,
-                           speckle_range_ * 16);
-      }
-    } else if (isVpiBackend()) {
-      used_vpi = computeVpiDisparity(left_gray, right_gray, disparity);
-      if (!used_vpi) {
-        if (!vpi_fallback_to_sgbm_) {
-          throw std::runtime_error(
-              "VPI stereo failed and CPU fallback is disabled");
-        }
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 5000,
-            "Using CPU SGBM fallback because USB VPI stereo did not complete");
-        stereo_->compute(left_gray, right_gray, disparity_fixed);
-      }
-    } else {
-      stereo_->compute(left_gray, right_gray, disparity_fixed);
-    }
-    if (!used_vpi) {
-      disparity_fixed.convertTo(disparity, CV_32FC1, 1.0 / 16.0);
+    if (!computeVpiDisparity(left_gray, right_gray, disparity)) {
+      throw std::runtime_error(
+          "VPI OFA/PVA/VIC stereo failed; no fallback backend is available");
     }
 
     cv::Mat disparity_locally_consistent(
         disparity.size(), CV_8UC1, cv::Scalar(255));
-    const bool apply_cpu_disparity_filter =
-        !isVpiOfaPvaVic() || vpi_ofa_apply_cpu_postfilters_;
     if (disparity_median_filter_size_ >= 3 &&
-        apply_cpu_disparity_filter) {
+        vpi_ofa_apply_cpu_postfilters_) {
       cv::Mat median_disparity;
       cv::medianBlur(disparity, median_disparity,
                      disparity_median_filter_size_);
@@ -935,44 +760,9 @@ class UsbStereoDepthNode final : public rclcpp::Node {
     cv::divide(projection_left_.at<double>(0, 0) * baseline_m_, disparity,
                depth_m);
 
-    cv::Mat lr_consistent(disparity.size(), CV_8UC1, cv::Scalar(255));
-    if (!reverse_disparity_fixed.empty() &&
-        lr_consistency_far_depth_m_ > 0.0) {
-      const cv::Mat &reverse_disparity = reverse_disparity_fixed;
-      const float reverse_scale_x =
-          static_cast<float>(reverse_disparity.cols) / disparity.cols;
-      const float reverse_scale_y =
-          static_cast<float>(reverse_disparity.rows) / disparity.rows;
-      for (int row = 0; row < disparity.rows; ++row) {
-        const auto *disparity_row = disparity.ptr<float>(row);
-        const auto *depth_row = depth_m.ptr<float>(row);
-        const int reverse_row_index = std::clamp(
-            static_cast<int>(std::lround(row * reverse_scale_y)), 0,
-            reverse_disparity.rows - 1);
-        const auto *reverse_row =
-            reverse_disparity.ptr<uint8_t>(reverse_row_index);
-        auto *consistent_row = lr_consistent.ptr<uint8_t>(row);
-        for (int column = 0; column < disparity.cols; ++column) {
-          if (depth_row[column] < lr_consistency_far_depth_m_) {
-            continue;
-          }
-          const int right_column = static_cast<int>(std::lround(
-              (column - disparity_row[column]) * reverse_scale_x));
-          const int reverse_column =
-              reverse_disparity.cols - 1 - right_column;
-          if (right_column < 0 || right_column >= reverse_disparity.cols ||
-              reverse_row[reverse_column] == 0 ||
-              std::abs(disparity_row[column] * reverse_scale_x -
-                       reverse_row[reverse_column]) >
-                  lr_consistency_max_difference_ * reverse_scale_x) {
-            consistent_row[column] = 0;
-          }
-        }
-      }
-    }
     cv::Mat valid = (disparity > 0.5f) & (depth_m >= min_depth_m_) &
                     (depth_m <= max_depth_m_) & left_rectification_valid_ &
-                    disparity_locally_consistent & lr_consistent;
+                    disparity_locally_consistent;
 
     // A valid left rectification pixel is not sufficient: its matched pixel
     // in the right rectified image may still lie in that image's black border.
@@ -1042,20 +832,31 @@ class UsbStereoDepthNode final : public rclcpp::Node {
       disparity_output = disparity;
     }
 
-    // OFA produces dense disparity cheaply, but isolated sub-pixel changes
-    // are noisier than CUDA SGM. Filter at the published 480x270 resolution
-    // so the cost stays small. The bounded median rejects flying pixels and
-    // smooths supported surfaces without bridging a depth discontinuity.
-    if (isVpiOfaPvaVic() && vpi_output_median_filter_size_ >= 3 &&
+    // OFA produces dense disparity cheaply. Filter isolated sub-pixel changes
+    // at the published 480x270 resolution so the cost stays small. The bounded
+    // median rejects flying pixels and smooths supported surfaces without
+    // bridging a depth discontinuity.
+    if (vpi_output_median_filter_size_ >= 3 &&
         vpi_output_median_max_difference_m_ > 0.0) {
       cv::Mat median_depth;
       cv::medianBlur(depth_output, median_depth,
                      vpi_output_median_filter_size_);
       cv::Mat depth_difference;
       cv::absdiff(depth_output, median_depth, depth_difference);
+      cv::Mat maximum_difference(
+          depth_output.size(), CV_16UC1,
+          cv::Scalar(vpi_output_median_max_difference_m_ * 1000.0));
+      if (vpi_output_median_max_relative_difference_ > 0.0) {
+        cv::Mat relative_difference;
+        median_depth.convertTo(
+            relative_difference, CV_16UC1,
+            vpi_output_median_max_relative_difference_);
+        cv::max(maximum_difference, relative_difference,
+                maximum_difference);
+      }
       const cv::Mat locally_supported =
           (depth_output > 0) & (median_depth > 0) &
-          (depth_difference <= vpi_output_median_max_difference_m_ * 1000.0);
+          (depth_difference <= maximum_difference);
       depth_output.setTo(0, ~locally_supported);
       median_depth.copyTo(depth_output, locally_supported);
     }
@@ -1110,7 +911,9 @@ class UsbStereoDepthNode final : public rclcpp::Node {
       if (point_cloud_due) {
         point_cloud_publisher_->publish(pointCloudMessage(
             header, color_output, depth_output, projection_output_left_,
-            static_cast<float>(point_cloud_max_depth_m_)));
+            static_cast<float>(point_cloud_max_depth_m_),
+            static_cast<float>(point_cloud_far_sparse_start_m_),
+            point_cloud_far_sparse_pixel_step_));
         last_point_cloud_ = now;
       }
     }
@@ -1145,19 +948,15 @@ class UsbStereoDepthNode final : public rclcpp::Node {
   double max_depth_m_{6.0};
   double far_artifact_depth_m_{3.0};
   int far_artifact_support_size_{3};
-  int speckle_window_size_{80};
-  int speckle_range_{2};
   int disparity_median_filter_size_{3};
   double disparity_median_max_difference_{1.5};
-  double lr_consistency_far_depth_m_{0.0};
-  double lr_consistency_max_difference_{2.0};
   double max_processing_fps_{10.0};
   double point_cloud_max_fps_{0.0};
   double point_cloud_max_depth_m_{0.0};
+  double point_cloud_far_sparse_start_m_{0.0};
+  int point_cloud_far_sparse_pixel_step_{1};
   double baseline_m_{0.0};
   std::string output_frame_id_;
-  std::string depth_backend_{"cpu_sgbm"};
-  bool vpi_fallback_to_sgbm_{true};
   int max_disparity_{128};
   int vpi_confidence_threshold_{0};
   std::string vpi_confidence_type_{"inference"};
@@ -1169,6 +968,7 @@ class UsbStereoDepthNode final : public rclcpp::Node {
   bool vpi_ofa_apply_cpu_postfilters_{false};
   int vpi_output_median_filter_size_{1};
   double vpi_output_median_max_difference_m_{0.08};
+  double vpi_output_median_max_relative_difference_{0.0};
   cv::Size calibration_size_;
   cv::Size processing_size_;
   cv::Size output_size_;
@@ -1182,27 +982,6 @@ class UsbStereoDepthNode final : public rclcpp::Node {
   cv::Mat left_rectification_valid_;
   cv::Mat right_rectification_valid_;
   cv::Rect depth_preview_roi_;
-  cv::Ptr<cv::StereoSGBM> stereo_;
-  cv::Ptr<cv::cuda::StereoSGM> cuda_stereo_;
-  cv::Ptr<cv::cuda::StereoBM> cuda_reverse_bm_;
-  cv::cuda::GpuMat cuda_left_;
-  cv::cuda::GpuMat cuda_right_;
-  cv::cuda::GpuMat cuda_disparity_;
-  cv::cuda::GpuMat cuda_reverse_disparity_;
-  cv::cuda::GpuMat cuda_lr_left_;
-  cv::cuda::GpuMat cuda_lr_right_;
-  cv::cuda::GpuMat cuda_lr_left_flipped_;
-  cv::cuda::GpuMat cuda_lr_right_flipped_;
-  cv::cuda::GpuMat cuda_left_input_;
-  cv::cuda::GpuMat cuda_right_input_;
-  cv::cuda::GpuMat cuda_left_scaled_;
-  cv::cuda::GpuMat cuda_right_scaled_;
-  cv::cuda::GpuMat cuda_left_rectified_;
-  cv::cuda::GpuMat cuda_right_rectified_;
-  cv::cuda::GpuMat cuda_left_map_x_;
-  cv::cuda::GpuMat cuda_left_map_y_;
-  cv::cuda::GpuMat cuda_right_map_x_;
-  cv::cuda::GpuMat cuda_right_map_y_;
   VPIStream vpi_stream_{nullptr};
   VPIPayload vpi_payload_{nullptr};
   VPIImage vpi_disparity_{nullptr};
@@ -1213,7 +992,6 @@ class UsbStereoDepthNode final : public rclcpp::Node {
   VPIImage vpi_stereo_right_{nullptr};
   VPIStereoDisparityEstimatorParams vpi_params_{};
   cv::Size vpi_size_;
-  bool use_cuda_sgm_{false};
   bool compressed_input_{true};
   message_filters::Subscriber<Image> left_subscriber_;
   message_filters::Subscriber<Image> right_subscriber_;

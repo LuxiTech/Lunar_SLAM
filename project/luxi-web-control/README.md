@@ -236,25 +236,26 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 
 ## 网页控制 RTAB-Map 建图（当前 NX USB 双目配置）
 
-当前网页的“建图方案”可选择两条完整链路；两者都拥有 USB 相机、适配层、里程计和
-RTAB-Map，不要再单独启动相机 profile。算法、性能与复测方法见
+网页“深度链路”可选择 CREStereo 预训练模型或 VPI OFA/PVA/VIC，两者均连接 Luxi
+学习特征和 RTAB-Map；当前默认使用 CREStereo 主链路，VPI 作为低资源次选项。不要再单独启动相机
+profile。算法、性能与复测方法见
 [USB 双目相机 README](../../device/USBCameraSDK/ros2_ws/README.md)。
 
-| 网页选项 | 模式 ID | 用途 |
-| --- | --- | --- |
-| VPI + Luxi 学习特征建图 | `vpi_learned` | 默认；闭环更多、低倾斜、GPU 高峰持续率低 |
-| 稳定 CUDA + 经典前端 | `stable` | 显式回退；静止漂移、瞬时帧率和低内存更好 |
+服务端只接受 `mode=vpi` 或 `mode=crestereo`，不会恢复已移除的 CUDA SGM/经典
+前端。VPI 链路默认传入 `use_imu:=true`；IMU 六轴或四元数健康门禁失败时建图不会
+启动。CREStereo 使用同时间戳的学习前端里程计直接驱动 RTAB-Map。网页默认设置
+`mapping_crestereo_use_imu:=true`；H30 无数据或轴/四元数无效时健康门禁会拒绝启动，
+避免不可信姿态进入地图。
 
-浏览器只发送 `stable` 或 `vpi_learned` 模式 ID，实际 launch 和参数由服务端白名单决定，
-不能通过 HTTP 传入任意命令。当前 H30 已接入 10 Hz 外触发，两条链路都默认传入
-`use_imu:=true`；IMU 六轴或四元数健康门禁失败时建图不会启动。仅做无 IMU 诊断时，
-才在服务端白名单参数中显式关闭融合。
+CREStereo 建图采用分层深度：0.4--4 m 全量构建可靠近场结构，4--6 m 固定保留
+4x4 像素网格，6--10 m 保留 8x8 像素网格形成稀疏环境轮廓。远距层不参与超过 4 m
+的里程计特征求解，因此不会用低视差深度拉动相机位姿；VPI profile 的既有范围和
+资源配置不变。
 
 打开网页后按以下顺序操作：
 
 1. 确认 USB 双目模组已连接，且没有其他进程占用相机。
-2. 在“建图方案”中选择稳定模式或 VPI 学习特征模式，再点击“开始建图”。状态和
-   说明栏会显示当前实际运行的方案，两者均以无 RViz 模式启动。
+2. 选择深度链路后点击“开始建图”。状态栏会显示实际使用的算法，并以无 RViz模式启动。
 3. 使用虚拟摇杆缓慢运动并采集环境。
 4. 点击“停止建图”。网页只向顶层 launch 发送一次 `SIGINT`，由 launch 按顺序关闭
    子节点；等待 RTAB-Map 打印保存完成后，状态才返回“未启动”。
@@ -364,11 +365,9 @@ A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低�
 | `web_root` | 安装目录 | 自定义网页资源目录，主要用于开发测试 |
 | `enable_mapping_control` | `true` | 是否显示并允许 RTAB-Map 建图开关 |
 | `mapping_launch_package` | `lunar_usb_rtabmap_bringup` | 与 D435i 同层级的 USB 专属建图入口包 |
-| `mapping_launch_file` | `usb_rtabmap.launch.py` | stable/VPI 共用的唯一完整建图入口 |
+| `mapping_launch_file` | `usb_rtabmap.launch.py` | 兼容配置项；服务端根据网页模式选择 VPI 或 CREStereo 独立入口 |
 | `mapping_launch_arguments` | `new_map/无界面/H30 IMU/自由 6DoF` | 传给建图入口的参数列表；IMU 健康门禁失败时不会启动里程计 |
-| `mapping_default_mode` | `vpi_learned` | 网页默认建图方案；基于 2026-08-10 同机 A/B |
-| `enable_vpi_learned_mapping` | `true` | 是否允许网页选择 VPI + Luxi 生产链路 |
-| `vpi_learned_mapping_launch_file` | `usb_rtabmap.launch.py` | 同一入口，通过 `mode:=vpi_learned` 选择默认链 |
+| `mapping_crestereo_use_imu` | `true` | CREStereo 默认使用 H30；仅无 IMU 诊断时关闭 |
 | `mapping_sensor_setup` | USB 工作区 `install/setup.bash` | 在通用算法环境之上加载 USB 设备包 |
 | `auto_build_hloc_index` | `true` | 加载地图时是否自动构建缺失的 GPU HLoc 索引 |
 | `hloc_index_build_timeout` | `900.0` | HLoc 导出和单个模型构建步骤的超时秒数 |

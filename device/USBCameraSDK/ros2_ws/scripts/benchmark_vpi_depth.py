@@ -106,7 +106,6 @@ def main() -> None:
             "ros2", "run", "usb_camera_driver", "stereo_depth_node",
             "--ros-args", "--params-file", str(config),
             "-p", f"calibration_file:={calibration}",
-            "-p", "depth_backend:=vpi_ofa_pva_vic",
             "-p", f"vpi_confidence_threshold:={confidence}",
             "-p", f"vpi_ofa_num_passes:={passes}",
             "-p", f"vpi_ofa_window_size:={window}",

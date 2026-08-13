@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -28,6 +28,8 @@ def generate_launch_description():
     calibration_file = _calibration_file(driver_share)
 
     return LaunchDescription([
+        DeclareLaunchArgument('display', default_value=':0'),
+        SetEnvironmentVariable('DISPLAY', LaunchConfiguration('display')),
         DeclareLaunchArgument(
             'camera_params_file', default_value=default_camera_params),
         DeclareLaunchArgument(

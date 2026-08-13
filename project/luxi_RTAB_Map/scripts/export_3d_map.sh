@@ -55,16 +55,18 @@ mkdir -p "${output_directory}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 output_name="luxi_rtab_map_${timestamp}"
 
+# Keep this aligned with the 4x4 / 8x8 CREStereo far-depth lattices. Decimation
+# 2 preserves every far sample; decimation 4 would retain only one quarter.
 rtabmap-export \
   --cloud \
   --opt 0 \
-  --decimation 4 \
+  --decimation 2 \
   --voxel 0.03 \
   --min_range 0.35 \
-  --max_range 4.0 \
+  --max_range 10.0 \
   --edge_bleeding_error 0.10 \
-  --noise_radius 0.08 \
-  --noise_k 8 \
+  --noise_radius 0.35 \
+  --noise_k 3 \
   --output "${output_name}" \
   --output_dir "${output_directory}" \
   "${database_path}"

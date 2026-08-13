@@ -1,87 +1,80 @@
-"""Start calibrated USB stereo, H30 IMU and the fixed VPI RGB-D frontend."""
+"""Start calibrated USB stereo, CREStereo RGB-D and H30 IMU."""
 
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction
-from launch.events import Shutdown
+from launch.actions import DeclareLaunchArgument, EmitEvent
 from launch.conditions import IfCondition
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-
-
-def _reject_removed_arguments(context):
-    removed = [
-        name for name in (
-            "depth_backend", "use_cuda_sgm", "vpi_fallback_to_sgbm"
-        )
-        if name in context.launch_configurations
-    ]
-    if removed:
-        raise RuntimeError(
-            "USB RGB-D is VPI-only; removed launch arguments: "
-            + ", ".join(removed)
-        )
-    return []
 
 
 def generate_launch_description():
     driver_share = Path(get_package_share_directory("usb_camera_driver"))
     bringup_share = Path(get_package_share_directory("usb_camera_bringup"))
     return LaunchDescription([
-        OpaqueFunction(function=_reject_removed_arguments),
         DeclareLaunchArgument(
             "camera_params",
             default_value=str(driver_share / "config" / "stereo_camera.yaml"),
         ),
         DeclareLaunchArgument(
-            "depth_params",
-            default_value=str(driver_share / "config" / "stereo_depth.yaml"),
+            "crestereo_params",
+            default_value=str(driver_share / "config" / "crestereo_depth.yaml"),
         ),
         DeclareLaunchArgument(
             "calibration_file",
             default_value=str(driver_share / "config" / "stereo_opencv.yaml"),
         ),
         DeclareLaunchArgument(
-            "imu_params",
-            default_value=str(bringup_share / "config" / "h30_imu.yaml"),
+            "model_path",
+            default_value=str(
+                driver_share / "models" / "crestereo_init_iter2_180x320_fp16.onnx"
+            ),
         ),
+        DeclareLaunchArgument("execution_provider", default_value="cuda"),
         DeclareLaunchArgument(
-            "start_imu",
-            default_value="true",
-            description="Start the H30 serial driver and its camera-to-IMU transform.",
+            "imu_params", default_value=str(bringup_share / "config" / "h30_imu.yaml")
         ),
-        DeclareLaunchArgument(
-            "point_cloud_max_depth_m",
-            default_value="3.0",
-            description="Maximum depth included in the live USB point cloud.",
-        ),
+        DeclareLaunchArgument("start_imu", default_value="true"),
+        DeclareLaunchArgument("point_cloud_max_depth_m", default_value="3.0"),
+        DeclareLaunchArgument("point_cloud_far_sparse_start_m", default_value="0.0"),
+        DeclareLaunchArgument("point_cloud_medium_max_depth_m", default_value="0.0"),
+        DeclareLaunchArgument("point_cloud_medium_sparse_pixel_step", default_value="1"),
+        DeclareLaunchArgument("point_cloud_far_sparse_pixel_step", default_value="1"),
         Node(
             package="usb_camera_driver",
             executable="stereo_node",
             name="stereo_node",
-            parameters=[
-                LaunchConfiguration("camera_params"),
-                {"output_encoding": "jpeg"},
-            ],
+            parameters=[LaunchConfiguration("camera_params"), {"output_encoding": "jpeg"}],
             output="screen",
-            on_exit=[
-                EmitEvent(
-                    event=Shutdown(reason="USB stereo capture exited")
-                ),
-            ],
+            on_exit=[EmitEvent(event=Shutdown(reason="USB stereo capture exited"))],
         ),
         Node(
             package="usb_camera_driver",
-            executable="stereo_depth_node",
-            name="usb_stereo_depth_node",
+            executable="crestereo_depth_node",
+            name="usb_crestereo_depth_node",
             parameters=[
-                LaunchConfiguration("depth_params"),
+                LaunchConfiguration("crestereo_params"),
                 {
                     "calibration_file": LaunchConfiguration("calibration_file"),
+                    "model_path": LaunchConfiguration("model_path"),
+                    "execution_provider": LaunchConfiguration("execution_provider"),
                     "point_cloud_max_depth_m": LaunchConfiguration(
                         "point_cloud_max_depth_m"
+                    ),
+                    "point_cloud_far_sparse_start_m": LaunchConfiguration(
+                        "point_cloud_far_sparse_start_m"
+                    ),
+                    "point_cloud_medium_max_depth_m": LaunchConfiguration(
+                        "point_cloud_medium_max_depth_m"
+                    ),
+                    "point_cloud_medium_sparse_pixel_step": LaunchConfiguration(
+                        "point_cloud_medium_sparse_pixel_step"
+                    ),
+                    "point_cloud_far_sparse_pixel_step": LaunchConfiguration(
+                        "point_cloud_far_sparse_pixel_step"
                     ),
                 },
             ],
@@ -95,7 +88,6 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration("start_imu")),
             output="screen",
         ),
-        # Kalibr run04 T_cam0_imu: left optical frame -> IMU frame.
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",

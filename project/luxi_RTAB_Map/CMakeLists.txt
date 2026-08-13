@@ -50,6 +50,18 @@ ament_target_dependencies(planar_odometry
   tf2_ros
 )
 
+add_executable(imu_fused_odometry src/imu_fused_odometry.cpp)
+target_compile_features(imu_fused_odometry PUBLIC cxx_std_17)
+ament_target_dependencies(imu_fused_odometry
+  geometry_msgs
+  nav_msgs
+  rclcpp
+  sensor_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+)
+
 option(BUILD_LUXI_RTAB_MAP_CPP_NODE "Build the experimental in-process RTAB-Map C++ node" OFF)
 
 if(BUILD_LUXI_RTAB_MAP_CPP_NODE)
@@ -83,6 +95,7 @@ if(BUILD_LUXI_RTAB_MAP_CPP_NODE)
 endif()
 
 install(TARGETS sensor_sync_check odom_cloud_stabilizer planar_odometry
+  imu_fused_odometry
   DESTINATION lib/${PROJECT_NAME}
 )
 

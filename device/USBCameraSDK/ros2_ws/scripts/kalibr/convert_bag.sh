@@ -8,10 +8,14 @@ fi
 
 source_bag="$(realpath "$1")"
 destination="${2:-${source_bag%_ros2}.bag}"
-converter="${ROSBAGS_CONVERT:-rosbags-convert}"
+if [[ -n "${ROSBAGS_CONVERT:-}" ]]; then
+  converter="${ROSBAGS_CONVERT}"
+else
+  converter="$(command -v rosbags-convert || true)"
+fi
 
-if [[ ! -x "${converter}" ]]; then
-  echo "rosbags-convert not found: ${converter}" >&2
+if [[ -z "${converter}" || ! -x "${converter}" ]]; then
+  echo "rosbags-convert not found; install the Python 'rosbags' package or set ROSBAGS_CONVERT" >&2
   exit 1
 fi
 if [[ -e "${destination}" ]]; then

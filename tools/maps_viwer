@@ -455,7 +455,8 @@ view_rtabmap() {
   fi
   if [[ "${colored}" == true ]]; then
     echo "Preparing RTAB-Map colored 3D point cloud: ${database_path}"
-    "${exporter}" --cloud --opt 3 --decimation 4 --voxel 0.03 --min_range 0.2 --max_range 4.0 \
+    "${exporter}" --cloud --opt 3 --decimation 2 --voxel 0.03 --min_range 0.35 --max_range 12.0 \
+      --edge_bleeding_error 0.10 --noise_radius 0.30 --noise_k 5 \
       --output rtabmap --output_dir "${runtime_directory}" "${database_path}"
     local cloud_path="${runtime_directory}/rtabmap_cloud.ply"
     [[ -s "${cloud_path}" ]] || error "RTAB-Map did not produce a colored 3D point cloud"

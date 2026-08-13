@@ -1,19 +1,25 @@
 stereo_node:
   ros__parameters:
-    # Stable Jetson Orin NX UVC paths.  Do not use /dev/videoN because the
-    # index may change whenever another camera is connected.
-    left_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.1:1.0-video-index0
-    right_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.3:1.0-video-index0
+    # Discover the installed RER pair by VID:PID and order it by physical USB
+    # topology. This survives the hub changing 2.1/2.3 to 2.3/2.4 on reboot.
+    left_device: auto
+    right_device: auto
+    auto_discover_devices: true
     pixel_format: MJPG
     output_encoding: bgr8
     width: 1920
     height: 1080
     frame_rate_hz: 10.0
     trigger_mode: hardware
-    # run03_left Kalibr result: t_imu = t_camera + offset.
-    timestamp_offset_sec: -0.0843437124012959
-    auto_exposure: true
-    exposure_absolute: -1
-    gain: -1
+    # Full run04 Kalibr result: t_imu = t_camera + offset.
+    timestamp_offset_sec: -0.09126181637751751
+    # Mixed indoor/window mapping profile measured in the current venue.
+    # Keep the stable 10 ms exposure and use the current-venue gain A/B winner.
+    # 100/50 gave 6.61% valid 0.4-3 m depth versus 6.17% at 100/40, with 19%
+    # more texture response and only 2.71% highlight clipping. Keep clear of
+    # the measured exposure discontinuity at 180 and gain discontinuity near 70.
+    auto_exposure: false
+    exposure_absolute: 100
+    gain: 50
     left_frame_id: left_camera_optical_frame
     right_frame_id: right_camera_optical_frame

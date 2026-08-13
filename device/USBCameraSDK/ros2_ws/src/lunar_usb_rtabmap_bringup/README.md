@@ -1,25 +1,59 @@
-# Lunar USB RTAB-Map bringup
+# lunar_usb_rtabmap_bringup
 
-USB 双目完整建图入口，与 `lunar_d435i_rtabmap_bringup` 保持相同职责边界。相机、
-深度和标定由 `usb_camera_driver` / `usb_camera_bringup` 提供；本包只组合设备适配、
-视觉里程计和通用 RTAB-Map 后端。
+USB 双目到 Luxi/RTAB-Map 的一键启动包。两条链路使用独立 launch，不接受旧的
+`mode` 或 `depth_backend` 参数。
+
+| Launch | 用途 |
+|---|---|
+| `usb_crestereo_rtabmap.launch.py` | 默认主链路：CREStereo + Luxi 直接里程计 |
+| `usb_rtabmap.launch.py` | 备用链路：VPI + Luxi + RTAB F2M |
+
+## 使用
 
 ```bash
-# 默认：VPI OFA/PVA/VIC 深度 + Luxi 学习特征建图
-ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py \
-  use_imu:=true rviz:=true
-
-# 显式回退：OpenCV CUDA StereoSGM + 经典特征
-ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py \
-  mode:=stable rviz:=true
+cd /home/nvidia/Desktop/lunar_-slam
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 ```
 
-两种模式都默认使用 `use_imu:=true`。启用时会先验证相机—IMU 时间同步、四元数和
-全部加速度/陀螺轴；失败会在 RTAB-Map 启动前退出，避免坏 IMU 拉斜地图。序列号
-`5A6C092260` 的 H30 已完成零偏恢复、断电持久性、200 Hz 独立验收和 10 Hz 外触发
-动态建图验收。没有连接 H30 的诊断场景可显式传入 `use_imu:=false`。
+CREStereo + RViz：
 
-同一时间只能运行一种模式。`vpi_learned` 是默认模式，使用 OFA/PVA/VIC
-深度、RTAB F2M 局部 BA 里程计和 Luxi 外部学习描述子，并通过 24° 空间回环门限抑制
-纯视觉地图倾斜。`stable` 保留为显式回退；两种模式都发布生产里程计
-`/rtabmap/odom`，且都不会改变 Hik 或 D435i 的启动参数。
+```bash
+ros2 launch lunar_usb_rtabmap_bringup usb_crestereo_rtabmap.launch.py \
+  rviz:=true use_imu:=true new_map:=true
+```
+
+VPI + RViz：
+
+```bash
+ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py \
+  rviz:=true use_imu:=true new_map:=true
+```
+
+常用参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `rviz` | `true` | 启动 RViz |
+| `rtabmap_viz` | `false` | 启动 rtabmap_viz |
+| `new_map` | `true` | 新建数据库 |
+| `database_path` | 自动 | 指定 `.db` 文件 |
+| `use_imu` | `true` | 默认使用 H30；无数据或无效轴会阻止里程计启动 |
+| `planar_mode` | `false` | 仅地面机器人需要时启用 3DoF 约束 |
+
+## CREStereo 配置
+
+- 模型：`crestereo_init_iter2_180x320_fp16.onnx`
+- 深度输出：约 6 Hz，始终处理最新双目帧
+- 里程计：SuperPoint + LightGlue 直接发布位姿和同时间戳 RGB-D
+- 0.4–4 m：稠密地图并参与位姿估计
+- 4–6 m：4×4 稀疏采样
+- 6–10 m：8×8 稀疏采样
+
+模型链路不再启动第二套 RTAB F2M 视觉里程计，避免跟踪重置造成重复或镜像地图。VPI
+链路保持原有 F2M 配置，适合资源紧张或近场优先的场景。
+
+H30 驱动支持断线和静默自动重开。只有在明确进行无 IMU 诊断时才使用
+`use_imu:=false`；正常建图应保持默认值，并确认六轴、时间戳和四元数健康。
+
+测试结果见 [CREStereo 基准记录](../../../../../maps/benchmarks/usb_crestereo_20260812/README.md)。

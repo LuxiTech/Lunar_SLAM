@@ -51,7 +51,7 @@ cd /home/changxin/lunar_-slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 source device/USBCameraSDK/ros2_ws/install/setup.bash
-ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py mode:=stable
+ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py
 ```
 
 The USB profile uses the calibrated 90.3 mm stereo baseline and a 480x270

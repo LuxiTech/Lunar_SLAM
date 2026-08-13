@@ -38,20 +38,20 @@ def generate_launch_description():
             output='screen',
             parameters=[LaunchConfiguration('imu_params')],
         ),
-        # Kalibr T_cam0_imu: parent camera optical frame, child IMU frame.
+        # Kalibr run04 T_cam0_imu: parent camera optical frame, child IMU frame.
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='camera_imu_static_tf',
             output='screen',
             arguments=[
-                '--x', '0.045539743687302736',
-                '--y', '0.003107102982720423',
-                '--z', '-0.034259962926458117',
-                '--qx', '0.7158095538699986',
-                '--qy', '-0.002576409241311148',
-                '--qz', '0.001520959914006512',
-                '--qw', '0.6982891459737829',
+                '--x', '0.04391590957628977',
+                '--y', '0.0007111012450178807',
+                '--z', '-0.03359544596572737',
+                '--qx', '0.7081849349309625',
+                '--qy', '0.0017267657694375585',
+                '--qz', '-0.007348742978277029',
+                '--qw', '0.7059866232397363',
                 '--frame-id', 'left_camera_optical_frame',
                 '--child-frame-id', 'imu_link',
             ],

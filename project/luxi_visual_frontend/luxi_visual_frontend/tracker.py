@@ -416,13 +416,18 @@ class VisualOdometryTracker:
                             depth_refined_pose.inlier_indices
                         ]
                     ]
-                    pose = type(pose)(
-                        depth_refined_pose.current_from_reference,
-                        remapped_inliers,
-                        depth_refined_pose.reprojection_rmse,
-                    )
-                    pose_source = "PNP_DEPTH"
-                    depth_consistency_inliers = len(remapped_inliers)
+                    # The 3-D refinement has a deliberately lower bootstrap
+                    # threshold than the final tracker.  Do not let a small
+                    # depth-consistent subset replace an otherwise valid PnP
+                    # solution and then fail the final minimum-inlier gate.
+                    if len(remapped_inliers) >= self.config.minimum_inliers:
+                        pose = type(pose)(
+                            depth_refined_pose.current_from_reference,
+                            remapped_inliers,
+                            depth_refined_pose.reprojection_rmse,
+                        )
+                        pose_source = "PNP_DEPTH"
+                        depth_consistency_inliers = len(remapped_inliers)
         if imu_rotation is not None and reference.world_from_camera_rotation is not None:
             imu_current_from_reference = (
                 imu_rotation.T @ reference.world_from_camera_rotation
@@ -469,13 +474,14 @@ class VisualOdometryTracker:
                     remapped_inliers = pnp_match_indices[
                         consistent_match_positions[fixed_rotation_pose.inlier_indices]
                     ]
-                    pose = type(pose)(
-                        fixed_rotation_pose.current_from_reference,
-                        remapped_inliers,
-                        fixed_rotation_pose.reprojection_rmse,
-                    )
-                    pose_source = "IMU_DEPTH"
-                    depth_consistency_inliers = len(remapped_inliers)
+                    if len(remapped_inliers) >= self.config.minimum_inliers:
+                        pose = type(pose)(
+                            fixed_rotation_pose.current_from_reference,
+                            remapped_inliers,
+                            fixed_rotation_pose.reprojection_rmse,
+                        )
+                        pose_source = "IMU_DEPTH"
+                        depth_consistency_inliers = len(remapped_inliers)
 
         inlier_count = len(pose.inlier_indices)
         inlier_ratio = inlier_count / float(depth_match_count)

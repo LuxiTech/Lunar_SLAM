@@ -384,3 +384,50 @@ def test_tracker_refines_pnp_translation_with_current_depth():
     assert refined.pose_source == "PNP_DEPTH"
     assert refined.depth_consistency_inliers >= 6
     np.testing.assert_allclose(refined.odom_from_camera, np.eye(4), atol=1e-6)
+
+
+def test_tracker_keeps_pnp_when_depth_refinement_has_too_few_inliers(monkeypatch):
+    """A small 3-D subset must not downgrade an accepted visual pose."""
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(4) for x in range(8)]
+    )
+    tracker = VisualOdometryTracker(
+        SequenceBackend([_features(pixels), _features(pixels)]),
+        TrackerConfig(
+            minimum_keypoints=20,
+            minimum_matches=20,
+            minimum_depth_matches=20,
+            minimum_inliers=25,
+            minimum_grid_coverage=0.0,
+            use_depth_translation_refinement=True,
+            minimum_depth_consistency_matches=20,
+        ),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    tracker.process(rgb, depth, intrinsics, 0.001, 1.0)
+
+    import luxi_visual_frontend.tracker as tracker_module
+
+    original_refinement = tracker_module.estimate_translation_with_rotation
+
+    def truncated_refinement(*args, **kwargs):
+        result = original_refinement(*args, **kwargs)
+        assert result is not None
+        return type(result)(
+            result.current_from_reference,
+            result.inlier_indices[:20],
+            result.reprojection_rmse,
+        )
+
+    monkeypatch.setattr(
+        tracker_module, "estimate_translation_with_rotation", truncated_refinement
+    )
+    result = tracker.process(rgb, depth, intrinsics, 0.001, 1.1)
+
+    assert result.accepted
+    assert result.pose_source == "PNP"
+    assert result.inlier_count >= 25

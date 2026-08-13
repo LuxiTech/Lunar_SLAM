@@ -106,14 +106,14 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"semanticSaveButton" in page
             assert b"semanticGroundZ" in page
             assert b"navigationShowSemantics" in page
-            assert b"mappingModeSelect" in page
-            assert b"vpi_learned" in page
             assert b"navigationShowTraversable" in page
             assert b"navigationShowCostmap" in page
             assert b"navigationFilterButton" in page
             assert b"navigationStartButton" in page
             assert b"navigationHaltButton" in page
             assert b"robotControlToggle" in page
+            assert b'id="mappingMode"' in page
+            assert b'CREStereo' in page
 
         with _LOCAL_OPENER.open(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -124,11 +124,12 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"/api/navigation/terrain" in app
             assert b"[...maps].reverse().find" in app
             assert b"navigationDrag.yaw +" in app
-            assert b'{mode: mappingModeSelect.value}' in app
             assert b'filtered: navigationUseFiltered' in app
             assert b'api("/api/navigation/start")' in app
             assert b'api("/api/navigation/halt")' in app
             assert b'api("/api/robot/control", {active: requested})' in app
+            assert b'const mappingMode = $("#mappingMode")' in app
+            assert b'api("/api/mapping/start", {mode: mappingMode.value})' in app
 
         robot_control = node.status()["robot_control"]
         assert robot_control["state"] == "disabled"
@@ -157,7 +158,9 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
                 "error": None,
                 "points": [[0.0, 1.0, 2.0, 3, 4, 5], [6.0, 7.0, 8.0, 9, 10, 11]],
             }
-        with urlopen(base_url + "/api/navigation/terrain", timeout=2.0) as response:
+        with _LOCAL_OPENER.open(
+            base_url + "/api/navigation/terrain", timeout=2.0
+        ) as response:
             assert response.status == 200
             terrain = json.load(response)["terrain"]
             assert terrain["traversable_points"] == []
@@ -183,6 +186,12 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
                 {"map_id": "map011", "filtered": "true"},
             )
             assert False, "a non-boolean filtered selector must be rejected"
+        except HTTPError as error:
+            assert error.code == 400
+
+        try:
+            _post(base_url, "/api/mapping/start", {"mode": "stable"})
+            assert False, "unknown mapping modes must be rejected"
         except HTTPError as error:
             assert error.code == 400
 

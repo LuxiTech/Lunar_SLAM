@@ -129,6 +129,70 @@ def _camera_intrinsics(message: CameraInfo) -> np.ndarray:
     return intrinsics
 
 
+def _tiered_mapping_depth(
+    depth: np.ndarray,
+    depth_scale: float,
+    minimum_depth: float,
+    dense_maximum_depth: float,
+    far_maximum_depth: float,
+    far_sparse_pixel_step: int,
+    medium_maximum_depth: float = 0.0,
+    medium_sparse_pixel_step: int = 1,
+) -> np.ndarray:
+    """Keep dense near depth plus deterministic medium/far lattices."""
+    if far_maximum_depth <= 0.0:
+        return depth
+    if (
+        depth_scale <= 0.0
+        or minimum_depth < 0.0
+        or dense_maximum_depth <= minimum_depth
+        or far_maximum_depth <= dense_maximum_depth
+        or far_sparse_pixel_step < 2
+        or (
+            medium_maximum_depth > 0.0
+            and (
+                medium_maximum_depth <= dense_maximum_depth
+                or medium_maximum_depth >= far_maximum_depth
+                or medium_sparse_pixel_step < 2
+            )
+        )
+    ):
+        raise ValueError("invalid tiered mapping depth configuration")
+    metric = np.asarray(depth, dtype=np.float32) * depth_scale
+    near = (
+        np.isfinite(metric)
+        & (metric >= minimum_depth)
+        & (metric <= dense_maximum_depth)
+    )
+    # A sliced boolean lattice avoids two full-frame int64 coordinate arrays.
+    # This helper runs on the NX mapping path, so keep transient memory small.
+    far_lattice = np.zeros(metric.shape, dtype=bool)
+    far_lattice[::far_sparse_pixel_step, ::far_sparse_pixel_step] = True
+    if medium_maximum_depth > 0.0:
+        medium_lattice = np.zeros(metric.shape, dtype=bool)
+        medium_lattice[::medium_sparse_pixel_step, ::medium_sparse_pixel_step] = True
+        medium = (
+            np.isfinite(metric)
+            & (metric > dense_maximum_depth)
+            & (metric <= medium_maximum_depth)
+            & medium_lattice
+        )
+        far_start = medium_maximum_depth
+    else:
+        medium = np.zeros(metric.shape, dtype=bool)
+        far_start = dense_maximum_depth
+    far = (
+        np.isfinite(metric)
+        & (metric > far_start)
+        & (metric <= far_maximum_depth)
+        & far_lattice
+    )
+    output = np.zeros_like(depth)
+    keep = near | medium | far
+    output[keep] = depth[keep]
+    return output
+
+
 class VisualOdometryNode(Node):
     """Run learned RGB-D odometry and publish RTAB-compatible local features."""
 
@@ -166,6 +230,7 @@ class VisualOdometryNode(Node):
             "camera_to_imu_time_offset": 0.0,
             "maximum_imu_time_difference": 0.03,
             "target_rate": 5.0,
+            "upstream_rate_limited": False,
             "rgbd_features_rate": 2.0,
             "maximum_sensor_time_difference": 0.05,
             "transform_timeout": 0.5,
@@ -198,6 +263,15 @@ class VisualOdometryNode(Node):
             "maximum_depth_consistency_error": 0.08,
             "maximum_imu_rotation_error_deg": 12.0,
             "maximum_imu_gravity_error_deg": 10.0,
+            # Disabled by default. Hardware profiles may retain a dense near
+            # layer and publish a much sparser far layer to RTAB-Map without
+            # exposing the far depth to visual pose estimation.
+            "mapping_depth_minimum": 0.0,
+            "mapping_depth_dense_maximum": 0.0,
+            "mapping_depth_medium_maximum": 0.0,
+            "mapping_depth_medium_sparse_pixel_step": 1,
+            "mapping_depth_far_maximum": 0.0,
+            "mapping_depth_far_sparse_pixel_step": 1,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -216,6 +290,25 @@ class VisualOdometryNode(Node):
             raise ValueError("depth_sampling_radius must not be negative")
         if parameters["depth_sampling_minimum_valid"] < 1:
             raise ValueError("depth_sampling_minimum_valid must be positive")
+        if float(parameters["mapping_depth_far_maximum"]) > 0.0:
+            if (
+                float(parameters["mapping_depth_dense_maximum"])
+                <= float(parameters["mapping_depth_minimum"])
+                or float(parameters["mapping_depth_far_maximum"])
+                <= float(parameters["mapping_depth_dense_maximum"])
+                or int(parameters["mapping_depth_far_sparse_pixel_step"]) < 2
+                or (
+                    float(parameters["mapping_depth_medium_maximum"]) > 0.0
+                    and (
+                        float(parameters["mapping_depth_medium_maximum"])
+                        <= float(parameters["mapping_depth_dense_maximum"])
+                        or float(parameters["mapping_depth_medium_maximum"])
+                        >= float(parameters["mapping_depth_far_maximum"])
+                        or int(parameters["mapping_depth_medium_sparse_pixel_step"]) < 2
+                    )
+                )
+            ):
+                raise ValueError("invalid tiered mapping depth parameters")
         self.get_logger().info("Loading SuperPoint and LightGlue models")
         backend = SuperPointLightGlueBackend(
             str(parameters["device"]),
@@ -299,6 +392,7 @@ class VisualOdometryNode(Node):
         # running. The default callback group remains mutually exclusive for
         # tracker access; only the short, lock-protected IMU callback is split.
         self.imu_callback_group = MutuallyExclusiveCallbackGroup()
+        self.sensor_callback_group = MutuallyExclusiveCallbackGroup()
         self.latest_color: Image | None = None
         self.latest_depth: Image | None = None
         self.latest_camera_info: CameraInfo | None = None
@@ -340,30 +434,53 @@ class VisualOdometryNode(Node):
                 parameters["rgbd_input_topic"],
                 self._rgbd_callback,
                 latest_sensor_qos,
+                callback_group=self.sensor_callback_group,
             )
         else:
             self.create_subscription(
-                Image, parameters["color_topic"], self._color_callback, latest_sensor_qos
+                Image, parameters["color_topic"], self._color_callback,
+                latest_sensor_qos, callback_group=self.sensor_callback_group,
             )
             self.create_subscription(
-                Image, parameters["depth_topic"], self._depth_callback, latest_sensor_qos
+                Image, parameters["depth_topic"], self._depth_callback,
+                latest_sensor_qos, callback_group=self.sensor_callback_group,
             )
             self.create_subscription(
                 CameraInfo,
                 parameters["camera_info_topic"],
                 self._camera_info_callback,
                 latest_sensor_qos,
+                callback_group=self.sensor_callback_group,
             )
-        # Atomic packets can be processed directly without waiting for the next
-        # timer tick. Split topics retain the timer as their synchronization
-        # boundary.
-        self.timer = None
-        if not atomic_rgbd_input:
-            self.timer = self.create_timer(
-                1.0 / float(parameters["target_rate"]), self._process_latest
-            )
+        # Keep the DDS callback short even for atomic RGB-D. Running the GPU
+        # tracker inside that callback made the depth-one input reader drop
+        # frames while it was busy. A 2x polling timer observes the newest
+        # packet promptly; the timestamp limiter below still bounds actual
+        # tracking to target_rate and never builds a stale queue.
+        poll_rate = float(parameters["target_rate"]) * (2.0 if atomic_rgbd_input else 1.0)
+        self.timer = self.create_timer(1.0 / poll_rate, self._process_latest)
         self._publish_status("WAITING_FOR_SENSOR_DATA")
         self.get_logger().info(f"Learned frontend inference device: {backend.device}")
+        if float(parameters["mapping_depth_far_maximum"]) > 0.0:
+            medium_maximum = float(parameters["mapping_depth_medium_maximum"])
+            medium_description = ""
+            far_start = float(parameters["mapping_depth_dense_maximum"])
+            if medium_maximum > 0.0:
+                medium_step = int(parameters["mapping_depth_medium_sparse_pixel_step"])
+                medium_description = (
+                    f"{far_start:.1f}-{medium_maximum:.1f} m "
+                    f"1/{medium_step}x{medium_step} sparse, "
+                )
+                far_start = medium_maximum
+            self.get_logger().info(
+                "RTAB depth tiers: "
+                f"{float(parameters['mapping_depth_minimum']):.1f}-"
+                f"{float(parameters['mapping_depth_dense_maximum']):.1f} m dense, "
+                f"{medium_description}{far_start:.1f}-"
+                f"{float(parameters['mapping_depth_far_maximum']):.1f} m 1/"
+                f"{int(parameters['mapping_depth_far_sparse_pixel_step'])}x"
+                f"{int(parameters['mapping_depth_far_sparse_pixel_step'])} sparse"
+            )
 
     def _color_callback(self, message: Image) -> None:
         with self.lock:
@@ -401,7 +518,6 @@ class VisualOdometryNode(Node):
             self.latest_color = message.rgb
             self.latest_depth = message.depth
             self.latest_camera_info = message.rgb_camera_info
-        self._process_latest()
 
     def _snapshot(self) -> tuple[Image, Image, CameraInfo] | None:
         with self.lock:
@@ -566,6 +682,8 @@ class VisualOdometryNode(Node):
         result: TrackingResult,
         color: Image,
         depth: Image,
+        depth_image: np.ndarray,
+        depth_scale: float,
         camera_info: CameraInfo,
     ) -> None:
         message = RGBDImage()
@@ -576,7 +694,24 @@ class VisualOdometryNode(Node):
         message.rgb_camera_info = normalized_camera_info
         message.depth_camera_info = normalized_camera_info
         message.rgb = color
-        message.depth = depth
+        mapping_depth = _tiered_mapping_depth(
+            depth_image,
+            depth_scale,
+            float(self.parameters["mapping_depth_minimum"]),
+            float(self.parameters["mapping_depth_dense_maximum"]),
+            float(self.parameters["mapping_depth_far_maximum"]),
+            int(self.parameters["mapping_depth_far_sparse_pixel_step"]),
+            float(self.parameters["mapping_depth_medium_maximum"]),
+            int(self.parameters["mapping_depth_medium_sparse_pixel_step"]),
+        )
+        if mapping_depth is depth_image:
+            message.depth = depth
+        else:
+            mapping_depth_message = self.bridge.cv2_to_imgmsg(
+                mapping_depth, encoding=depth.encoding
+            )
+            mapping_depth_message.header = depth.header
+            message.depth = mapping_depth_message
         keypoints = []
         points = []
         for index, pixel in enumerate(result.features.keypoints):
@@ -609,8 +744,11 @@ class VisualOdometryNode(Node):
         stamp = _stamp_seconds(color)
         if stamp <= self.processed_stamp:
             return
-        if not processing_is_due(
-            self.processed_stamp, stamp, float(self.parameters["target_rate"])
+        if (
+            not bool(self.parameters["upstream_rate_limited"])
+            and not processing_is_due(
+                self.processed_stamp, stamp, float(self.parameters["target_rate"])
+            )
         ):
             return
         if abs(stamp - _stamp_seconds(depth)) > float(
@@ -669,7 +807,14 @@ class VisualOdometryNode(Node):
                     stamp,
                     float(self.parameters["rgbd_features_rate"]),
                 ):
-                    self._publish_rgbd_features(result, color, depth, camera_info)
+                    self._publish_rgbd_features(
+                        result,
+                        color,
+                        depth,
+                        np.asarray(depth_image),
+                        depth_scale,
+                        camera_info,
+                    )
                     self.last_rgbd_features_stamp = stamp
         except Exception as error:  # ROS boundary: report and keep the node diagnosable.
             if not self.context.ok():

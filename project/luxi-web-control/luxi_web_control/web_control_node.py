@@ -26,6 +26,7 @@ import re
 import shlex
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import threading
@@ -220,6 +221,43 @@ def discover_navigation_maps(maps_root: Path) -> list:
             ),
         })
     return maps
+
+
+def rtabmap_database_conversion_error(database: Path) -> str:
+    """Explain why an RTAB-Map database cannot produce an optimized map."""
+    try:
+        connection = sqlite3.connect(
+            f"file:{database.resolve()}?mode=ro", uri=True, timeout=1.0
+        )
+        try:
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if not {"Node", "Link"}.issubset(tables):
+                return ""
+            node_count = connection.execute(
+                "SELECT COUNT(*) FROM Node"
+            ).fetchone()[0]
+            odometry_links = connection.execute(
+                "SELECT COUNT(*) FROM Link "
+                "WHERE type=0 AND from_id != to_id"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        # Leave non-SQLite or older databases to RTAB-Map's own validator.
+        return ""
+    if node_count == 0:
+        return "database contains no mapped nodes"
+    if odometry_links == 0:
+        return (
+            f"database has {node_count} nodes but no odometry links; "
+            "camera exposure or visual odometry failed during capture, "
+            "so this map must be recorded again"
+        )
+    return ""
 
 
 def extract_colored_ply_points(path: Path, max_points: int) -> list:
@@ -853,15 +891,6 @@ class SemanticAnnotationStore:
         }
 
 
-@dataclass(frozen=True)
-class MappingProfile:
-    """One server-approved mapping launch selectable by the browser."""
-
-    launch_file: str
-    launch_arguments: Tuple[str, ...]
-    label: str
-
-
 class D1ControlManager:
     """Run the validated D1 stand-up and lie-down procedures asynchronously."""
 
@@ -970,7 +999,15 @@ class D1ControlManager:
 
 
 class MappingController:
-    """Own the RTAB-Map launch process started from the web interface."""
+    """Own the primary CREStereo and fallback VPI USB RTAB-Map launch."""
+
+    MODES = {
+        "crestereo": (
+            "usb_crestereo_rtabmap.launch.py",
+            "crestereo_cuda_graph+luxi_direct_odom",
+        ),
+        "vpi": ("usb_rtabmap.launch.py", "vpi_ofa_pva_vic+luxi"),
+    }
 
     def __init__(
         self,
@@ -982,8 +1019,7 @@ class MappingController:
         workspace_setup: Path,
         log_path: Path,
         launch_arguments: Optional[Tuple[str, ...]] = None,
-        additional_profiles: Optional[Dict[str, MappingProfile]] = None,
-        default_mode: str = "stable",
+        crestereo_use_imu: Optional[bool] = None,
     ) -> None:
         self.enabled = enabled
         self.package = package
@@ -999,32 +1035,23 @@ class MappingController:
                 "rtabmap_viz:=false",
             )
         )
-        self.profiles = {
-            "stable": MappingProfile(
-                self.launch_file,
-                self.launch_arguments,
-                "稳定 CUDA + 经典前端",
-            ),
-            **(additional_profiles or {}),
-        }
-        if default_mode not in self.profiles:
-            raise ValueError(f"unknown default mapping mode: {default_mode}")
-        self.default_mode = default_mode
+        self.crestereo_use_imu = crestereo_use_imu
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
         self._started_at: Optional[float] = None
         self._last_exit_code: Optional[int] = None
         self._last_error = ""
         self._stop_requested = False
-        self._active_mode: Optional[str] = None
-        self._last_mode = default_mode
+        self._mode = "crestereo"
 
     def _command(self, mode: Optional[str] = None) -> list:
         """Build a shell-free, source-aware RTAB-Map launch command."""
-        selected_mode = mode or self.default_mode
-        profile = self.profiles.get(selected_mode)
-        if profile is None:
-            raise ValueError(f"unsupported mapping mode: {selected_mode}")
+        selected_mode = mode or self._mode
+        if selected_mode not in self.MODES:
+            raise ValueError("mapping mode must be 'vpi' or 'crestereo'")
+        launch_file, _ = self.MODES[selected_mode]
+        if self.package != "lunar_usb_rtabmap_bringup":
+            launch_file = self.launch_file
         source_commands = [
             f"source {shlex.quote(str(self.workspace_setup))}",
             "export ROS_LOCALHOST_ONLY=0",
@@ -1038,23 +1065,31 @@ class MappingController:
                 "export RMW_IMPLEMENTATION="
                 + shlex.quote(self.rmw_implementation)
             )
+        launch_arguments = list(self.launch_arguments)
+        if selected_mode == "crestereo" and self.crestereo_use_imu is not None:
+            launch_arguments = [
+                argument for argument in launch_arguments
+                if not argument.startswith("use_imu:=")
+            ]
+            launch_arguments.append(
+                f"use_imu:={'true' if self.crestereo_use_imu else 'false'}"
+            )
         launch_command = shlex.join([
             "ros2",
             "launch",
             self.package,
-            profile.launch_file,
-            *profile.launch_arguments,
+            launch_file,
+            *launch_arguments,
         ])
         script = "set -e; " + "; ".join(source_commands)
         script += f"; exec {launch_command}"
         return ["/bin/bash", "-c", script]
 
-    def start(self, mode: Optional[str] = None) -> Tuple[bool, str]:
+    def start(self, mode: str = "crestereo") -> Tuple[bool, str]:
         """Start a fresh managed RTAB-Map process when prerequisites exist."""
         with self._lock:
-            selected_mode = mode or self.default_mode
-            if selected_mode not in self.profiles:
-                return False, f"unsupported mapping mode: {selected_mode}"
+            if mode not in self.MODES:
+                return False, "mapping mode must be 'vpi' or 'crestereo'"
             if not self.enabled:
                 return False, "mapping control is disabled"
             if self._process is not None and self._process.poll() is None:
@@ -1075,7 +1110,7 @@ class MappingController:
                         "\n===== RTAB-Map started by luxi_web_control =====\n"
                     )
                     self._process = subprocess.Popen(
-                        self._command(selected_mode),
+                        self._command(mode),
                         stdout=log_file,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
@@ -1089,9 +1124,9 @@ class MappingController:
             self._last_exit_code = None
             self._last_error = ""
             self._stop_requested = False
-            self._active_mode = selected_mode
-            self._last_mode = selected_mode
-            return True, f"RTAB-Map {selected_mode} launch process started"
+            self._mode = mode
+            label = "VPI" if mode == "vpi" else "CREStereo"
+            return True, f"RTAB-Map {label}/Luxi launch process started"
 
     def stop(self) -> Tuple[bool, str]:
         """Gracefully stop only this controller's RTAB-Map process."""
@@ -1136,7 +1171,6 @@ class MappingController:
         if not self._stop_requested:
             self._last_error = self._latest_log_error()
         self._stop_requested = False
-        self._active_mode = None
         self._process = None
 
     def _latest_log_error(self) -> str:
@@ -1150,6 +1184,13 @@ class MappingController:
                 lines = log_text.splitlines()
         except OSError:
             return "RTAB-Map exited; mapping log is unavailable"
+        # Surface actionable hardware causes ahead of launch's generic
+        # wrapper exception so the web page says why mapping was rejected.
+        for marker in ("IMU NO DATA", "IMU HEALTH FAIL", "H30 NO DATA"):
+            for line in reversed(lines):
+                clean_line = line.strip()
+                if marker in clean_line:
+                    return clean_line
         for line in reversed(lines):
             clean_line = line.strip()
             if "[ERROR]" in clean_line or "Caught exception" in clean_line:
@@ -1165,8 +1206,6 @@ class MappingController:
             started_at = self._started_at
             exit_code = self._last_exit_code
             error = self._last_error
-            active_mode = self._active_mode
-            last_mode = self._last_mode
         if not self.enabled:
             state = "disabled"
         elif running:
@@ -1175,13 +1214,6 @@ class MappingController:
             state = "failed"
         else:
             state = "stopped"
-        mode_order = [
-            self.default_mode,
-            *(
-                mode for mode in self.profiles
-                if mode != self.default_mode
-            ),
-        ]
         return {
             "enabled": self.enabled,
             "state": state,
@@ -1193,13 +1225,10 @@ class MappingController:
             "last_exit_code": exit_code,
             "last_error": error,
             "log_path": str(self.log_path),
-            "active_mode": active_mode,
-            "selected_mode": active_mode or last_mode,
-            "default_mode": self.default_mode,
-            "modes": [
-                {"id": mode, "label": self.profiles[mode].label}
-                for mode in mode_order
-            ],
+            "mode": self._mode,
+            "modes": list(self.MODES),
+            "default_mode": "crestereo",
+            "frontend": self.MODES[self._mode][1],
         }
 
 
@@ -1644,11 +1673,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/mapping/start":
-            mode = payload.get("mode")
-            if mode is not None and not isinstance(mode, str):
+            mode = payload.get("mode", "crestereo")
+            if not isinstance(mode, str) or mode not in MappingController.MODES:
                 self._send_error_json(
                     HTTPStatus.BAD_REQUEST,
-                    "mapping mode must be a string",
+                    "mapping mode must be 'vpi' or 'crestereo'",
                 )
                 return
             started, message = node.start_mapping(mode)
@@ -1814,25 +1843,15 @@ class WebControlNode(Node):
         )
         self.declare_parameter("mapping_launch_file", "usb_rtabmap.launch.py")
         self.declare_parameter("mapping_launch_arguments", [
-            "mode:=stable",
             "new_map:=true",
             "rviz:=false",
             "rtabmap_viz:=false",
             "use_imu:=true",
             "planar_mode:=false",
         ])
-        self.declare_parameter("mapping_default_mode", "vpi_learned")
-        self.declare_parameter("enable_vpi_learned_mapping", True)
-        self.declare_parameter(
-            "vpi_learned_mapping_launch_file",
-            "usb_rtabmap.launch.py",
-        )
-        self.declare_parameter("vpi_learned_mapping_launch_arguments", [
-            "mode:=vpi_learned",
-            "new_map:=true",
-            "rviz:=false",
-            "use_imu:=true",
-        ])
+        # H30 rotation is the default for both model and VPI mapping. The
+        # launch health gate rejects silent or invalid IMU streams.
+        self.declare_parameter("mapping_crestereo_use_imu", True)
         self.declare_parameter(
             "mapping_rmw_implementation",
             "rmw_fastrtps_cpp",
@@ -1992,22 +2011,6 @@ class WebControlNode(Node):
             self.get_parameter("mapping_workspace_setup").value
         )
         mapping_log_path = str(self.get_parameter("mapping_log_path").value)
-        additional_mapping_profiles: Dict[str, MappingProfile] = {}
-        if bool(self.get_parameter("enable_vpi_learned_mapping").value):
-            additional_mapping_profiles["vpi_learned"] = MappingProfile(
-                launch_file=str(
-                    self.get_parameter(
-                        "vpi_learned_mapping_launch_file"
-                    ).value
-                ),
-                launch_arguments=tuple(
-                    str(argument) for argument in
-                    self.get_parameter(
-                        "vpi_learned_mapping_launch_arguments"
-                    ).value
-                ),
-                label="VPI OFA/PVA/VIC + Luxi 学习前端",
-            )
         self.mapping = MappingController(
             enabled=bool(self.get_parameter("enable_mapping_control").value),
             package=str(self.get_parameter("mapping_launch_package").value),
@@ -2030,9 +2033,8 @@ class WebControlNode(Node):
                 str(argument) for argument in
                 self.get_parameter("mapping_launch_arguments").value
             ),
-            additional_profiles=additional_mapping_profiles,
-            default_mode=str(
-                self.get_parameter("mapping_default_mode").value
+            crestereo_use_imu=bool(
+                self.get_parameter("mapping_crestereo_use_imu").value
             ),
         )
         navigation_sensor_setup = str(
@@ -3046,7 +3048,7 @@ class WebControlNode(Node):
             "feedback_error": feedback_error or None,
         }
 
-    def start_mapping(self, mode: Optional[str] = None) -> Tuple[bool, str]:
+    def start_mapping(self, mode: str = "crestereo") -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
         if self.mapping.status()["state"] != "running":
             conflicts = mapping_graph_conflicts(
@@ -3117,6 +3119,11 @@ class WebControlNode(Node):
             return False, f"map export tool is missing: {self.map_export_executable}"
         if self.mapping_status()["state"] == "running":
             return False, "stop mapping and save the database before converting it"
+        database_error = rtabmap_database_conversion_error(
+            Path(database_path)
+        )
+        if database_error:
+            return False, f"map {map_id} cannot be converted: {database_error}"
 
         output_directory = (
             self.maps_root / "octo_maps"

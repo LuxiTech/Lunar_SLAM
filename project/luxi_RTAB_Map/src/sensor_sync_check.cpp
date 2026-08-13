@@ -36,6 +36,8 @@ public:
       std::max<int64_t>(1, declare_parameter<int64_t>("required_imu_count", 20)));
     require_imu_ = declare_parameter<bool>("require_imu", true);
     timeout_sec_ = std::max(1.0, declare_parameter<double>("timeout_sec", 60.0));
+    imu_no_data_timeout_sec_ = std::max(
+      1.0, declare_parameter<double>("imu_no_data_timeout_sec", 8.0));
     max_rgbd_skew_ns_ = static_cast<int64_t>(
       std::max(0.0, declare_parameter<double>("max_rgbd_skew_sec", 0.05)) * 1e9);
     max_imu_delta_ns_ = static_cast<int64_t>(
@@ -153,6 +155,15 @@ private:
       rclcpp::shutdown();
       return;
     }
+    if (require_imu_ && elapsed >= imu_no_data_timeout_sec_ && imu_count_ == 0) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "IMU NO DATA: received zero packets for %.1f s; refusing to start odometry. "
+        "The H30 serial device may be enumerated but not streaming.",
+        elapsed);
+      rclcpp::shutdown();
+      return;
+    }
     if (elapsed >= timeout_sec_) {
       RCLCPP_ERROR(
         get_logger(),
@@ -188,6 +199,7 @@ private:
   int64_t last_camera_imu_delta_ns_{std::numeric_limits<int64_t>::max()};
   std::deque<int64_t> imu_stamps_ns_;
   double timeout_sec_{60.0};
+  double imu_no_data_timeout_sec_{8.0};
   bool require_imu_{true};
   bool passed_{false};
 };

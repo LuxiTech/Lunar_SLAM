@@ -70,7 +70,9 @@ ros2 run luxi_rtab_map export_3d_map.sh \
 ```
 
 导出的 `*_cloud.ply` 可使用 CloudCompare 或 MeshLab 打开。将命令中的 `map001`
-替换为所需地图编号即可。
+替换为所需地图编号即可。当前导出使用 2 倍深度抽样、3 cm 体素和 10 m 上限。
+2 倍抽样与 CREStereo 的 6x6 远距网格对齐，可保留 0.4--4 m 稠密结构及 4--10 m
+稀疏层；VPI 数据本身仍按其入口的近场上限写入，不会因此凭空增加远距噪声。
 
 ## 转换为导航 OctoMap
 

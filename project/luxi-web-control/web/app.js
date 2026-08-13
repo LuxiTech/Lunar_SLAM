@@ -24,9 +24,9 @@ const joystickLinear = $("#joystickLinear");
 const joystickAngular = $("#joystickAngular");
 const mappingState = $("#mappingState");
 const mappingDetail = $("#mappingDetail");
-const mappingModeSelect = $("#mappingModeSelect");
 const mappingStartButton = $("#mappingStartButton");
 const mappingStopButton = $("#mappingStopButton");
+const mappingMode = $("#mappingMode");
 const rgbPreview = $("#rgbPreview");
 const rgbPreviewState = $("#rgbPreviewState");
 const rgbPreviewHint = $("#rgbPreviewHint");
@@ -69,7 +69,6 @@ let estopActive = false;
 let online = false;
 let toastTimer = null;
 let commandRequestPending = false;
-let mappingModeInitialized = false;
 let robotControlReady = true;
 let robotControlRequestPending = false;
 let joystickPointerId = null;
@@ -452,16 +451,6 @@ const mappingStateNames = {
   stopped: "未启动",
   running: "建图中",
   failed: "启动失败",
-};
-
-const mappingModeNames = {
-  stable: "稳定 CUDA + 经典前端",
-  vpi_learned: "VPI OFA/PVA/VIC + Luxi 学习前端",
-};
-
-const mappingModeDescriptions = {
-  stable: "将启动低内存、快速深度的 USB CUDA 回退建图链路。",
-  vpi_learned: "将启动 VPI 深度、F2M 局部 BA 与 TensorRT/LightGlue 特征建图；适合低倾斜和并行感知。",
 };
 
 const navigationStateNames = {
@@ -1508,56 +1497,38 @@ semanticSaveButton.addEventListener("click", async () => {
 
 function updateMapping(mapping) {
   if (!mapping) return;
-  const availableModes = new Set(
-    (mapping.modes || []).map((mode) => typeof mode === "string" ? mode : mode.id),
-  );
-  if (availableModes.size) {
-    for (const option of mappingModeSelect.options) {
-      option.disabled = !availableModes.has(option.value);
-    }
-  }
-  if (mapping.state === "running" && mapping.active_mode) {
-    mappingModeSelect.value = mapping.active_mode;
-    mappingModeInitialized = true;
-  } else if (!mappingModeInitialized) {
-    const preferredMode = mapping.default_mode || "vpi_learned";
-    if (!availableModes.size || availableModes.has(preferredMode)) {
-      mappingModeSelect.value = preferredMode;
-    }
-    mappingModeInitialized = true;
-  } else if (mappingModeSelect.selectedOptions[0]?.disabled) {
-    mappingModeSelect.value = mapping.default_mode || "vpi_learned";
-  }
   const mappingStateName = mappingStateNames[mapping.state] || mapping.state;
   mappingState.textContent = mappingStateName;
   mappingState.className = `mapping-state ${mapping.state}`;
   mappingStartButton.disabled = !mapping.enabled || mapping.state === "running";
   mappingStopButton.disabled = !mapping.enabled || mapping.state !== "running";
-  mappingModeSelect.disabled = !mapping.enabled || mapping.state === "running";
+  mappingMode.disabled = !mapping.enabled || mapping.state === "running";
+  if (mapping.state === "running" && mapping.mode) {
+    mappingMode.value = mapping.mode;
+  } else if (mapping.default_mode) {
+    mappingMode.value = mapping.default_mode;
+  }
+  const modeName = mapping.mode === "crestereo" ? "CREStereo 模型" : "VPI";
   if (mapping.last_error) {
     mappingDetail.textContent = mapping.last_error;
   } else if (mapping.state === "running") {
     const uptime = mapping.uptime_seconds == null ? "" : ` · ${mapping.uptime_seconds}s`;
-    const modeName = mappingModeNames[mapping.active_mode] || mapping.active_mode || "建图链路";
-    mappingDetail.textContent = `${modeName}正在写入 RTAB-Map 数据库${uptime}`;
+    mappingDetail.textContent = `${modeName} + Luxi 正在写入 RTAB-Map 数据库${uptime}`;
   } else if (!mapping.enabled) {
     mappingDetail.textContent = "当前节点未启用建图控制。";
   } else {
-    mappingDetail.textContent = mappingModeDescriptions[mappingModeSelect.value]
-      || "点击开始后将自动启动 USB 双目相机和 RTAB-Map。";
+    mappingDetail.textContent = "CREStereo 模型深度与学习里程计为主链路；VPI 保留为低资源备用链路。";
   }
 }
 
 async function startMapping() {
   mappingStartButton.disabled = true;
-  mappingModeSelect.disabled = true;
   try {
-    const result = await api("/api/mapping/start", {mode: mappingModeSelect.value});
+    const result = await api("/api/mapping/start", {mode: mappingMode.value});
     updateMapping(result.mapping);
     showToast("RTAB-Map 正在启动，请等待相机输入检查完成");
   } catch (error) {
     mappingStartButton.disabled = false;
-    mappingModeSelect.disabled = false;
     showToast(`建图启动失败：${error.message}`);
   }
 }
@@ -1575,10 +1546,6 @@ async function stopMapping() {
 
 mappingStartButton.addEventListener("click", startMapping);
 mappingStopButton.addEventListener("click", stopMapping);
-mappingModeSelect.addEventListener("change", () => {
-  if (mappingModeSelect.disabled) return;
-  mappingDetail.textContent = mappingModeDescriptions[mappingModeSelect.value] || "";
-});
 
 function setPreviewState(element, active, text) {
   element.textContent = text;

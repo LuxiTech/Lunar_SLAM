@@ -31,6 +31,12 @@ target_compile_options(opencv_focus_viewer PRIVATE -Wall -Wextra -Wpedantic)
 ament_target_dependencies(opencv_focus_viewer rclcpp sensor_msgs)
 target_link_libraries(opencv_focus_viewer ${OpenCV_LIBS})
 
+add_executable(opencv_exposure_gain_tuner src/opencv_exposure_gain_tuner.cpp)
+target_compile_features(opencv_exposure_gain_tuner PRIVATE cxx_std_17)
+target_compile_options(opencv_exposure_gain_tuner PRIVATE -Wall -Wextra -Wpedantic)
+ament_target_dependencies(opencv_exposure_gain_tuner rclcpp sensor_msgs)
+target_link_libraries(opencv_exposure_gain_tuner ${OpenCV_LIBS})
+
 add_executable(stereo_depth_node src/stereo_depth_node.cpp)
 target_compile_features(stereo_depth_node PRIVATE cxx_std_17)
 target_compile_options(stereo_depth_node PRIVATE -Wall -Wextra -Wpedantic)
@@ -47,10 +53,16 @@ install(TARGETS
   stereo_node
   opencv_stereo_calibrator
   opencv_focus_viewer
+  opencv_exposure_gain_tuner
   stereo_depth_node
   DESTINATION lib/${PROJECT_NAME}
 )
+install(PROGRAMS scripts/crestereo_depth_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME crestereo_depth_node
+)
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(FILES ../../calibration/stereo_opencv.yaml
   DESTINATION share/${PROJECT_NAME}/config)
 

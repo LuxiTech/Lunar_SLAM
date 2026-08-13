@@ -21,4 +21,6 @@ import pytest
 @pytest.mark.copyright
 @pytest.mark.linter
 def test_copyright():
-    assert main(argv=[".", "test"]) == 0
+    # Restrict the scan to source trees so package-local colcon artifacts do
+    # not make lint results depend on where a previous build was run.
+    assert main(argv=["luxi_web_control", "launch", "test"]) == 0

@@ -1,4 +1,4 @@
-"""Launch one complete USB stereo RTAB-Map profile.
+"""Launch the single supported USB VPI/Luxi RTAB-Map chain.
 
 This device-owned entry mirrors ``lunar_d435i_rtabmap_bringup`` while keeping
 the sensor adapter, visual frontend and RTAB-Map implementation reusable.
@@ -19,7 +19,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
-STABLE_ODOM_ARGS = (
+ODOM_ARGS = (
     "--Odom/ResetCountdown 3 "
     "--Odom/GuessMotion false "
     "--Odom/FilteringStrategy 1 "
@@ -35,7 +35,7 @@ STABLE_ODOM_ARGS = (
     "--OdomF2M/BundleAdjustmentMinMotion 1.5 "
     "--Vis/DepthAsMask true "
     "--Vis/MinInliers 20 "
-    "--Vis/MinInliersDistribution 0.005 "
+    "--Vis/MinInliersDistribution 0.003 "
     "--Vis/Iterations 300 "
     "--Vis/PnPReprojError 1.5 "
     "--Vis/CorGuessWinSize 120 "
@@ -50,23 +50,7 @@ STABLE_ODOM_ARGS = (
     "--Vis/MaxDepth 3.0"
 )
 
-STABLE_RTABMAP_ARGS = (
-    "--Rtabmap/DetectionRate 1.0 "
-    "--Rtabmap/LoopThr 0.2 "
-    "--RGBD/OptimizeMaxError 4.0 "
-    "--RGBD/LinearUpdate 0.12 "
-    "--RGBD/AngularUpdate 0.12 "
-    "--Kp/MinDepth 0.4 "
-    "--Kp/MaxDepth 3.0 "
-    "--Grid/RangeMin 0.4 "
-    "--Grid/RangeMax 3.0 "
-    "--Grid/DepthDecimation 2 "
-    "--Grid/PreVoxelFiltering true "
-    "--Grid/NoiseFilteringRadius 0.12 "
-    "--Grid/NoiseFilteringMinNeighbors 8"
-)
-
-LEARNED_RTABMAP_ARGS = (
+RTABMAP_ARGS = (
     "--Rtabmap/DetectionRate 1.0 "
     "--Rtabmap/LoopThr 0.2 "
     "--RGBD/OptimizeMaxError 3.0 "
@@ -93,15 +77,12 @@ LEARNED_RTABMAP_ARGS = (
     "--Grid/NoiseFilteringMinNeighbors 8"
 )
 
-def _sensor_actions(mode):
-    # Both USB profiles share the same calibrated H30 input. The driver marks
+def _sensor_actions():
+    # The production USB chain always uses VPI OFA/PVA/VIC. The driver marks
     # unhealthy gyro/orientation packets unavailable, and the Luxi frontend
     # ignores those samples rather than applying a corrupt rotation prior.
     use_imu_argument = LaunchConfiguration("use_imu")
     enable_imu_parameter = ParameterValue(use_imu_argument, value_type=bool)
-    depth_backend = (
-        "opencv_cuda_sgm" if mode == "stable" else "vpi_ofa_pva_vic"
-    )
     camera = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -112,7 +93,6 @@ def _sensor_actions(mode):
         ),
         launch_arguments={
             "start_imu": use_imu_argument,
-            "depth_backend": depth_backend,
         }.items(),
     )
     adapter_config = PathJoinSubstitution([
@@ -152,8 +132,8 @@ def _sensor_actions(mode):
     return [camera, adapter, mounting_tf]
 
 
-def _mapping_arguments(mode):
-    arguments = {
+def _mapping_arguments():
+    return {
         "rviz": LaunchConfiguration("rviz"),
         "rviz_display": LaunchConfiguration("rviz_display"),
         "rviz_rgb_topic": "/usb_stereo/left/image_preview",
@@ -177,49 +157,36 @@ def _mapping_arguments(mode):
         "map_filter_angle": "12.0",
         "cloud_subtract_filtering": "true",
         "cloud_subtract_filtering_min_neighbors": "3",
+        "learned_frontend": "true",
+        # Luxi supplies learned local features while RTAB-Map F2M owns metric
+        # odometry over a five-frame local map. H30 continuity filtering keeps
+        # F2M reset frames out of the production pose stream.
+        "visual_odometry": "true",
+        "icp_odometry": "false",
+        "odom_topic": "/rtabmap/odom",
+        "odom_output_topic": "/rtabmap/odom_raw",
+        "subscribe_odom_info": "true",
+        "publish_odom_tf": "false",
+        "subscribe_rgbd": "true",
+        "sensor_rgbd_topic": "/sensors/rgbd/rgbd_image",
+        "rgbd_topic": "/luxi_visual_frontend/rgbd_image",
+        "odom_rgbd_topic": "/sensors/rgbd/rgbd_image",
+        "rtabmap_start_delay": "3.0",
+        "visual_frontend_minimum_depth": "0.4",
+        "visual_frontend_maximum_depth": "3.0",
+        "visual_frontend_depth_sampling_radius": "2",
+        "visual_frontend_depth_sampling_minimum_valid": "5",
+        "visual_frontend_use_depth_translation_refinement": "true",
+        "visual_frontend_rgbd_features_rate": "1.0",
+        "visual_frontend_publish_tf": "false",
+        "visual_frontend_camera_to_imu_time_offset": "0.0",
+        "visual_frontend_superpoint_cuda_graph": "false",
+        "odom_args": ODOM_ARGS,
+        "rtabmap_args": RTABMAP_ARGS,
     }
-    if mode == "stable":
-        arguments.update({
-            "rgbd_topic": "/sensors/rgbd/rgbd_image",
-            "odom_topic": "/rtabmap/odom",
-            "odom_output_topic": "/rtabmap/odom_raw",
-            "publish_odom_tf": "false",
-            "odom_args": STABLE_ODOM_ARGS,
-            "rtabmap_args": STABLE_RTABMAP_ARGS,
-        })
-    else:
-        arguments.update({
-            "learned_frontend": "true",
-            # Luxi supplies learned local features; RTAB-Map F2M owns the
-            # metric odometry so motion is optimized over a five-frame local
-            # map instead of accumulating independent two-frame PnP poses.
-            "visual_odometry": "true",
-            "icp_odometry": "false",
-            "odom_topic": "/rtabmap/odom",
-            "odom_output_topic": "/rtabmap/odom",
-            "subscribe_odom_info": "true",
-            "publish_odom_tf": "true",
-            "subscribe_rgbd": "true",
-            "sensor_rgbd_topic": "/sensors/rgbd/rgbd_image",
-            "rgbd_topic": "/luxi_visual_frontend/rgbd_image",
-            "odom_rgbd_topic": "/sensors/rgbd/rgbd_image",
-            "rtabmap_start_delay": "3.0",
-            "visual_frontend_minimum_depth": "0.4",
-            "visual_frontend_maximum_depth": "3.0",
-            "visual_frontend_depth_sampling_radius": "2",
-            "visual_frontend_depth_sampling_minimum_valid": "5",
-            "visual_frontend_use_depth_translation_refinement": "true",
-            "visual_frontend_rgbd_features_rate": "1.0",
-            "visual_frontend_publish_tf": "false",
-            "visual_frontend_camera_to_imu_time_offset": "0.0",
-            "visual_frontend_superpoint_cuda_graph": "false",
-            "odom_args": STABLE_ODOM_ARGS,
-            "rtabmap_args": LEARNED_RTABMAP_ARGS,
-        })
-    return arguments
 
 
-def _mapping(mode):
+def _mapping():
     return IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -230,28 +197,20 @@ def _mapping(mode):
                 ]
             )
         ),
-        launch_arguments=_mapping_arguments(mode).items(),
+        launch_arguments=_mapping_arguments().items(),
     )
 
 
-def _cloud_preview(mode):
+def _cloud_preview():
     return Node(
         package="luxi_rtab_map",
         executable="odom_cloud_stabilizer",
-        name=(
-            "usb_odom_cloud_stabilizer"
-            if mode == "stable"
-            else "usb_learned_cloud_stabilizer"
-        ),
+        name="usb_learned_cloud_stabilizer",
         output="screen",
         condition=IfCondition(LaunchConfiguration("rviz")),
         parameters=[{
             "cloud_input": "/usb_stereo/points",
-            "odom_input": (
-                "/rtabmap/odom"
-                if mode == "stable"
-                else "/rtabmap/odom"
-            ),
+            "odom_input": "/rtabmap/odom",
             "cloud_output": "/rtabmap/usb_points_stable",
             "map_cloud_input": "/rtabmap/cloud_map",
             "map_cloud_output": "/rtabmap/cloud_map_visual",
@@ -281,29 +240,57 @@ def _planar_odometry():
     )
 
 
+def _imu_fused_odometry():
+    return Node(
+        package="luxi_rtab_map",
+        executable="imu_fused_odometry",
+        name="usb_imu_fused_odometry",
+        output="screen",
+        parameters=[{
+            "input_topic": "/rtabmap/odom_raw",
+            "output_topic": "/rtabmap/odom",
+            "imu_topic": "/sensors/imu/data",
+            "base_frame": "base_link",
+            "maximum_imu_time_difference": 0.03,
+            "maximum_raw_translation": 0.30,
+            "maximum_raw_rotation_deg": 60.0,
+            "maximum_orientation_disagreement_deg": 15.0,
+            "maximum_pose_variance": 0.1,
+            "publish_tf": True,
+        }],
+    )
+
+
 def _launch_profile(context):
-    mode = LaunchConfiguration("mode").perform(context).strip().lower()
-    if mode not in {"stable", "vpi_learned"}:
+    removed = [
+        name for name in ("mode", "depth_backend")
+        if name in context.launch_configurations
+    ]
+    if removed:
         raise RuntimeError(
-            f"Unsupported USB mapping mode '{mode}'; "
-            "use stable or vpi_learned."
+            "USB mapping is fixed to VPI/Luxi; removed launch arguments: "
+            + ", ".join(removed)
         )
-    delayed_actions = [_mapping(mode), _cloud_preview(mode)]
-    if mode == "stable":
+    return _launch_profile_with_sensor(context, _sensor_actions)
+
+
+def _launch_profile_with_sensor(context, sensor_actions):
+    delayed_actions = [_mapping(), _cloud_preview()]
+    use_imu = LaunchConfiguration("use_imu").perform(
+        context
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not use_imu:
         delayed_actions.insert(0, _planar_odometry())
+    else:
+        delayed_actions.insert(0, _imu_fused_odometry())
     return [
-        *_sensor_actions(mode),
+        *sensor_actions(),
         TimerAction(period=3.0, actions=delayed_actions),
     ]
 
 
-def generate_launch_description():
-    return LaunchDescription([
-        DeclareLaunchArgument(
-            "mode",
-            default_value="vpi_learned",
-            description="USB mapping profile: stable or vpi_learned.",
-        ),
+def _common_launch_arguments():
+    return [
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_display", default_value=""),
         DeclareLaunchArgument("rtabmap_viz", default_value="false"),
@@ -340,5 +327,11 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_qy", default_value="0.5"),
         DeclareLaunchArgument("camera_qz", default_value="-0.5"),
         DeclareLaunchArgument("camera_qw", default_value="0.5"),
+    ]
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        *_common_launch_arguments(),
         OpaqueFunction(function=_launch_profile),
     ])

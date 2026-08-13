@@ -12,6 +12,11 @@ data_dir="$(dirname "${bag}")"
 bag_name="$(basename "${bag}")"
 image="${KALIBR_IMAGE:-luxi-kalibr:rosbags}"
 cams_config="${KALIBR_CAMS_CONFIG:-camchain_left.yaml}"
+bag_freq="${KALIBR_BAG_FREQ:-10}"
+if ! [[ "${bag_freq}" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "${bag_freq}" == "0" ]] || [[ "${bag_freq}" == "0.0" ]]; then
+  echo "KALIBR_BAG_FREQ must be a positive number, got: ${bag_freq}" >&2
+  exit 2
+fi
 if [[ "${cams_config}" != "$(basename "${cams_config}")" || ! -f "${workspace}/calibration/kalibr/${cams_config}" ]]; then
   echo "Camera config not found in calibration/kalibr: ${cams_config}" >&2
   exit 1
@@ -36,7 +41,7 @@ docker run --rm \
      --cams '/config/${cams_config}' \
      --imu /config/imu_h30.yaml \
      --target /config/checkerboard_11x8_10mm.yaml \
-     --bag-freq 10 \
+     --bag-freq ${bag_freq} \
      ${bag_range_args} \
      --max-iter 30 \
      --timeoffset-padding 0.20 \

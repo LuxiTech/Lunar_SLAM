@@ -397,19 +397,10 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
 .mapping-state.offline,
 .mapping-state.unknown,
 .mapping-state.failed { border-color: #77353d; color: #ffadb1; background: var(--danger-dark); }
-.mapping-mode-row { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); font-size: .68rem; }
-.mapping-mode-row select {
-  width: 100%;
-  min-height: 38px;
-  padding: 0 9px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: #0d121a;
-  color: var(--text);
-  font-size: .7rem;
-}
-.mapping-mode-row select:disabled { opacity: .55; }
 .mapping-detail { min-height: 30px; margin: 12px 0; color: var(--muted); font-size: .7rem; line-height: 1.45; }
+.mapping-mode-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; margin-top: 12px; color: var(--muted); font-size: .72rem; }
+.mapping-mode-row select { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #0b121c; color: var(--text); padding: 8px 10px; font: inherit; }
+.mapping-mode-row select:disabled { opacity: .55; }
 .mapping-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .mapping-actions button {
   padding: 10px 8px;

@@ -1,7 +1,7 @@
 stereo_node:
   ros__parameters:
-    left_device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:8:1.0-video-index0
-    right_device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.0-video-index0
+    left_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.1:1.0-video-index0
+    right_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.3:1.0-video-index0
     pixel_format: MJPG
     output_encoding: mono8
     width: 1920
@@ -10,8 +10,9 @@ stereo_node:
     trigger_mode: hardware
     # Keep raw host timestamps while recording a new Kalibr dataset.
     timestamp_offset_sec: 0.0
-    auto_exposure: true
-    exposure_absolute: -1
-    gain: -1
+    # Shorter fixed exposure for sharp corners during six-axis motion.
+    auto_exposure: false
+    exposure_absolute: 90
+    gain: 68
     left_frame_id: left_camera_optical_frame
     right_frame_id: right_camera_optical_frame

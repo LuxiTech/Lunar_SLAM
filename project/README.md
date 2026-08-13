@@ -134,40 +134,26 @@ ros2 launch luxi_rtab_map hik_mapping.launch.py \
   database_path:=/tmp/hik_mapping_test.db
 ```
 
-USB 双目与 H30 一键建图使用独立入口。该入口直接消费 USB 深度前端发布的原子
-RGB-D，避免再次拆分同步，并针对 480×270 图像关闭里程计二次降采样：
+USB 双目与 H30 一键建图使用独立入口。当前 CREStereo 是主链路，VPI 是低资源
+备用项；两条链路均直接消费原子 RGB-D：
 
 ```bash
-source device/USBCameraSDK/ros2_ws/install/setup.bash
-ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py \
+source install/setup.bash
+ros2 launch lunar_usb_rtabmap_bringup usb_crestereo_rtabmap.launch.py \
   rviz:=true rtabmap_viz:=false new_map:=true use_imu:=true
 ```
 
-该入口默认使用 `vpi_learned`（VPI OFA/PVA/VIC 深度、RTAB F2M 里程计与 Luxi
-SuperPoint/LightGlue 建图特征）；需要低内存 CUDA 回退链时显式追加 `mode:=stable`。
-当前固定为 `/dev/imu-H30` 的设备已完成零偏恢复，并通过 921600 baud / 200 Hz 独立
-六轴验收及 10 Hz 外触发动态建图验收。USB 网页与终端链路默认使用
-`use_imu:=true`；驱动和启动健康门禁会拒绝任何无效轴，无 IMU 诊断时可显式传入
-`use_imu:=false`。
-
-当前 NX 完整链路（VPI + Luxi + H30 + RTAB-Map + RViz）实测约占 2.35 个 CPU 核，
-最高单进程 0.78 核，所列进程 RSS 合计约 2.69 GiB；GR3D 平均 37.2%、峰值 98%，
-31 次采样没有达到 99%。动态回停 10 秒漂移为 2.2 mm / 0.082°，详细的精细度、
-闭环、深度填充率和逐模块资源占比见
-[USB 相机工作区 README](../device/USBCameraSDK/ros2_ws/README.md#当前默认-vpi--luxi--h30-全链路验收2026-08-10)。
-
-历史 x86 主机、ROS 2 Lyrical 实测：USB 采集与实时彩色点云约 10 Hz，单帧约 2.9 万
-有效点，深度处理约 11 ms；连续原子 RGB-D/IMU 同步检查通过。针对该相机固定数据调参
-后，有效深度由 13.1/17.8/13.2% 提升到 14.5/19.2/14.1%，实机常见约 20–31%。
-GFTT+ORB 网格特征下里程计质量通常为 120–150；78 秒实机测试保存了 58 个数据库
-节点，优化图包含 3 个有效位姿，并生成 133×100（5 cm/格）占据栅格。正式评价仍应
-在纹理充足、0.4–5 m 范围内缓慢走一圈。
+CREStereo 使用 0.4–4 m 稠密主地图、4–6 m 的 4×4 稀疏层和 6–10 m 的 8×8
+稀疏层。最终实测深度约 6 Hz、视觉里程计平均 4.90 Hz，GPU 平均/中位数为
+49.1%/41.5%，整机输入功耗平均 12.70 W。算法、精度边界和复测结果见
+[USB 相机工作区 README](../device/USBCameraSDK/ros2_ws/README.md)。
 
 终端手工建图和网页“开始建图”二选一。网页控制节点会在启动前检查
 `/luxi_visual_frontend` 和 `/rtabmap/rtabmap`；发现外部建图链路时拒绝再次启动，避免
 重复运行两套 SuperPoint、LightGlue 和 RTAB-Map。
 
-正常启动应看到以下关键日志：
+HIK 硬件 profile 正常启动时应看到以下关键日志（不适用于上面的 USB CREStereo
+入口）：
 
 ```text
 TriggerMode=On, TriggerSource=Line0

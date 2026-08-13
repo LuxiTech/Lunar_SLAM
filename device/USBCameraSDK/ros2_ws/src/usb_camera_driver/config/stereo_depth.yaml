@@ -19,16 +19,13 @@ usb_stereo_depth_node:
     disparity_output_topic: /usb_stereo/disparity
     output_frame_id: left_camera_optical_frame
 
-    # Match stereo at 960x540 with CUDA SGM, then publish 480x270. Doubling the
+    # Match stereo at 960x540 with VPI OFA, then publish 480x270. Doubling the
     # matching resolution halves the disparity-induced metric depth error,
     # while the unchanged output size preserves DDS and RTAB-Map throughput.
     processing_scale: 0.5
     output_scale: 0.25
-    # Keep the validated CUDA path as the production default. Experimental
-    # launches can select vpi_ofa_pva_vic without changing this file.
-    depth_backend: opencv_cuda_sgm
-    use_cuda_sgm: true
-    vpi_fallback_to_sgbm: true
+    # The USB depth node contains only OFA eSGM, PVA filtering and VIC
+    # conversion. VPI failure is reported instead of changing algorithms.
     # OFA eSGM + PVA confidence/median + VIC block-linear conversion. Absolute
     # confidence uses the hardware left/right check to reject passive-stereo
     # ambiguity on blank walls; this threshold is tuned below by A/B tests.
@@ -47,19 +44,16 @@ usb_stereo_depth_node:
     # apply the inexpensive published-resolution filter below instead.
     vpi_ofa_apply_cpu_postfilters: false
     # The bounded 5x5 output median runs after 480x270 downsampling. It removes
-    # OFA flying pixels and matches CUDA SGM temporal noise without filtering
-    # the full-resolution depth image a second time.
+    # OFA flying pixels without filtering the full-resolution depth image a
+    # second time.
     vpi_output_median_filter_size: 5
     vpi_output_median_max_difference_m: 0.08
-    cuda_sgm_p1: 10
-    cuda_sgm_p2: 120
-    cuda_lr_bm_block_size: 15
     # Keep the maximum calibrated field of view. This only changes the
     # startup rectification maps; the per-frame image size and bandwidth stay
     # at 480x270. A value of 0 would zoom until all rectified borders vanish.
     rectification_alpha: 1.0
-    # SGBM is faster than the 10 Hz camera period at this resolution. Do not
-    # apply a second timer gate, which would drop frames on small trigger jitter.
+    # Do not apply a second timer gate, which would drop frames on small
+    # trigger jitter.
     max_processing_fps: 0.0
     # Keep RGB-D/depth at the full trigger rate. Five hertz is smooth enough
     # for the RViz-only live cloud and avoids rebuilding ~50k XYZRGB points on
@@ -75,28 +69,11 @@ usb_stereo_depth_node:
     # At the 960x540 matching resolution, fx=503.5 px and the 90.3 mm baseline
     # require about 114 px disparity at the configured 0.4 m minimum depth.
     max_disparity: 128
-    # CPU fallback parameters. CUDA SGM uses census matching and the P1/P2
-    # values above; both paths share uniqueness and the post-filters below.
-    block_size: 5
-    uniqueness_ratio: 7
-    # The 960x540 CPU connected-component pass costs enough to miss 10 Hz.
-    # Far-range left/right consistency and the map radius filter reject the
-    # same harmful outliers without scanning every high-resolution component.
-    speckle_window_size: 0
-    speckle_range: 2
-    disp12_max_diff: 2
     # A 3x3 median is applied only when the raw sub-pixel disparity agrees
     # within this threshold. It reduces planar depth shimmer without bridging
     # foreground/background discontinuities.
     disparity_median_filter_size: 3
     disparity_median_max_difference: 1.5
-    # Forward/reverse consistency is expensive and would over-thin the whole
-    # passive-stereo image. Apply it only to distant depth, where a small
-    # disparity error creates the long tilted sheets seen in RViz.
-    lr_consistency_far_depth_m: 2.5
-    # StereoBM has integer disparity at the half-resolution reverse pass, so
-    # allow two output pixels (four matching-resolution pixels).
-    lr_consistency_max_difference: 4.0
     min_depth_m: 0.4
     max_depth_m: 6.0
     # Reject thin low-disparity sheets caused by horizontal-edge ambiguity.

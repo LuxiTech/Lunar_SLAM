@@ -20,6 +20,9 @@
 #include <cstdint>
 #include <ctime>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -29,6 +32,74 @@
 namespace {
 
 constexpr uint32_t kBufferCount = 4;
+constexpr char kCameraModalias[] = "usb:v32E4p2234";
+
+std::string readTextFile(const std::filesystem::path &path) {
+  std::ifstream input(path);
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  std::string value = contents.str();
+  while (!value.empty() &&
+         (value.back() == '\n' || value.back() == '\r' || value.back() == ' ')) {
+    value.pop_back();
+  }
+  return value;
+}
+
+std::vector<std::string> discoverStereoDevices() {
+  namespace fs = std::filesystem;
+  const fs::path video_class("/sys/class/video4linux");
+  std::vector<std::pair<std::string, std::string>> candidates;
+  std::error_code error;
+  if (!fs::is_directory(video_class, error)) {
+    throw std::runtime_error(
+        "USB stereo auto-discovery found no /sys/class/video4linux directory");
+  }
+
+  for (const auto &entry : fs::directory_iterator(video_class)) {
+    const std::string node = entry.path().filename().string();
+    if (node.rfind("video", 0) != 0 ||
+        readTextFile(entry.path() / "index") != "0") {
+      continue;
+    }
+    const std::string modalias = readTextFile(entry.path() / "device/modalias");
+    if (modalias.rfind(kCameraModalias, 0) != 0) {
+      continue;
+    }
+    const fs::path device = fs::path("/dev") / node;
+    if (!fs::exists(device, error)) {
+      continue;
+    }
+    const fs::path topology = fs::weakly_canonical(entry.path() / "device", error);
+    candidates.emplace_back(error ? entry.path().string() : topology.string(),
+                            device.string());
+    error.clear();
+  }
+  std::sort(candidates.begin(), candidates.end());
+  if (candidates.size() != 2) {
+    throw std::runtime_error(
+        "USB stereo auto-discovery expected exactly 2 RER cameras "
+        "(VID:PID 32e4:2234, V4L2 index 0), found " +
+        std::to_string(candidates.size()));
+  }
+  return {candidates[0].second, candidates[1].second};
+}
+
+std::pair<std::string, std::string> resolveStereoDevices(
+    const std::string &left, const std::string &right, bool auto_discover) {
+  std::error_code error;
+  const bool explicit_devices_exist = left != "auto" && right != "auto" &&
+      std::filesystem::exists(left, error) && std::filesystem::exists(right, error);
+  if (explicit_devices_exist) {
+    return {left, right};
+  }
+  if (!auto_discover && left != "auto" && right != "auto") {
+    throw std::runtime_error(
+        "configured stereo devices are unavailable: " + left + ", " + right);
+  }
+  const auto devices = discoverStereoDevices();
+  return {devices[0], devices[1]};
+}
 
 int xioctl(int fd, unsigned long request, void *argument) {
   int result;
@@ -322,8 +393,19 @@ class V4l2Camera {
 class StereoNode : public rclcpp::Node {
  public:
   StereoNode() : Node("stereo_node") {
-    const auto left_device = declare_parameter<std::string>("left_device", "/dev/video0");
-    const auto right_device = declare_parameter<std::string>("right_device", "/dev/video2");
+    const auto configured_left =
+        declare_parameter<std::string>("left_device", "auto");
+    const auto configured_right =
+        declare_parameter<std::string>("right_device", "auto");
+    const auto auto_discover =
+        declare_parameter<bool>("auto_discover_devices", true);
+    const auto [left_device, right_device] = resolveStereoDevices(
+        configured_left, configured_right, auto_discover);
+    if (left_device != configured_left || right_device != configured_right) {
+      RCLCPP_WARN(get_logger(),
+                  "configured USB paths are unavailable; discovered left=%s right=%s",
+                  left_device.c_str(), right_device.c_str());
+    }
     const auto pixel_format = parsePixelFormat(declare_parameter<std::string>("pixel_format", "MJPG"));
     output_encoding_ = declare_parameter<std::string>("output_encoding", "bgr8");
     const auto output_format = parseOutputFormat(output_encoding_);

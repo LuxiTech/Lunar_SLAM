@@ -113,6 +113,7 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
   }
   compressed_color_period_ns_ = static_cast<int64_t>(1.0e9 / compressed_color_rate);
   const auto reliable_image_output = declare_parameter<bool>("reliable_image_output", false);
+  const auto reliable_rgbd_input = declare_parameter<bool>("reliable_rgbd_input", true);
   const auto maximum_sensor_time_difference = declare_parameter<double>(
     "maximum_sensor_time_difference", 0.05);
   if (maximum_sensor_time_difference < 0.0) {
@@ -135,8 +136,10 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
   }
 
   if (input_mode == "rgbd") {
+    const auto rgbd_input_qos = reliable_rgbd_input ?
+      rclcpp::QoS(2).reliable() : rclcpp::QoS(1).best_effort();
     rgbd_subscription_ = create_subscription<rtabmap_msgs::msg::RGBDImage>(
-      require_topic("rgbd_input_topic", rgbd_input), rclcpp::QoS(2).reliable(),
+      require_topic("rgbd_input_topic", rgbd_input), rgbd_input_qos,
       [this](rtabmap_msgs::msg::RGBDImage::UniquePtr message) {
         publish_rgbd_input(std::move(message));
       });

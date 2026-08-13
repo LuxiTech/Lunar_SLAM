@@ -27,6 +27,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_rate_limit test/test_rate_limit.py)
   ament_add_pytest_test(test_tensorrt_superpoint test/test_tensorrt_superpoint.py)
   ament_add_pytest_test(test_tracker test/test_tracker.py)
+  ament_add_pytest_test(test_node_math test/test_node_math.py)
 endif()
 
 ament_package()

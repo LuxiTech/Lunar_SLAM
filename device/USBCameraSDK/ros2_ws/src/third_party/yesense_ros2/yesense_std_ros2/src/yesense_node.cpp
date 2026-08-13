@@ -122,6 +122,9 @@ class YESENSE_Publisher : public rclcpp::Node
 		this->declare_parameter<bool>("drop_trigger_reset_sample", true);
 		this->declare_parameter<bool>(
 			"invalidate_orientation_with_invalid_gyro", true);
+		this->declare_parameter<double>("reconnect_interval_sec", 1.0);
+		this->declare_parameter<double>("no_data_warn_sec", 2.0);
+		this->declare_parameter<double>("no_data_reopen_sec", 5.0);
 		//this->declare_parameter<std::string>("driver_type", "linux_serial");
 		
 		std::string driver_type_str,imu_topic_ros,imu_topic;
@@ -138,6 +141,12 @@ class YESENSE_Publisher : public rclcpp::Node
 		this->get_parameter(
 			"invalidate_orientation_with_invalid_gyro",
 			invalidate_orientation_with_invalid_gyro_);
+		this->get_parameter("reconnect_interval_sec", reconnect_interval_sec_);
+		this->get_parameter("no_data_warn_sec", no_data_warn_sec_);
+		this->get_parameter("no_data_reopen_sec", no_data_reopen_sec_);
+		reconnect_interval_sec_ = std::max(0.1, reconnect_interval_sec_);
+		no_data_warn_sec_ = std::max(0.5, no_data_warn_sec_);
+		no_data_reopen_sec_ = std::max(no_data_warn_sec_, no_data_reopen_sec_);
 		RCLCPP_INFO(this->get_logger(), "serial port %s\n", serial_port.c_str());
 		RCLCPP_INFO(this->get_logger(), "baudrate %d\n", baud_rate);
 		RCLCPP_INFO(this->get_logger(), "frame id %s\n", frame_id.c_str());
@@ -183,29 +192,8 @@ class YESENSE_Publisher : public rclcpp::Node
 
 		// =================================================
 		if(serial_drv_ros == driver_type)
-		{		
-			try
-			{				
-				ser.setPort(serial_port);
-				ser.setBaudrate(baud_rate);
-				
-				//串口设置
-				serial::Timeout to = serial::Timeout::simpleTimeout(1000);
-				ser.setTimeout(to);
-
-				ser.setStopbits(serial::stopbits_t::stopbits_one);
-				ser.setBytesize(serial::bytesize_t::eightbits);
-				ser.setParity(serial::parity_t::parity_none);       //设置校验位
-
-				//打开
-				ser.open();		
-				ser.flushInput();
-			}
-			catch (serial::IOException &e)
-			{
-				RCLCPP_INFO(this->get_logger(), "Unable to open port ");
-				return;
-			}	
+		{
+			open_ros_serial();
 		}
 		else if(serial_drv_linux == driver_type)
 		{
@@ -234,18 +222,16 @@ class YESENSE_Publisher : public rclcpp::Node
 			RCLCPP_INFO(this->get_logger(), "open linux serial\n");	
 		}
 
-		RCLCPP_INFO(this->get_logger(), "open serial port to decode msg!\n");			
-
 		// =================================================
 		timer_ 			= this->create_wall_timer(1ms, std::bind(&YESENSE_Publisher::timer_callback, this));
-		timer_msg_rate_ = this->create_wall_timer(1ms, std::bind(&YESENSE_Publisher::callback_msg_rate_calc, this));		
+		timer_msg_rate_ = this->create_wall_timer(1s, std::bind(&YESENSE_Publisher::callback_msg_rate_calc, this));
 	}
 
 	~YESENSE_Publisher()
 	{
 		if(serial_drv_ros == driver_type)
-		{			
-			ser.close();
+		{
+			close_ros_serial();
 		}
 		else if(serial_drv_linux == driver_type)
 		{
@@ -254,24 +240,115 @@ class YESENSE_Publisher : public rclcpp::Node
 	}
 
 	private:
+	bool open_ros_serial()
+	{
+		if (ser.isOpen())
+		{
+			return true;
+		}
+		const auto now = std::chrono::steady_clock::now();
+		if (last_open_attempt_valid_ &&
+			std::chrono::duration<double>(now - last_open_attempt_).count() < reconnect_interval_sec_)
+		{
+			return false;
+		}
+		last_open_attempt_ = now;
+		last_open_attempt_valid_ = true;
+		try
+		{
+			ser.setPort(serial_port);
+			ser.setBaudrate(baud_rate);
+			auto timeout = serial::Timeout::simpleTimeout(100);
+			ser.setTimeout(timeout);
+			ser.setStopbits(serial::stopbits_t::stopbits_one);
+			ser.setBytesize(serial::bytesize_t::eightbits);
+			ser.setParity(serial::parity_t::parity_none);
+			ser.open();
+			ser.flushInput();
+			serial_opened_at_ = now;
+			last_raw_data_at_ = now;
+			RCLCPP_INFO(
+				this->get_logger(),
+				"H30 serial opened: %s at %d baud; waiting for sensor packets",
+				serial_port.c_str(), baud_rate);
+			return true;
+		}
+		catch (const std::exception &error)
+		{
+			RCLCPP_WARN_THROTTLE(
+				this->get_logger(), *this->get_clock(), 5000,
+				"Unable to open H30 serial %s: %s; retrying every %.1f s",
+				serial_port.c_str(), error.what(), reconnect_interval_sec_);
+			return false;
+		}
+	}
+
+	void close_ros_serial()
+	{
+		try
+		{
+			if (ser.isOpen())
+			{
+				ser.close();
+			}
+		}
+		catch (const std::exception &error)
+		{
+			RCLCPP_WARN(this->get_logger(), "Unable to close H30 serial: %s", error.what());
+		}
+	}
+
 	void timer_callback()
 	{
 		size_t bytes_read_r_buffer = 0;
 
 		if(serial_drv_ros == driver_type)
 		{
-			if(ser.isOpen() &&ser.available()) 
+			if (!open_ros_serial())
 			{
-			size_t bytes_to_read = std::min(static_cast<size_t>(ser.available()), sizeof(r_buffer));
-			//std::cout << "\033[1m\033[34m" << "wheeltec_tues debug_aaaaaaaa" << "\033[0m"<< std::endl;  // wheeltec_tues debug
-			bytes_read_r_buffer = ser.read(r_buffer, bytes_to_read);	//wheeltec_tues
-			//bytes_read_r_buffer = ser.read(r_buffer, ser.available()); //wheeltec_tues debug
+				return;
+			}
+			try
+			{
+				const size_t available = ser.available();
+				if (available > 0)
+				{
+					const size_t bytes_to_read = std::min(available, sizeof(r_buffer));
+					bytes_read_r_buffer = ser.read(r_buffer, bytes_to_read);
+				}
+			}
+			catch (const std::exception &error)
+			{
+				RCLCPP_WARN(
+					this->get_logger(), "H30 serial read failed: %s; reopening", error.what());
+				close_ros_serial();
+				return;
 			}
 		}
 		else if(serial_drv_linux == driver_type)
 		{
 			bytes_read_r_buffer = read(fd, r_buffer, UART_RX_BUF_LEN);
 		}	
+		if (bytes_read_r_buffer == 0)
+		{
+			if (serial_drv_ros == driver_type && ser.isOpen())
+			{
+				const auto now = std::chrono::steady_clock::now();
+				const double silent_for =
+					std::chrono::duration<double>(now - last_raw_data_at_).count();
+				if (silent_for >= no_data_reopen_sec_)
+				{
+					RCLCPP_WARN(
+						this->get_logger(),
+						"H30 serial is online but received 0 bytes for %.1f s; reopening the port",
+						silent_for);
+					close_ros_serial();
+				}
+			}
+			return;
+		}
+		raw_bytes_since_rate_ += bytes_read_r_buffer;
+		last_raw_data_at_ = std::chrono::steady_clock::now();
 		int ret = decoder.data_proc(r_buffer, (unsigned int)bytes_read_r_buffer, &yis_out);
 
 		if(analysis_ok == ret)
@@ -280,6 +357,12 @@ class YESENSE_Publisher : public rclcpp::Node
 			{ 
 				yis_out.content.valid_flg = 0u;
 				user_info.msg_cnt++;	
+				total_decoded_messages_++;
+				if (!stream_ready_logged_)
+				{
+					RCLCPP_INFO(this->get_logger(), "H30 stream is healthy; first packet decoded");
+					stream_ready_logged_ = true;
+				}
 				const auto stamp = resolve_imu_stamp(&yis_out);
 				// Some H30 firmware revisions emit one partially updated packet at
 				// the exact external-trigger reset.  Keep the reset for timestamp
@@ -308,16 +391,42 @@ class YESENSE_Publisher : public rclcpp::Node
 	
 	void callback_msg_rate_calc()
 	{
-		if(user_info.flg)
+		if (!user_info.flg)
 		{
-			user_info.timing_cnt++;
-			if(user_info.timing_cnt >= CNT_PER_SECOND)
+			return;
+		}
+		user_info.msg_rate = user_info.msg_cnt;
+		user_info.msg_cnt = 0u;
+		if (serial_drv_ros == driver_type && ser.isOpen() && raw_bytes_since_rate_ == 0)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const double open_for =
+				std::chrono::duration<double>(now - serial_opened_at_).count();
+			if (open_for >= no_data_warn_sec_)
 			{
-				user_info.timing_cnt 	= 0u;
-				user_info.msg_rate	= user_info.msg_cnt;
-				user_info.msg_cnt		= 0u;
+				RCLCPP_WARN_THROTTLE(
+					this->get_logger(), *this->get_clock(), 5000,
+					"H30 NO DATA: %s is open at %d baud but delivered 0 serial bytes; "
+					"check H30 power/output state and reconnect the device",
+					serial_port.c_str(), baud_rate);
 			}
 		}
+		else if (raw_bytes_since_rate_ > 0 && user_info.msg_rate == 0)
+		{
+			RCLCPP_WARN_THROTTLE(
+				this->get_logger(), *this->get_clock(), 5000,
+				"H30 received %zu serial bytes/s but decoded no valid 0x59 0x53 packets; "
+				"check baud rate and firmware output format",
+				raw_bytes_since_rate_);
+		}
+		else if (user_info.msg_rate > 0)
+		{
+			RCLCPP_DEBUG(
+				this->get_logger(), "H30 rate=%u Hz raw=%zu B/s total=%llu",
+				user_info.msg_rate, raw_bytes_since_rate_,
+				static_cast<unsigned long long>(total_decoded_messages_));
+		}
+		raw_bytes_since_rate_ = 0;
 	}
 
 	rclcpp::Time resolve_imu_stamp(const yis_out_data_t *result)
@@ -382,12 +491,22 @@ class YESENSE_Publisher : public rclcpp::Node
 	double invalid_accel_threshold_mps2_{200.0};
 	bool drop_trigger_reset_sample_{true};
 	bool invalidate_orientation_with_invalid_gyro_{true};
+	double reconnect_interval_sec_{1.0};
+	double no_data_warn_sec_{2.0};
+	double no_data_reopen_sec_{5.0};
 	bool missing_sample_timestamp_warned_{false};
 	bool sample_epoch_valid_{false};
 	uint32_t last_sample_timestamp_us_{0};
 	rclcpp::Time sample_epoch_ros_{0, 0, RCL_ROS_TIME};
 	bool last_imu_stamp_valid_{false};
 	rclcpp::Time last_imu_stamp_{0, 0, RCL_ROS_TIME};
+	std::chrono::steady_clock::time_point last_open_attempt_{};
+	std::chrono::steady_clock::time_point serial_opened_at_{};
+	std::chrono::steady_clock::time_point last_raw_data_at_{};
+	bool last_open_attempt_valid_{false};
+	bool stream_ready_logged_{false};
+	size_t raw_bytes_since_rate_{0};
+	uint64_t total_decoded_messages_{0};
 
 	// ===
 	yis_out_data_t yis_out;
@@ -439,12 +558,17 @@ void YESENSE_Publisher::publish_msg(yis_out_data_t *result, const rclcpp::Time &
     imu_ros_data = sensor_msgs::msg::Imu{};
     imu_ros_data.header.stamp = stamp;
     imu_ros_data.header.frame_id 	= frame_id;
-    if (result->content.quat)
-    {
-        imu_ros_data.orientation.x = result->quat.q1;
-        imu_ros_data.orientation.y = result->quat.q2;
-        imu_ros_data.orientation.z = result->quat.q3;
-        imu_ros_data.orientation.w = result->quat.q0;
+	    const double quaternion_norm = std::sqrt(
+	        result->quat.q0 * result->quat.q0 + result->quat.q1 * result->quat.q1 +
+	        result->quat.q2 * result->quat.q2 + result->quat.q3 * result->quat.q3);
+	    const bool quaternion_valid = result->content.quat &&
+	        std::isfinite(quaternion_norm) && quaternion_norm > 0.5 && quaternion_norm < 1.5;
+	    if (quaternion_valid)
+	    {
+	        imu_ros_data.orientation.x = result->quat.q1 / quaternion_norm;
+	        imu_ros_data.orientation.y = result->quat.q2 / quaternion_norm;
+	        imu_ros_data.orientation.z = result->quat.q3 / quaternion_norm;
+	        imu_ros_data.orientation.w = result->quat.q0 / quaternion_norm;
     }
     else
     {
