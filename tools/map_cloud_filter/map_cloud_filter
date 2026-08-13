@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+tool_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+workspace="$(cd "${tool_directory}/../.." && pwd)"
+build_directory="${workspace}/build/map_cloud_filter"
+binary="${build_directory}/map_cloud_filter"
+default_config="${tool_directory}/config/default.yaml"
+
+if [[ ! -x "${binary}" ||
+      "${tool_directory}/CMakeLists.txt" -nt "${binary}" ||
+      "${tool_directory}/map_cloud_filter.cpp" -nt "${binary}" ||
+      "${tool_directory}/map_cloud_filter_main.cpp" -nt "${binary}" ||
+      "${tool_directory}/map_cloud_filter.hpp" -nt "${binary}" ]]; then
+  cmake -S "${tool_directory}" -B "${build_directory}" -DBUILD_TESTING=OFF
+  cmake --build "${build_directory}" --target map_cloud_filter --parallel 2
+fi
+
+if [[ $# -lt 2 ]]; then
+  exec "${binary}" "$@"
+fi
+exec "${binary}" "$1" "$2" --config "${default_config}" "${@:3}"

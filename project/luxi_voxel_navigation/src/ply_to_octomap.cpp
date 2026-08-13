@@ -12,6 +12,8 @@
 
 #include "octomap/OcTree.h"
 
+#include "luxi_voxel_navigation/octomap_defaults.hpp"
+
 namespace
 {
 double parseDouble(const char * value, const char * name)
@@ -31,7 +33,8 @@ int main(int argc, char ** argv)
     return 2;
   }
   try {
-    const double resolution = argc >= 4 ? parseDouble(argv[3], "resolution") : 0.10;
+    const double resolution = argc >= 4 ? parseDouble(argv[3], "resolution") :
+      luxi_voxel_navigation::kDefaultOctomapResolution;
     const double min_z = argc >= 5 ? parseDouble(argv[4], "min_z") : -std::numeric_limits<double>::infinity();
     const double max_z = argc >= 6 ? parseDouble(argv[5], "max_z") : std::numeric_limits<double>::infinity();
     if (resolution <= 0.0 || min_z > max_z) {

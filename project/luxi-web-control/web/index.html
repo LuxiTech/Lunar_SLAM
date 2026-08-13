@@ -75,6 +75,18 @@
           </div>
         </div>
 
+        <section class="robot-control-panel" aria-label="D1 机器人控制权限">
+          <div>
+            <b>机器人状态与控制</b>
+            <small id="robotControlDetail">正在读取 D1 实际姿态</small>
+          </div>
+          <label class="control-switch">
+            <input id="robotControlToggle" type="checkbox" aria-label="开启或结束机器人控制">
+            <span></span>
+          </label>
+        </section>
+        <strong id="robotControlState" class="mapping-state">正在连接</strong>
+
         <label class="slider-row">
           <span><b>线速度</b><output id="linearValue">0.12 m/s</output></span>
           <input id="linearSpeed" type="range" min="0.01" max="0.25" step="0.01" value="0.12">
@@ -164,17 +176,29 @@
           <select id="navigationMapSelect" aria-label="选择已建地图"></select>
         </label>
         <button id="navigationLoadButton" class="mapping-start">重新加载</button>
+        <button id="navigationFilterButton" class="goal-select">生成过滤地图</button>
         <button id="navigationLocateButton" class="mapping-start" disabled>自动定位</button>
         <button id="navigationStopButton" class="mapping-stop" disabled>停止定位</button>
         <button id="navigationGoalButton" class="goal-select" disabled>选择目标点</button>
+        <button id="navigationStartButton" class="mapping-start" disabled>出发</button>
+        <button id="navigationHaltButton" class="mapping-stop" disabled>停止行驶</button>
       </div>
       <div class="navigation-layers" aria-label="地图图层显示开关">
         <span>显示图层</span>
         <label><input id="navigationShowCloud" type="checkbox" checked> 彩色建图点云</label>
-        <label><input id="navigationShowVoxels" type="checkbox" checked> OctoMap 体素</label>
+        <label><input id="navigationShowTraversable" type="checkbox" checked> 可通行区域</label>
+        <label><input id="navigationShowCostmap" type="checkbox" checked> 代价地图边缘</label>
+        <label><input id="navigationShowObstacles" type="checkbox" checked> 分割障碍物</label>
+        <label><input id="navigationShowVoxels" type="checkbox"> OctoMap 原始体素</label>
         <label><input id="navigationShowSemantics" type="checkbox" checked> 语义标注</label>
         <label><input id="navigationShowMappingOrigin" type="checkbox" checked> 建图起点 (0, 0, 0)</label>
         <label><input id="navigationShowRobot" type="checkbox" checked> 当前定位</label>
+      </div>
+      <div class="terrain-legend" aria-label="地形代价图例">
+        <span><i class="legend-traversable"></i>可通行</span>
+        <span><i class="legend-cost-low"></i>低边缘代价</span>
+        <span><i class="legend-cost-high"></i>高边缘代价（橙）</span>
+        <span><i class="legend-obstacle"></i>障碍物（红）</span>
       </div>
       <div class="semantic-toolbar" aria-label="离线语义标注工具">
         <label>
@@ -210,10 +234,10 @@
         <span id="semanticStatus" class="semantic-status">加载地图后可以标注</span>
       </div>
       <div class="voxel-frame">
-        <canvas id="voxelMapCanvas" aria-label="可拖动查看的完整彩色点云、体素地图和全局路径"></canvas>
-        <span id="voxelMapHint" class="preview-overlay">加载地图后显示完整彩色点云和体素地图；拖动旋转，滚轮缩放</span>
+        <canvas id="voxelMapCanvas" aria-label="可拖动查看的可通行区域、代价地图、障碍物和全局路径"></canvas>
+        <span id="voxelMapHint" class="preview-overlay">加载地图后显示可通行区域、代价边缘和障碍物；拖动旋转，滚轮缩放</span>
       </div>
-      <p class="navigation-note">选择地图会自动生成 HLoc 索引、转换并显示完整彩色点云和 OctoMap。语义标注不会修改原始地图：岩石/墙画笔只选择高于地面阈值的占用体素；坑通过地面多边形和估计深度记录。默认视角中 +X（前方）朝上、+Y（左方）朝左。点击“自动定位”后缓慢移动或转动机器人：连续 3 帧一致的 GPU HLoc 粗位姿用于初始化 ICP；ICP 成功后 HLoc 暂停，连续 5 帧 ICP 失败时自动重启 HLoc。紫色箭头为当前机器人位姿；定位完成后可选择目标点规划路径。</p>
+      <p class="navigation-note">选择地图会自动生成 HLoc 索引，并由 C++ 地形模型按 0.05 m 体素分割可通行面、障碍物和代价边缘。当前机器人半径按 0.10 m 设置，边缘代价带为 0.60 m；规划器会优先选择低代价的中间区域。语义标注不会修改原始地图：岩石/墙画笔只选择高于地面阈值的占用体素；坑通过地面多边形和估计深度记录。默认视角中 +X（前方）朝上、+Y（左方）朝左。紫色箭头为当前机器人位姿；定位完成后可选择目标点规划路径，规划完成后点击“出发”。当前闭环只使用静态地图，尚不具备实时动态障碍物绕行能力。</p>
     </section>
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

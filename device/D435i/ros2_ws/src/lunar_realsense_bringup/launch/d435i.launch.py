@@ -72,7 +72,10 @@ def generate_launch_description() -> LaunchDescription:
             f"{pointcloud_filter}.ordered_pc": False,
             f"{pointcloud_filter}.allow_no_texture_points": False,
             "publish_tf": True,
-            "tf_publish_rate": 30.0,
+            # Camera extrinsics are constant. Publish them on /tf_static so
+            # RGB-D odometry cannot lose frames when a dynamic TF publisher
+            # briefly falls behind under localization load.
+            "tf_publish_rate": 0.0,
             "rgb_camera.color_profile": LaunchConfiguration("color_profile"),
             "depth_module.depth_profile": LaunchConfiguration("depth_profile"),
             "initial_reset": ParameterValue(LaunchConfiguration("initial_reset"), value_type=bool),

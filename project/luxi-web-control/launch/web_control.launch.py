@@ -16,7 +16,12 @@
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    RegisterEventHandler,
+    Shutdown,
+)
 from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
@@ -40,6 +45,7 @@ def generate_launch_description():
             name="web_control",
             output="screen",
             condition=condition,
+            on_exit=Shutdown(reason="web control node exited"),
             parameters=[
                 LaunchConfiguration("config"),
                 {

@@ -12,17 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Launch web control with the DDS settings used by the LeKiwi base."""
+"""Launch web control with the DDS settings used by the connected D1 robot."""
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 import os
 
 
@@ -36,8 +38,13 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
+        DeclareLaunchArgument(
+            "standard_cmd_vel_topic",
+            default_value="/d1/cmd_vel_standard",
+        ),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
         DeclareLaunchArgument("http_port", default_value="8080"),
+        DeclareLaunchArgument("reset_ros_daemon", default_value="true"),
         DeclareLaunchArgument("reset_ros_daemon", default_value="true"),
         DeclareLaunchArgument(
             "config",
@@ -47,7 +54,7 @@ def generate_launch_description():
                 "web_control.yaml",
             ),
         ),
-        SetEnvironmentVariable("ROS_DOMAIN_ID", "0"),
+        SetEnvironmentVariable("ROS_DOMAIN_ID", "42"),
         SetEnvironmentVariable("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         SetEnvironmentVariable(
             "ROS_AUTOMATIC_DISCOVERY_RANGE",
@@ -55,14 +62,36 @@ def generate_launch_description():
         ),
         SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "0"),
         SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(generic_launch),
-            launch_arguments={
-                "cmd_vel_topic": LaunchConfiguration("cmd_vel_topic"),
-                "bind_address": LaunchConfiguration("bind_address"),
-                "http_port": LaunchConfiguration("http_port"),
-                "config": LaunchConfiguration("config"),
-                "reset_ros_daemon": LaunchConfiguration("reset_ros_daemon"),
-            }.items(),
+        GroupAction(
+            scoped=True,
+            actions=[IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(generic_launch),
+                launch_arguments={
+                    "cmd_vel_topic": LaunchConfiguration(
+                        "standard_cmd_vel_topic"
+                    ),
+                    "bind_address": LaunchConfiguration("bind_address"),
+                    "http_port": LaunchConfiguration("http_port"),
+                    "config": LaunchConfiguration("config"),
+                    "reset_ros_daemon": LaunchConfiguration("reset_ros_daemon"),
+                }.items(),
+            )],
+        ),
+        Node(
+            package="luxi_3d_navigation",
+            executable="velocity_command_mux_node",
+            name="d1_velocity_command_mux",
+            output="screen",
+            parameters=[{
+                "manual_input_topic": LaunchConfiguration(
+                    "standard_cmd_vel_topic"
+                ),
+                "navigation_input_topic": "/navigation/cmd_vel",
+                "output_topic": LaunchConfiguration("cmd_vel_topic"),
+                "navigation_active_topic": "/navigation/active",
+                "navigation_stop_topic": "/navigation/stop",
+                "emergency_stop_topic": "/navigation/emergency_stop",
+                "invert_angular_z": False,
+            }],
         ),
     ])

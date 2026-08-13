@@ -24,8 +24,13 @@ def _workspace_root() -> Path:
 
 def generate_launch_description() -> LaunchDescription:
     octomap_library_path = str(_workspace_root() / "3parts" / "octomap" / "install" / "lib")
+    system_library_path = "/lib/aarch64-linux-gnu"
     library_path = os.pathsep.join(
-        part for part in (octomap_library_path, os.environ.get("LD_LIBRARY_PATH", "")) if part
+        part for part in (
+            system_library_path,
+            octomap_library_path,
+            os.environ.get("LD_LIBRARY_PATH", ""),
+        ) if part
     )
     localization_launch = PythonLaunchDescriptionSource([
         FindPackageShare("luxi_hloc"), "/launch/hloc_icp_localization.launch.py"
@@ -42,6 +47,29 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("semantic_path", default_value=""),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/navigation/cmd_vel"),
         SetEnvironmentVariable("LD_LIBRARY_PATH", library_path),
+        Node(
+            package="rtabmap_odom",
+            executable="rgbd_odometry",
+            name="navigation_rgbd_odometry",
+            parameters=[{
+                "frame_id": "base_link",
+                "odom_frame_id": "odom",
+                "publish_tf": True,
+                "subscribe_rgbd": True,
+                "wait_imu_to_init": True,
+                "always_check_imu_tf": False,
+                "always_process_most_recent_frame": True,
+                "qos": 2,
+                "qos_imu": 2,
+            }],
+            remappings=[
+                ("rgbd_image", "/sensors/rgbd/rgbd_image"),
+                ("odom", "/navigation/odom"),
+                ("imu", "/sensors/imu/data"),
+            ],
+            arguments=["--ros-args", "--log-level", "warn"],
+            output="screen",
+        ),
         IncludeLaunchDescription(
             localization_launch,
             launch_arguments={
@@ -64,6 +92,7 @@ def generate_launch_description() -> LaunchDescription:
             name="octomap_3d_astar_planner",
             parameters=[config_path, {
                 "octomap_topic": "/navigation/octomap",
+                "cloud_path": LaunchConfiguration("cloud_path"),
                 "semantic_path": LaunchConfiguration("semantic_path"),
             }],
             output="screen",

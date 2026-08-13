@@ -40,8 +40,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import GetParameters
 from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
+from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker
 
 
@@ -58,6 +61,23 @@ MAPPING_NODE_PATHS = frozenset({
     "/luxi_visual_frontend",
     "/rtabmap/rtabmap",
 })
+
+
+def classify_d1_posture(fsm_state: str) -> str:
+    """Classify the D1's reported locomotion FSM without hiding its raw value."""
+    normalized = fsm_state.strip().lower()
+    if not normalized:
+        return "unknown"
+    if normalized in {"idle", "transform_down"}:
+        return "prone"
+    if normalized == "transform_up":
+        return "standing_up"
+    if (
+        normalized in {"loco", "car", "joint_pd"}
+        or normalized.startswith("rl_")
+    ):
+        return "standing"
+    return "unknown"
 
 
 def mapping_graph_conflicts(
@@ -103,10 +123,24 @@ def _map_id_from_export_path(candidate: Path, octo_directory: Path) -> str:
             break
         if MAP_IDENTIFIER.fullmatch(parent.name):
             return parent.name
-        matched = re.match(r"^(map\d+)_octomap$", parent.name)
+        matched = re.match(
+            r"^(map\d+)_(?:octomap|filtered(?:_.+)?)$", parent.name
+        )
         if matched:
             return matched.group(1)
     return ""
+
+
+def _is_filtered_export_path(candidate: Path, octo_directory: Path) -> bool:
+    """Return whether a saved layer belongs to a filtered map export."""
+    if candidate.stem.endswith("_filtered_cloud"):
+        return True
+    for parent in candidate.parents:
+        if parent == octo_directory.parent:
+            break
+        if re.match(r"^map\d+_filtered(?:_.+)?$", parent.name):
+            return True
+    return False
 
 
 def discover_navigation_maps(maps_root: Path) -> list:
@@ -120,24 +154,39 @@ def discover_navigation_maps(maps_root: Path) -> list:
         if MAP_IDENTIFIER.fullmatch(candidate.stem)
     }
     octomaps: Dict[str, Path] = {}
+    filtered_octomaps: Dict[str, Path] = {}
     for candidate in octo_directory.rglob("*.bt"):
         map_id = _map_id_from_export_path(candidate, octo_directory)
         if map_id:
-            previous = octomaps.get(map_id)
+            collection = (
+                filtered_octomaps
+                if _is_filtered_export_path(candidate, octo_directory)
+                else octomaps
+            )
+            previous = collection.get(map_id)
             if previous is None or candidate.stat().st_mtime > previous.stat().st_mtime:
-                octomaps[map_id] = candidate.resolve()
+                collection[map_id] = candidate.resolve()
     clouds: Dict[str, Path] = {}
+    filtered_clouds: Dict[str, Path] = {}
     for candidate in octo_directory.rglob("*_cloud.ply"):
         map_id = _map_id_from_export_path(candidate, octo_directory)
         if map_id:
-            previous = clouds.get(map_id)
+            collection = (
+                filtered_clouds
+                if _is_filtered_export_path(candidate, octo_directory)
+                else clouds
+            )
+            previous = collection.get(map_id)
             if previous is None or candidate.stat().st_mtime > previous.stat().st_mtime:
-                clouds[map_id] = candidate.resolve()
+                collection[map_id] = candidate.resolve()
     maps = []
-    for map_id in sorted(set(databases) | set(octomaps), key=lambda value: int(value[3:])):
+    map_ids = set(databases) | set(octomaps) | set(filtered_octomaps)
+    for map_id in sorted(map_ids, key=lambda value: int(value[3:])):
         database = databases.get(map_id)
         octomap = octomaps.get(map_id)
         cloud = clouds.get(map_id)
+        filtered_octomap = filtered_octomaps.get(map_id)
+        filtered_cloud = filtered_clouds.get(map_id)
         hloc_map = (hloc_directory / map_id).resolve()
         hloc_ready = (hloc_map / "metadata.yaml").is_file()
         maps.append({
@@ -145,6 +194,10 @@ def discover_navigation_maps(maps_root: Path) -> list:
             "database_path": str(database) if database else None,
             "octomap_path": str(octomap) if octomap else None,
             "cloud_path": str(cloud) if cloud else None,
+            "filtered_octomap_path": (
+                str(filtered_octomap) if filtered_octomap else None
+            ),
+            "filtered_cloud_path": str(filtered_cloud) if filtered_cloud else None,
             "hloc_map_directory": str(hloc_map) if hloc_ready else None,
             "convertible": database is not None,
             "loadable": database is not None and octomap is not None,
@@ -152,6 +205,17 @@ def discover_navigation_maps(maps_root: Path) -> list:
                 database is not None
                 and octomap is not None
                 and cloud is not None
+                and hloc_ready
+            ),
+            "filtered_loadable": (
+                database is not None
+                and filtered_octomap is not None
+                and filtered_cloud is not None
+            ),
+            "filtered_localizable": (
+                database is not None
+                and filtered_octomap is not None
+                and filtered_cloud is not None
                 and hloc_ready
             ),
         })
@@ -255,6 +319,42 @@ def parse_octomap_point_output(output: str) -> Tuple[float, list]:
             continue
         points.append((round(x, 3), round(y, 3), round(z, 3), round(size, 3)))
     return round(resolution, 4), points
+
+
+def parse_terrain_point_output(output: str) -> Tuple[float, list, list]:
+    """Parse traversable costs and segmented obstacles from the C++ tool."""
+    lines = output.splitlines()
+    if not lines:
+        raise ValueError("terrain converter returned no data")
+    header = lines[0].split()
+    if len(header) != 2 or header[0] != "resolution":
+        raise ValueError("invalid terrain converter header")
+    try:
+        resolution = float(header[1])
+    except ValueError as exc:
+        raise ValueError("invalid terrain resolution") from exc
+    if not math.isfinite(resolution) or resolution <= 0.0:
+        raise ValueError("invalid terrain resolution")
+    traversable = []
+    obstacles = []
+    for line in lines[1:]:
+        values = line.split()
+        if len(values) != 5 or values[0] not in {"traversable", "obstacle"}:
+            raise ValueError("invalid terrain point row")
+        try:
+            x, y, z, cost = (float(value) for value in values[1:])
+        except ValueError as exc:
+            raise ValueError("invalid terrain point row") from exc
+        if not all(math.isfinite(value) for value in (x, y, z, cost)):
+            continue
+        if values[0] == "traversable":
+            traversable.append((
+                round(x, 3), round(y, 3), round(z, 3),
+                round(max(0.0, min(1.0, cost)), 4),
+            ))
+        else:
+            obstacles.append((round(x, 3), round(y, 3), round(z, 3)))
+    return round(resolution, 4), traversable, obstacles
 
 
 def localization_covariance_ready(covariance: list, maximum: float) -> bool:
@@ -400,7 +500,7 @@ def _process_command(pid: int) -> str:
 
 def stop_existing_web_control(
     port: int,
-    timeout: float = 5.0,
+    timeout: float = 30.0,
 ) -> Tuple[bool, str]:
     """Stop only same-user luxi_web_control listeners on a requested port."""
     pids = _listening_process_ids(port)
@@ -760,6 +860,113 @@ class MappingProfile:
     launch_file: str
     launch_arguments: Tuple[str, ...]
     label: str
+
+
+class D1ControlManager:
+    """Run the validated D1 stand-up and lie-down procedures asynchronously."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        start_script: Path,
+        stop_script: Path,
+        bridge_pid_file: Path,
+        log_path: Path,
+    ) -> None:
+        self.enabled = enabled
+        self.start_script = start_script
+        self.stop_script = stop_script
+        self.bridge_pid_file = bridge_pid_file
+        self.log_path = log_path
+        self._lock = threading.Lock()
+        self._worker: Optional[threading.Thread] = None
+        self._state = "active" if self._bridge_running() else "inactive"
+        self._last_error = ""
+
+    def _bridge_running(self) -> bool:
+        try:
+            pid = int(self.bridge_pid_file.read_text(encoding="ascii").strip())
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def set_active(self, active: bool, force: bool = False) -> Tuple[bool, str]:
+        """Start a background transition unless already in the requested state."""
+        with self._lock:
+            if not self.enabled:
+                return False, "D1 control is disabled"
+            if self._worker is not None and self._worker.is_alive():
+                return False, "D1 control is already transitioning"
+            currently_active = self._bridge_running()
+            if active == currently_active and not force:
+                self._state = "active" if active else "inactive"
+                self._last_error = ""
+                return True, "D1 control is already in the requested state"
+            self._state = "enabling" if active else "disabling"
+            self._last_error = ""
+            self._worker = threading.Thread(
+                target=self._run_transition,
+                args=(active,),
+                daemon=True,
+            )
+            self._worker.start()
+        return True, "D1 control transition started"
+
+    def _run_transition(self, active: bool) -> None:
+        script = self.start_script if active else self.stop_script
+        try:
+            if not script.is_file():
+                raise FileNotFoundError(f"D1 control script is missing: {script}")
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(
+                    "\n===== D1 control "
+                    + ("enable" if active else "disable")
+                    + " requested by luxi_web_control =====\n"
+                )
+                result = subprocess.run(
+                    [str(script), "--yes"],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    timeout=30.0,
+                    check=False,
+                    env=sanitized_subprocess_environment(),
+                )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"D1 control script exited with code {result.returncode}"
+                )
+            if self._bridge_running() != active:
+                raise RuntimeError("D1 bridge state does not match the request")
+            state = "active" if active else "inactive"
+            error = ""
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            state = "failed"
+            error = str(exc)
+        with self._lock:
+            self._state = state
+            self._last_error = error
+
+    def status(self) -> Dict[str, Any]:
+        """Return the transition state and independently observed bridge state."""
+        with self._lock:
+            state = self._state
+            error = self._last_error
+            transitioning = self._worker is not None and self._worker.is_alive()
+        bridge_running = self._bridge_running()
+        if not self.enabled:
+            state = "disabled"
+        elif not transitioning and state not in ("failed",):
+            state = "active" if bridge_running else "inactive"
+        return {
+            "enabled": self.enabled,
+            "state": state,
+            "active": bridge_running,
+            "transitioning": transitioning,
+            "last_error": error,
+            "log_path": str(self.log_path),
+        }
 
 
 class MappingController:
@@ -1318,6 +1525,12 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 {"ok": True, "path": self.server.control_node.path_preview()},
             )
             return
+        if path == "/api/navigation/terrain":
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "terrain": self.server.control_node.terrain_preview()},
+            )
+            return
         if path == "/api/semantic/annotations":
             map_id = parse_qs(parsed_url.query).get("map_id", [""])[0]
             try:
@@ -1408,6 +1621,28 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 {"ok": True, "estop_active": active},
             )
             return
+        if path == "/api/robot/control":
+            active = payload.get("active")
+            if not isinstance(active, bool):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST,
+                    "active must be boolean",
+                )
+                return
+            node.stop_motion()
+            accepted, message = node.set_d1_control(active)
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.ACCEPTED,
+                {
+                    "ok": True,
+                    "message": message,
+                    "robot_control": node.d1_control_status(),
+                },
+            )
+            return
         if path == "/api/mapping/start":
             mode = payload.get("mode")
             if mode is not None and not isinstance(mode, str):
@@ -1451,7 +1686,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(map_id, str):
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "map_id must be a string")
                 return
-            loaded, message = node.load_navigation_map(map_id)
+            filtered = payload.get("filtered", False)
+            if not isinstance(filtered, bool):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST, "filtered must be boolean"
+                )
+                return
+            loaded, message = node.load_navigation_map(map_id, filtered)
             if not loaded:
                 self._send_error_json(HTTPStatus.CONFLICT, message)
                 return
@@ -1459,6 +1700,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 "ok": True, "message": message,
                 "maps": node.navigation_maps(),
                 "navigation": node.navigation_status(),
+                "map_variant": "filtered" if filtered else "original",
             })
             return
         if path == "/api/navigation/localize":
@@ -1500,6 +1742,25 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 "ok": True, "message": message, "goal": {"x": x, "y": y, "z": z},
             })
             return
+        if path == "/api/navigation/start":
+            started, message = node.start_navigation_motion()
+            if not started:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "ok": True,
+                "message": message,
+                "navigation": node.navigation_status(),
+            })
+            return
+        if path == "/api/navigation/halt":
+            node.halt_navigation_motion()
+            self._send_json(HTTPStatus.OK, {
+                "ok": True,
+                "message": "navigation motion stopped",
+                "navigation": node.navigation_status(),
+            })
+            return
         if path == "/api/semantic/save":
             try:
                 result = node.save_semantic_annotations(payload)
@@ -1530,6 +1791,23 @@ class WebControlNode(Node):
         self.declare_parameter("max_angular_z", 0.8)
         self.declare_parameter("enable_output", True)
         self.declare_parameter("web_root", "")
+        self.declare_parameter("enable_d1_control", False)
+        self.declare_parameter("d1_start_script", "")
+        self.declare_parameter("d1_stop_script", "")
+        self.declare_parameter("d1_bridge_pid_file", "")
+        self.declare_parameter("d1_control_log_path", "")
+        self.declare_parameter(
+            "d1_fsm_topic", "/d15041873/rl_controller/fsm"
+        )
+        self.declare_parameter(
+            "d1_controller_status_service",
+            "/d15041873/command/get_controller_status",
+        )
+        self.declare_parameter(
+            "d1_parameter_service",
+            "/d15041873/teleop_command/get_parameters",
+        )
+        self.declare_parameter("d1_feedback_timeout", 3.0)
         self.declare_parameter("enable_mapping_control", True)
         self.declare_parameter(
             "mapping_launch_package", "lunar_usb_rtabmap_bringup"
@@ -1578,6 +1856,17 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
+        self.declare_parameter("navigation_start_topic", "/navigation/start")
+        self.declare_parameter("navigation_stop_topic", "/navigation/stop")
+        self.declare_parameter("navigation_active_topic", "/navigation/active")
+        self.declare_parameter(
+            "navigation_follower_state_topic",
+            "/navigation/follower_state",
+        )
+        self.declare_parameter(
+            "navigation_emergency_stop_topic",
+            "/navigation/emergency_stop",
+        )
         self.declare_parameter(
             "navigation_localization_pose_topic", "/luxi_hloc/coarse_pose"
         )
@@ -1593,6 +1882,12 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_localization_max_variance", 0.5)
         self.declare_parameter("navigation_localization_timeout", 3.0)
         self.declare_parameter("max_voxel_points", 12000)
+        self.declare_parameter("max_terrain_points", 12000)
+        self.declare_parameter("navigation_robot_radius", 0.10)
+        self.declare_parameter("navigation_costmap_margin", 0.60)
+        self.declare_parameter("navigation_ground_normal_radius", 0.30)
+        self.declare_parameter("navigation_ground_max_slope_degrees", 35.0)
+        self.declare_parameter("navigation_obstacle_min_height", 0.15)
         self.declare_parameter("enable_preview", True)
         self.declare_parameter(
             "rgb_preview_topic",
@@ -1630,6 +1925,55 @@ class WebControlNode(Node):
         self.web_root = Path(web_root).resolve()
 
         workspace_root = package_share.parents[3]
+        d1_start_script = str(self.get_parameter("d1_start_script").value)
+        d1_stop_script = str(self.get_parameter("d1_stop_script").value)
+        d1_bridge_pid_file = str(
+            self.get_parameter("d1_bridge_pid_file").value
+        )
+        d1_control_log_path = str(
+            self.get_parameter("d1_control_log_path").value
+        )
+        self.d1_control = D1ControlManager(
+            enabled=bool(self.get_parameter("enable_d1_control").value),
+            start_script=Path(
+                d1_start_script
+                or workspace_root
+                / "project/slam_d1_bridge/scripts/start_slam_d1_bridge.sh"
+            ).resolve(),
+            stop_script=Path(
+                d1_stop_script
+                or workspace_root
+                / "project/slam_d1_bridge/scripts/stop_slam_d1_bridge.sh"
+            ).resolve(),
+            bridge_pid_file=Path(
+                d1_bridge_pid_file
+                or "/tmp/slam_d1_bridge_d15041873.pid"
+            ).resolve(),
+            log_path=Path(
+                d1_control_log_path
+                or workspace_root / "log/luxi_web_control_d1.log"
+            ).resolve(),
+        )
+        self.d1_fsm_topic = str(self.get_parameter("d1_fsm_topic").value)
+        self.d1_controller_status_service = str(
+            self.get_parameter("d1_controller_status_service").value
+        )
+        self.d1_parameter_service = str(
+            self.get_parameter("d1_parameter_service").value
+        )
+        self.d1_feedback_timeout = float(
+            self.get_parameter("d1_feedback_timeout").value
+        )
+        self._d1_status_lock = threading.Lock()
+        self._d1_fsm_state = ""
+        self._d1_fsm_received_at: Optional[float] = None
+        self._d1_controller_mode = ""
+        self._d1_controller_received_at: Optional[float] = None
+        self._d1_sdk_active: Optional[bool] = None
+        self._d1_sdk_received_at: Optional[float] = None
+        self._d1_feedback_error = ""
+        self._d1_controller_future = None
+        self._d1_parameter_future = None
         mapping_sensor_setup = str(
             self.get_parameter("mapping_sensor_setup").value
         )
@@ -1754,6 +2098,10 @@ class WebControlNode(Node):
             workspace_root / "install/luxi_voxel_navigation/lib/"
             "luxi_voxel_navigation/octomap_to_points"
         ).resolve()
+        self.terrain_points_executable = (
+            workspace_root / "install/luxi_3d_navigation/lib/"
+            "luxi_3d_navigation/terrain_map_to_points"
+        ).resolve()
         self.navigation_goal_topic = str(
             self.get_parameter("navigation_goal_topic").value
         )
@@ -1762,6 +2110,21 @@ class WebControlNode(Node):
         )
         self.navigation_path_topic = str(
             self.get_parameter("navigation_path_topic").value
+        )
+        self.navigation_start_topic = str(
+            self.get_parameter("navigation_start_topic").value
+        )
+        self.navigation_stop_topic = str(
+            self.get_parameter("navigation_stop_topic").value
+        )
+        self.navigation_active_topic = str(
+            self.get_parameter("navigation_active_topic").value
+        )
+        self.navigation_follower_state_topic = str(
+            self.get_parameter("navigation_follower_state_topic").value
+        )
+        self.navigation_emergency_stop_topic = str(
+            self.get_parameter("navigation_emergency_stop_topic").value
         )
         self.navigation_localization_pose_topic = str(
             self.get_parameter("navigation_localization_pose_topic").value
@@ -1782,6 +2145,24 @@ class WebControlNode(Node):
             self.get_parameter("navigation_localization_timeout").value
         )
         self.max_voxel_points = int(self.get_parameter("max_voxel_points").value)
+        self.max_terrain_points = int(
+            self.get_parameter("max_terrain_points").value
+        )
+        self.navigation_robot_radius = float(
+            self.get_parameter("navigation_robot_radius").value
+        )
+        self.navigation_costmap_margin = float(
+            self.get_parameter("navigation_costmap_margin").value
+        )
+        self.navigation_ground_normal_radius = float(
+            self.get_parameter("navigation_ground_normal_radius").value
+        )
+        self.navigation_ground_max_slope_degrees = float(
+            self.get_parameter("navigation_ground_max_slope_degrees").value
+        )
+        self.navigation_obstacle_min_height = float(
+            self.get_parameter("navigation_obstacle_min_height").value
+        )
         self.navigation = NavigationController(
             enabled=bool(self.get_parameter("enable_navigation_control").value),
             package=str(self.get_parameter("navigation_launch_package").value),
@@ -1846,7 +2227,14 @@ class WebControlNode(Node):
         self._voxel_resolution = 0.0
         self._voxel_received_at: Optional[float] = None
         self._navigation_voxel_map_id: Optional[str] = None
+        self._navigation_voxel_variant: Optional[str] = None
         self._navigation_voxel_error = ""
+        self._terrain_traversable_points = []
+        self._terrain_obstacle_points = []
+        self._terrain_resolution = 0.0
+        self._terrain_map_id: Optional[str] = None
+        self._terrain_variant: Optional[str] = None
+        self._terrain_error = ""
         self._localization_ready = False
         self._localization_variance: Optional[float] = None
         self._localization_received_at: Optional[float] = None
@@ -1858,10 +2246,13 @@ class WebControlNode(Node):
         self._refined_localization_status = ""
         self._navigation_cloud_points = []
         self._navigation_cloud_map_id: Optional[str] = None
+        self._navigation_cloud_variant: Optional[str] = None
         self._navigation_cloud_error = ""
         self._planned_path_points = []
         self._path_frame_id = "map"
         self._path_received_at: Optional[float] = None
+        self._navigation_active = False
+        self._navigation_follower_state = "stopped"
 
         qos = QoSProfile(
             depth=10,
@@ -1869,8 +2260,42 @@ class WebControlNode(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         self.publisher = self.create_publisher(Twist, self.cmd_vel_topic, qos)
+        self.d1_fsm_subscription = None
+        self.d1_controller_status_client = None
+        self.d1_parameter_client = None
+        self.d1_feedback_timer = None
+        if self.d1_control.enabled:
+            d1_feedback_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.d1_fsm_subscription = self.create_subscription(
+                String,
+                self.d1_fsm_topic,
+                self._on_d1_fsm,
+                d1_feedback_qos,
+            )
+            self.d1_controller_status_client = self.create_client(
+                Trigger, self.d1_controller_status_service
+            )
+            self.d1_parameter_client = self.create_client(
+                GetParameters, self.d1_parameter_service
+            )
+            self.d1_feedback_timer = self.create_timer(
+                1.0, self._poll_d1_feedback
+            )
         self.navigation_goal_publisher = self.create_publisher(
             PoseStamped, self.navigation_goal_topic, qos
+        )
+        self.navigation_start_publisher = self.create_publisher(
+            Bool, self.navigation_start_topic, qos
+        )
+        self.navigation_stop_publisher = self.create_publisher(
+            Bool, self.navigation_stop_topic, qos
+        )
+        self.navigation_emergency_stop_publisher = self.create_publisher(
+            Bool, self.navigation_emergency_stop_topic, qos
         )
         navigation_qos = QoSProfile(
             depth=1,
@@ -1887,6 +2312,18 @@ class WebControlNode(Node):
             NavigationPath,
             self.navigation_path_topic,
             self._on_navigation_path,
+            navigation_qos,
+        )
+        self.navigation_active_subscription = self.create_subscription(
+            Bool,
+            self.navigation_active_topic,
+            self._on_navigation_active,
+            navigation_qos,
+        )
+        self.navigation_follower_state_subscription = self.create_subscription(
+            String,
+            self.navigation_follower_state_topic,
+            self._on_navigation_follower_state,
             navigation_qos,
         )
         localization_qos = QoSProfile(
@@ -1979,6 +2416,8 @@ class WebControlNode(Node):
             raise ValueError("publish_rate must be greater than zero")
         if self.command_timeout <= 0.0:
             raise ValueError("command_timeout must be greater than zero")
+        if self.d1_feedback_timeout <= 0.0:
+            raise ValueError("d1_feedback_timeout must be greater than zero")
         if self.max_cloud_points != 0 and not 100 <= self.max_cloud_points <= 20000:
             raise ValueError(
                 "max_cloud_points must be zero or between 100 and 20000"
@@ -2032,6 +2471,75 @@ class WebControlNode(Node):
             command = self._command
         self._publish(command)
 
+    def _on_d1_fsm(self, message: String) -> None:
+        """Cache the robot controller's transient-local FSM feedback."""
+        with self._d1_status_lock:
+            self._d1_fsm_state = message.data.strip()
+            self._d1_fsm_received_at = time.monotonic()
+            self._d1_feedback_error = ""
+
+    def _poll_d1_feedback(self) -> None:
+        """Poll the vendor's morphology and SDK-mode services at 1 Hz."""
+        if (
+            self.d1_controller_status_client is not None
+            and self.d1_controller_status_client.service_is_ready()
+            and (
+                self._d1_controller_future is None
+                or self._d1_controller_future.done()
+            )
+        ):
+            future = self.d1_controller_status_client.call_async(
+                Trigger.Request()
+            )
+            self._d1_controller_future = future
+            future.add_done_callback(self._on_d1_controller_status)
+        if (
+            self.d1_parameter_client is not None
+            and self.d1_parameter_client.service_is_ready()
+            and (
+                self._d1_parameter_future is None
+                or self._d1_parameter_future.done()
+            )
+        ):
+            request = GetParameters.Request()
+            request.names = ["use_sdk"]
+            future = self.d1_parameter_client.call_async(request)
+            self._d1_parameter_future = future
+            future.add_done_callback(self._on_d1_parameters)
+
+    def _on_d1_controller_status(self, future) -> None:
+        try:
+            response = future.result()
+            if response is None or not response.success:
+                raise RuntimeError(
+                    response.message if response is not None
+                    else "empty controller status response"
+                )
+            with self._d1_status_lock:
+                self._d1_controller_mode = response.message.strip()
+                self._d1_controller_received_at = time.monotonic()
+                self._d1_feedback_error = ""
+        except Exception as exc:  # ROS futures surface transport errors here.
+            with self._d1_status_lock:
+                self._d1_feedback_error = str(exc)
+
+    def _on_d1_parameters(self, future) -> None:
+        try:
+            response = future.result()
+            if (
+                response is None
+                or len(response.values) != 1
+                or response.values[0].type != ParameterType.PARAMETER_BOOL
+            ):
+                raise RuntimeError("invalid D1 parameter response")
+            with self._d1_status_lock:
+                self._d1_sdk_active = bool(response.values[0].bool_value)
+                self._d1_sdk_received_at = time.monotonic()
+                self._d1_feedback_error = ""
+        except Exception as exc:  # ROS futures surface transport errors here.
+            with self._d1_status_lock:
+                self._d1_feedback_error = str(exc)
+
     def _on_rgb_preview(self, message: CompressedImage) -> None:
         """Keep the newest compressed camera image for HTTP preview requests."""
         image_format = message.format.lower()
@@ -2079,6 +2587,16 @@ class WebControlNode(Node):
             self._planned_path_points = points
             self._path_frame_id = message.header.frame_id or "map"
             self._path_received_at = time.monotonic()
+
+    def _on_navigation_active(self, message: Bool) -> None:
+        """Track whether the C++ path follower currently owns navigation."""
+        with self._navigation_lock:
+            self._navigation_active = bool(message.data)
+
+    def _on_navigation_follower_state(self, message: String) -> None:
+        """Expose the bounded C++ follower state to the browser."""
+        with self._navigation_lock:
+            self._navigation_follower_state = message.data[:80]
 
     def _on_navigation_localization_pose(
         self, message: PoseWithCovarianceStamped
@@ -2141,7 +2659,14 @@ class WebControlNode(Node):
             self._voxel_points = []
             self._voxel_received_at = None
             self._navigation_voxel_map_id = None
+            self._navigation_voxel_variant = None
             self._navigation_voxel_error = ""
+            self._terrain_traversable_points = []
+            self._terrain_obstacle_points = []
+            self._terrain_resolution = 0.0
+            self._terrain_map_id = None
+            self._terrain_variant = None
+            self._terrain_error = ""
             self._localization_ready = False
             self._localization_variance = None
             self._localization_received_at = None
@@ -2153,9 +2678,12 @@ class WebControlNode(Node):
             self._refined_localization_status = ""
             self._navigation_cloud_points = []
             self._navigation_cloud_map_id = None
+            self._navigation_cloud_variant = None
             self._navigation_cloud_error = ""
             self._planned_path_points = []
             self._path_received_at = None
+            self._navigation_active = False
+            self._navigation_follower_state = "stopped"
 
     def rgb_preview(self) -> Tuple[Optional[bytes], str]:
         """Return the latest compressed RGB frame and its MIME type."""
@@ -2174,6 +2702,7 @@ class WebControlNode(Node):
         with self._navigation_lock:
             return {
                 "map_id": self._navigation_voxel_map_id,
+                "variant": self._navigation_voxel_variant,
                 "frame_id": self._voxel_frame_id,
                 "resolution": self._voxel_resolution,
                 "point_count": len(self._voxel_points),
@@ -2183,7 +2712,9 @@ class WebControlNode(Node):
                 "points": list(self._voxel_points),
             }
 
-    def _load_navigation_voxels(self, map_id: str, octomap_path: str) -> str:
+    def _load_navigation_voxels(
+        self, map_id: str, octomap_path: str, variant: str = "original"
+    ) -> str:
         """Load saved occupied voxels immediately, without waiting for ROS launch."""
         command = [
             str(self.octomap_points_executable), str(octomap_path),
@@ -2205,6 +2736,7 @@ class WebControlNode(Node):
             with self._navigation_lock:
                 self._voxel_points = []
                 self._navigation_voxel_map_id = map_id
+                self._navigation_voxel_variant = variant
                 self._navigation_voxel_error = error
                 self._voxel_received_at = None
             return error
@@ -2214,6 +2746,7 @@ class WebControlNode(Node):
             self._voxel_resolution = resolution
             self._voxel_received_at = time.monotonic()
             self._navigation_voxel_map_id = map_id
+            self._navigation_voxel_variant = variant
             self._navigation_voxel_error = ""
         return ""
 
@@ -2222,16 +2755,93 @@ class WebControlNode(Node):
         with self._navigation_lock:
             return {
                 "map_id": self._navigation_cloud_map_id,
+                "variant": self._navigation_cloud_variant,
                 "point_count": len(self._navigation_cloud_points),
                 "error": self._navigation_cloud_error or None,
                 "points": list(self._navigation_cloud_points),
             }
 
-    def _load_navigation_cloud(self, map_id: str, cloud_path: Optional[str]) -> str:
+    def terrain_preview(self) -> Dict[str, Any]:
+        """Return terrain segmentation and edge costs for browser rendering."""
+        with self._navigation_lock:
+            return {
+                "map_id": self._terrain_map_id,
+                "variant": self._terrain_variant,
+                "resolution": self._terrain_resolution,
+                "robot_radius": self.navigation_robot_radius,
+                "costmap_margin": self.navigation_costmap_margin,
+                "ground_normal_radius": self.navigation_ground_normal_radius,
+                "ground_max_slope_degrees": (
+                    self.navigation_ground_max_slope_degrees
+                ),
+                "obstacle_min_height": self.navigation_obstacle_min_height,
+                "traversable_count": len(self._terrain_traversable_points),
+                "obstacle_count": len(self._terrain_obstacle_points),
+                "error": self._terrain_error or None,
+                "traversable_points": list(self._terrain_traversable_points),
+                "obstacle_points": list(self._terrain_obstacle_points),
+            }
+
+    def _load_navigation_terrain(
+        self, map_id: str, octomap_path: str, cloud_path: Optional[str],
+        variant: str = "original"
+    ) -> str:
+        """Build bounded terrain layers through the shared C++ implementation."""
+        if not cloud_path:
+            return "no colored point cloud is available for terrain fitting"
+        command = [
+            str(self.terrain_points_executable),
+            str(octomap_path),
+            str(self.max_terrain_points),
+            str(self.navigation_robot_radius),
+            str(self.navigation_costmap_margin),
+            str(cloud_path),
+            str(self.navigation_ground_normal_radius),
+            str(self.navigation_ground_max_slope_degrees),
+            str(self.navigation_obstacle_min_height),
+        ]
+        environment = sanitized_subprocess_environment(
+            (str(self.navigation.octomap_library_path),)
+        )
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+                env=environment,
+            )
+            resolution, traversable, obstacles = parse_terrain_point_output(
+                result.stdout
+            )
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError,
+                ValueError) as exc:
+            error = str(exc)
+            with self._navigation_lock:
+                self._terrain_traversable_points = []
+                self._terrain_obstacle_points = []
+                self._terrain_map_id = map_id
+                self._terrain_variant = variant
+                self._terrain_error = error
+            return error
+        with self._navigation_lock:
+            self._terrain_traversable_points = traversable
+            self._terrain_obstacle_points = obstacles
+            self._terrain_resolution = resolution
+            self._terrain_map_id = map_id
+            self._terrain_variant = variant
+            self._terrain_error = ""
+        return ""
+
+    def _load_navigation_cloud(
+        self, map_id: str, cloud_path: Optional[str], variant: str = "original"
+    ) -> str:
         if not cloud_path:
             with self._navigation_lock:
                 self._navigation_cloud_points = []
                 self._navigation_cloud_map_id = map_id
+                self._navigation_cloud_variant = variant
                 self._navigation_cloud_error = "no exported colored PLY is available"
             return self._navigation_cloud_error
         try:
@@ -2241,11 +2851,13 @@ class WebControlNode(Node):
             with self._navigation_lock:
                 self._navigation_cloud_points = []
                 self._navigation_cloud_map_id = map_id
+                self._navigation_cloud_variant = variant
                 self._navigation_cloud_error = str(exc)
             return self._navigation_cloud_error
         with self._navigation_lock:
             self._navigation_cloud_points = points
             self._navigation_cloud_map_id = map_id
+            self._navigation_cloud_variant = variant
             self._navigation_cloud_error = ""
         return ""
 
@@ -2289,6 +2901,13 @@ class WebControlNode(Node):
 
     def accept_command(self, command: VelocityCommand) -> Tuple[bool, str]:
         """Store and immediately publish a validated browser command."""
+        d1_status = self.d1_control_status()
+        if (
+            d1_status["enabled"]
+            and not d1_status["control_ready"]
+            and command.moving
+        ):
+            return False, "D1 is not standing with SDK control and bridge ready"
         with self._lock:
             if self._estop_active and command.moving:
                 return False, "emergency stop is active"
@@ -2316,6 +2935,116 @@ class WebControlNode(Node):
             self._last_command_time = None
             self._timed_out = False
         self._publish(VelocityCommand())
+        message = Bool()
+        message.data = active
+        self.navigation_emergency_stop_publisher.publish(message)
+        if active:
+            self.halt_navigation_motion()
+
+    def set_d1_control(self, active: bool) -> Tuple[bool, str]:
+        """Start a safe asynchronous D1 enable or disable transition."""
+        self.stop_motion()
+        if not active:
+            self.halt_navigation_motion()
+        status = self.d1_control_status()
+        if active and not status["feedback_online"]:
+            return False, "D1 state feedback is offline; refusing to stand up"
+        if active and status["control_ready"]:
+            return True, "D1 is already standing and ready"
+        if not active and status["posture"] == "prone" and not status["bridge_active"]:
+            return True, "D1 is already prone with control released"
+        force = not active and not status["bridge_active"]
+        return self.d1_control.set_active(active, force=force)
+
+    def d1_control_status(self) -> Dict[str, Any]:
+        """Combine actual D1 FSM/SDK feedback with the local bridge state."""
+        managed = self.d1_control.status()
+        now = time.monotonic()
+        with self._d1_status_lock:
+            fsm_state = self._d1_fsm_state
+            fsm_received_at = self._d1_fsm_received_at
+            controller_mode = self._d1_controller_mode
+            controller_received_at = self._d1_controller_received_at
+            sdk_active = self._d1_sdk_active
+            sdk_received_at = self._d1_sdk_received_at
+            feedback_error = self._d1_feedback_error
+
+        def age(received_at: Optional[float]) -> Optional[float]:
+            return None if received_at is None else round(now - received_at, 2)
+
+        fsm_age = age(fsm_received_at)
+        controller_age = age(controller_received_at)
+        sdk_age = age(sdk_received_at)
+        fsm_online = bool(
+            managed["enabled"]
+            and fsm_state
+            and fsm_age is not None
+            and self.count_publishers(self.d1_fsm_topic) > 0
+        )
+        controller_online = bool(
+            managed["enabled"]
+            and controller_age is not None
+            and controller_age <= self.d1_feedback_timeout
+        )
+        sdk_online = bool(
+            managed["enabled"]
+            and sdk_age is not None
+            and sdk_age <= self.d1_feedback_timeout
+        )
+        feedback_online = fsm_online and controller_online and sdk_online
+        posture = classify_d1_posture(fsm_state) if fsm_online else "offline"
+        bridge_active = bool(managed["active"])
+        transitioning = bool(managed["transitioning"])
+        control_ready = bool(
+            feedback_online
+            and posture == "standing"
+            and sdk_online
+            and sdk_active is True
+            and bridge_active
+            and not transitioning
+        )
+        switch_active = bool(
+            bridge_active or posture in {"standing", "standing_up"}
+        )
+
+        if not managed["enabled"]:
+            state = "disabled"
+        elif transitioning:
+            state = managed["state"]
+        elif managed["state"] == "failed":
+            state = "failed"
+        elif not feedback_online:
+            state = "offline"
+        elif control_ready:
+            state = "active"
+        elif posture == "prone" and not bridge_active and sdk_active is False:
+            state = "inactive"
+        elif posture == "standing_up":
+            state = "standing_up"
+        elif posture == "standing":
+            state = "standing_uncontrolled"
+        else:
+            state = "unknown"
+
+        return {
+            **managed,
+            "state": state,
+            "active": switch_active,
+            "bridge_active": bridge_active,
+            "control_ready": control_ready,
+            "feedback_online": feedback_online,
+            "fsm_online": fsm_online,
+            "posture": posture,
+            "fsm_state": fsm_state or None,
+            "fsm_age_seconds": fsm_age,
+            "controller_online": controller_online,
+            "controller_mode": controller_mode or None,
+            "controller_age_seconds": controller_age,
+            "sdk_online": sdk_online,
+            "sdk_active": sdk_active,
+            "sdk_age_seconds": sdk_age,
+            "feedback_error": feedback_error or None,
+        }
 
     def start_mapping(self, mode: Optional[str] = None) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
@@ -2376,7 +3105,9 @@ class WebControlNode(Node):
             map_id, Path(record["octomap_path"]), annotation
         )
 
-    def _convert_navigation_map(self, record: Dict[str, Any]) -> Tuple[bool, str]:
+    def _convert_navigation_map(
+        self, record: Dict[str, Any], filtered: bool = False
+    ) -> Tuple[bool, str]:
         """Export a saved RTAB-Map database using the project's trusted tool."""
         map_id = record["id"]
         database_path = record.get("database_path")
@@ -2388,7 +3119,8 @@ class WebControlNode(Node):
             return False, "stop mapping and save the database before converting it"
 
         output_directory = (
-            self.maps_root / "octo_maps" / f"{map_id}_octomap"
+            self.maps_root / "octo_maps"
+            / f"{map_id}_{'filtered_' if filtered else ''}octomap"
         ).resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
         library_path = str(self.navigation.octomap_library_path)
@@ -2396,12 +3128,12 @@ class WebControlNode(Node):
             (library_path,)
         )
         try:
+            command = [str(self.map_export_executable)]
+            if filtered:
+                command.append("--filter")
+            command.extend([str(Path(database_path)), str(output_directory)])
             result = subprocess.run(
-                [
-                    str(self.map_export_executable),
-                    str(Path(database_path)),
-                    str(output_directory),
-                ],
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -2422,15 +3154,20 @@ class WebControlNode(Node):
             (item for item in self.navigation_maps() if item["id"] == map_id),
             None,
         )
-        if not converted or not converted["loadable"] or not converted["cloud_path"]:
+        loadable_key = "filtered_loadable" if filtered else "loadable"
+        cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+        if not converted or not converted[loadable_key] or not converted[cloud_key]:
             output = (result.stdout or "").strip()
             return False, (
                 f"map {map_id} export did not produce both colored PLY and .bt files"
                 + (f": {output[-800:]}" if output else "")
             )
-        return True, f"map {map_id} converted for browser display"
+        variant = "filtered" if filtered else "original"
+        return True, f"map {map_id} {variant} layers converted for browser display"
 
-    def load_navigation_map(self, map_id: str) -> Tuple[bool, str]:
+    def load_navigation_map(
+        self, map_id: str, filtered: bool = False
+    ) -> Tuple[bool, str]:
         """Build missing display/HLoc assets, then load browser map layers."""
         if not MAP_IDENTIFIER.fullmatch(map_id):
             return False, "map_id must use the mapNNN format"
@@ -2455,8 +3192,11 @@ class WebControlNode(Node):
             # calling the offline export tool, which correctly refuses live maps.
             self.navigation.stop()
             operation_messages = []
-            if not record["loadable"] or not record["cloud_path"]:
-                converted, message = self._convert_navigation_map(record)
+            loadable_key = "filtered_loadable" if filtered else "loadable"
+            cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+            octomap_key = "filtered_octomap_path" if filtered else "octomap_path"
+            if not record[loadable_key] or not record[cloud_key]:
+                converted, message = self._convert_navigation_map(record, filtered)
                 if not converted:
                     return False, message
                 operation_messages.append(message)
@@ -2464,7 +3204,7 @@ class WebControlNode(Node):
                     (item for item in self.navigation_maps() if item["id"] == map_id),
                     None,
                 )
-                if record is None or not record["loadable"]:
+                if record is None or not record[loadable_key]:
                     return False, f"map {map_id} is still missing its exported .bt file"
 
             hloc_warning = ""
@@ -2494,17 +3234,26 @@ class WebControlNode(Node):
                     hloc_warning = "HLoc: " + message
 
             self._clear_navigation_preview()
-            cloud_error = self._load_navigation_cloud(map_id, record.get("cloud_path"))
-            voxel_error = self._load_navigation_voxels(map_id, record["octomap_path"])
+            variant = "filtered" if filtered else "original"
+            cloud_error = self._load_navigation_cloud(
+                map_id, record.get(cloud_key), variant
+            )
+            voxel_error = self._load_navigation_voxels(
+                map_id, record[octomap_key], variant
+            )
+            terrain_error = self._load_navigation_terrain(
+                map_id, record[octomap_key], record.get(cloud_key), variant
+            )
             preview_errors = []
             for label, error in (("colored cloud", cloud_error),
-                                 ("OctoMap voxels", voxel_error)):
+                                 ("OctoMap voxels", voxel_error),
+                                 ("terrain costmap", terrain_error)):
                 if error:
                     preview_errors.append(label + ": " + error)
             details = operation_messages + preview_errors
             if hloc_warning:
                 details.append(hloc_warning)
-            return True, f"map {map_id} layers loaded" + (
+            return True, f"map {map_id} {variant} layers loaded" + (
                 "; " + "; ".join(details) if details else "")
         finally:
             self._navigation_map_operation_lock.release()
@@ -2519,12 +3268,19 @@ class WebControlNode(Node):
         )
         if record is None:
             return False, f"map {map_id} does not exist under {self.maps_root}"
-        required = (
-            "database_path",
-            "octomap_path",
-            "cloud_path",
-            "hloc_map_directory",
-        )
+        with self._navigation_lock:
+            loaded_variant = self._navigation_cloud_variant
+            loaded_layers_match = (
+                self._navigation_cloud_map_id == map_id
+                and self._navigation_voxel_map_id == map_id
+                and self._navigation_voxel_variant == loaded_variant
+            )
+        if not loaded_layers_match or loaded_variant not in ("original", "filtered"):
+            return False, f"load map {map_id} before starting localization"
+        filtered = loaded_variant == "filtered"
+        octomap_key = "filtered_octomap_path" if filtered else "octomap_path"
+        cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+        required = ("database_path", octomap_key, cloud_key, "hloc_map_directory")
         if any(not record.get(name) for name in required):
             return False, (
                 f"map {map_id} needs display layers and a built HLoc index first"
@@ -2533,6 +3289,8 @@ class WebControlNode(Node):
             if (
                 self._navigation_cloud_map_id != map_id
                 or self._navigation_voxel_map_id != map_id
+                or self._navigation_cloud_variant != loaded_variant
+                or self._navigation_voxel_variant != loaded_variant
             ):
                 return False, f"load map {map_id} before starting localization"
             self._localization_ready = False
@@ -2547,14 +3305,15 @@ class WebControlNode(Node):
         return self.navigation.start(
             map_id,
             Path(record["database_path"]),
-            Path(record["octomap_path"]),
-            Path(record["cloud_path"]),
+            Path(record[octomap_key]),
+            Path(record[cloud_key]),
             Path(record["hloc_map_directory"]),
             self.semantic_annotation_store.output_root / map_id / "annotations.json",
         )
 
     def stop_navigation(self) -> Tuple[bool, str]:
         """Stop localization/planning while retaining the currently loaded map."""
+        self.halt_navigation_motion()
         stopped, message = self.navigation.stop()
         if stopped:
             with self._navigation_lock:
@@ -2567,7 +3326,40 @@ class WebControlNode(Node):
                 self._refined_localization_received_at = None
                 self._refined_localization_fitness = None
                 self._refined_localization_status = ""
+                self._navigation_active = False
+                self._navigation_follower_state = "stopped"
         return stopped, message
+
+    def start_navigation_motion(self) -> Tuple[bool, str]:
+        """Start low-speed path following only after localization and planning."""
+        navigation = self.navigation_status()
+        with self._lock:
+            estop_active = self._estop_active
+        if estop_active:
+            return False, "release emergency stop before starting navigation"
+        if navigation["state"] != "running":
+            return False, "start map localization before navigation"
+        if not navigation["localization_ready"]:
+            return False, "wait for fresh HLoc and ICP localization"
+        if not navigation["path_ready"]:
+            return False, "select a reachable goal and wait for a valid path"
+        if navigation["active"]:
+            return False, "navigation is already active"
+        message = Bool()
+        message.data = True
+        self.navigation_start_publisher.publish(message)
+        with self._navigation_lock:
+            self._navigation_follower_state = "starting"
+        return True, "navigation start command sent"
+
+    def halt_navigation_motion(self) -> None:
+        """Stop path following while leaving localization and the path loaded."""
+        message = Bool()
+        message.data = True
+        self.navigation_stop_publisher.publish(message)
+        with self._navigation_lock:
+            self._navigation_active = False
+            self._navigation_follower_state = "stopped"
 
     def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
         """Publish a map-frame goal only after HLoc and ICP localization is ready."""
@@ -2576,6 +3368,7 @@ class WebControlNode(Node):
             return False, "load a map and wait for navigation to start first"
         if not navigation["localization_ready"]:
             return False, "wait for HLoc and ICP localization before selecting a goal"
+        self.halt_navigation_motion()
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         with self._navigation_lock:
@@ -2593,6 +3386,11 @@ class WebControlNode(Node):
         """Return selected-map navigation state without large preview payloads."""
         status = self.navigation.status()
         with self._navigation_lock:
+            status["map_variant"] = (
+                self._navigation_cloud_variant
+                if self._navigation_cloud_variant == self._navigation_voxel_variant
+                else None
+            )
             coarse_age = None if self._localization_received_at is None else round(
                 time.monotonic() - self._localization_received_at, 2)
             refined_age = (
@@ -2611,6 +3409,14 @@ class WebControlNode(Node):
                 and refined_age <= self.navigation_localization_timeout
             )
             running = status["state"] == "running"
+            status["path_ready"] = running and bool(
+                self._planned_path_points
+            )
+            status["path_point_count"] = len(self._planned_path_points)
+            status["active"] = running and self._navigation_active
+            status["follower_state"] = (
+                self._navigation_follower_state if running else "stopped"
+            )
             status["coarse_localization_ready"] = running and coarse_ready
             status["coarse_consistency_ready"] = (
                 running and self._coarse_gate_ready
@@ -2679,6 +3485,7 @@ class WebControlNode(Node):
             "command": command.as_dict(),
             "limits": self.limits.as_dict(),
             "subscriber_count": self.publisher.get_subscription_count(),
+            "robot_control": self.d1_control_status(),
             "mapping": self.mapping_status(),
             "navigation": self.navigation_status(),
             "preview": self.preview_status(),
@@ -2707,6 +3514,9 @@ def main(args: Optional[list] = None) -> None:
     """Run the web control ROS node."""
     # Keep ROS alive during Ctrl+C so close() can publish zero first.
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    # ros2 launch children inherit SIGINT as ignored. Restore Python's handler
+    # so automatic port takeover can run close() instead of waiting forever.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     node: Optional[WebControlNode] = None
     try:
         node = WebControlNode()

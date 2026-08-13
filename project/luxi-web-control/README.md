@@ -55,29 +55,21 @@ Luxi 网页、建图和相机链路，防止重复占用 8080 端口、D435i USB
 重复发布 TF/话题。
 
 ```bash
-bash -lc '
-set +e
-curl -fsS -X POST -H "Content-Type: application/json" -d "{}" \
-  http://127.0.0.1:8080/api/mapping/stop >/dev/null 2>&1
-curl -fsS -X POST -H "Content-Type: application/json" -d "{}" \
-  http://127.0.0.1:8080/api/navigation/stop >/dev/null 2>&1
-sleep 2
-current_uid=$(id -u)
-process_pattern="[/](luxi_web_control/lib/luxi_web_control/web_control_node|luxi_visual_frontend/lib/luxi_visual_frontend/visual_odometry_node|rtabmap_slam/rtabmap|luxi_adapter/lib/luxi_adapter/sensor_adapter_node|realsense2_camera/lib/realsense2_camera/realsense2_camera_node|imu_filter_madgwick/lib/imu_filter_madgwick/imu_filter_madgwick_node|yesense_std_ros2/lib/yesense_std_ros2/yesense_node_publisher|stereo_depth/lib/stereo_depth/stereo_depth_node|hikrobot_camera_driver/lib/hikrobot_camera_driver/stereo_node)|__node:=[l]uxi_sensor_container|[s]ensor_bringup\.launch\.py|[d]435i\.launch\.py|[s]tereo_camera_bringup\.launch\.py|[l]ekiwi_web_control\.launch\.py|[w]eb_control\.launch\.py"
-pkill -INT -u "$current_uid" -f "$process_pattern"
-sleep 3
-if pgrep -u "$current_uid" -af "$process_pattern"; then
-  echo "仍有 Luxi 旧进程，请先检查上面列出的 PID。"
-  exit 1
-fi
-echo "Luxi 旧进程已清理，可以启动硬件和网页。"
-'
+cd /home/nvidia/Desktop/lunar_slam
+bash scripts/stop_luxi_system.sh
 ```
 
-上面整个代码块是一条命令，可直接完整复制执行。如果命令列出残留 PID 并返回失败，
-不要再次启动；先确认残留 PID 属于本工作区并正常结束。
+脚本先请求网页停止运动、建图和导航，等待数据库保存，然后只向当前用户启动且命令行
+匹配本工程的进程发送 `SIGINT`。若进程继承了“忽略 SIGINT”的状态，5 秒后会升级为
+`SIGTERM`。最后只有在相关 PID 全部退出且 8080 已释放时才报告成功；若列出残留 PID，
+不要再次启动，应先检查这些 PID。
 不要直接使用不带匹配条件的 `killall python3`、`killall component_container_mt`，它们会
 误停桌面或其他 ROS 任务。
+
+切换 HIK/D435i 或重新启动整套系统时必须执行上述完整清理。若只是重复执行网页 launch，
+新网页节点会先让旧网页正常停止建图和导航、释放 8080，并联动结束旧的速度仲裁节点；
+最多等待 30 秒供 RTAB-Map 保存数据库。不要在旧实例未退出时改用 8081 绕过检查，否则
+两套网页和速度仲裁节点会同时发布 ROS 话题。
 
 ### 终端一：选择并启动硬件
 
@@ -87,8 +79,8 @@ HIK 双目 + H30 IMU（当前推荐测试命令）：
 cd /home/nvidia/Desktop/lunar_-slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-export ROS_DOMAIN_ID=0
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 ```
 
@@ -102,8 +94,8 @@ D435i 使用完全相同的入口，只替换一个参数：
 cd /home/nvidia/Desktop/lunar_-slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-export ROS_DOMAIN_ID=0
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 ```
 
@@ -149,16 +141,15 @@ ros2 launch luxi_web_control web_control.launch.py \
 关闭顺序：网页“停止建图” → 等待状态停止 → 终端二 `Ctrl-C` → 终端一 `Ctrl-C`。
 网页只管理自己启动的算法进程，不会停止硬件 profile。
 
-若提示 `Address already in use`，先访问现有 8080 服务；也可改用
-`http_port:=8081`。若提示 `Package 'luxi_web_control' not found`，重新执行
+若提示 `previous web controller did not release port 8080`，说明旧版本或异常进程没有
+完成退出；执行本页“启动前：结束旧进程”的完整清理命令，确认没有残留 PID 后仍使用
+8080 重新启动。不要改用 8081 掩盖重复进程。若提示
+`Package 'luxi_web_control' not found`，重新执行
 `source /home/nvidia/Desktop/lunar_-slam/install/setup.bash`。
 
 网页 launch 默认先执行一次 `ros2 daemon stop`，再启动网页节点。该操作只清理
-`ros2cli` 的图发现缓存，不会停止相机、建图或底盘 ROS 节点；下一次执行 `ros2 node
-list` 等命令时会自动创建干净的 daemon。如果日志曾连续刷出
-`ParticipantEntitiesInfo`、`Fast CDR exception` 或 `Bad alloc`，这是旧 Fast DDS
-daemon/共享内存发现状态损坏，本预检会自动恢复。只有在确认 daemon 状态健康且不希望
-重启它时，才显式传入 `reset_ros_daemon:=false`。
+`ros2cli` 的图发现缓存，不会停止相机、建图或底盘 ROS 节点；仅在确认 daemon
+健康且不希望重启时传入 `reset_ros_daemon:=false`。
 
 ## 与不同小车连接
 
@@ -175,39 +166,73 @@ ros2 run luxi_web_control web_control_node --ros-args \
   -r /cmd_vel:=/robot/cmd_vel
 ```
 
-### 已连接的 LeKiwi 小车（192.168.123.49）
+### 已连接的 D1 机器人（192.168.123.49）
 
-树莓派的 `lekiwi-base.service` 已设为开机自启，直接由
-`/lekiwi_base_node` 订阅 `/cmd_vel`。该底盘使用 Fast DDS、Domain 0 和子网发现；
-推荐在控制电脑上一键启动：
+控制目标使用 Fast DDS、Domain 42 和子网发现。网页与导航先输出标准
+`geometry_msgs/msg/Twist`，再由 `slam_d1_bridge` 转换为厂家接口
+`/d15041873/command/user_command`。启动网页和速度仲裁：
 
 ```bash
 ros2 launch luxi_web_control lekiwi_web_control.launch.py
 ```
 
+该启动文件名因兼容已有部署仍保留 `lekiwi`，当前配置面向 D1：它通过 C++ 适配器把
+网页 `/d1/cmd_vel_standard` 与导航 `/navigation/cmd_vel` 仲裁后转发到 `/cmd_vel`。
+导航只有在路径跟随器发布 `/navigation/active=true` 时才能接管；非零手动指令、急停、停止、
+定位失效或导航指令超过 0.3 秒未更新都会取消接管并输出零速度。厂家 SDK 定义
+`angular.z > 0` 为左转，因此 D1 链路不再反转 `angular.z`。
+
+页面中的“机器人控制”开关管理 D1 权限和姿态流程。开启完成前以及关闭过程中，服务端
+拒绝所有非零运动命令；关闭会先停车，再让机器人趴下并释放 SDK。出于安全考虑，刷新
+页面不会自动站立，切换时浏览器会再次要求现场确认。
+
+实车导航操作顺序为：加载地图、自动定位、选择目标点、等待“规划完成”，再点击“出发”。
+“停止行驶”保留定位和当前路径；“停止定位”和软件急停都会先停止行驶。当前速度上限为
+0.10 m/s，控制链只使用保存的静态地图，尚未实现实时局部障碍物融合和动态绕行。
+
 它会自动设置所需 DDS 环境变量。若使用通用 launch，则应在本机设置：
 
 ```bash
-export ROS_DOMAIN_ID=0
+export ROS_DOMAIN_ID=42
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
-unset ROS_LOCALHOST_ONLY
+export ROS_LOCALHOST_ONLY=0
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 ```
 
-确认发现底盘订阅者：
+D1 端 `d1_bringup.service` 必须使用相同设置。建议在它加载的 ROS 环境中设置：
+
+```ini
+Environment=ROS_DOMAIN_ID=42
+Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+Environment=ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+Environment=ROS_LOCALHOST_ONLY=0
+Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+```
+
+修改环境后仅在机器人安全趴下且有人持急停时重启 D1 bringup。控制机地址为
+`192.168.123.51/24`，机器人地址为
+`192.168.123.49/24`；两端应允许 Fast DDS 的 UDP 发现和数据流量。
+
+`/cmd_vel` 是本工程内部接口，D1 不直接订阅它。必须另启本工程中的厂家桥；完整构建、
+SDK 模式、站立、停止和测试步骤见
+[`docs/d1_robot_control.md`](../../docs/d1_robot_control.md)。
+
+确认厂家命令订阅者：
 
 ```bash
-ros2 topic info /cmd_vel --verbose
+ros2 topic info /d15041873/command/user_command --verbose
 ```
 
-在树莓派上可以同时观察网页节点发出的指令：
+启动桥之前应为 `Publisher count: 0`、`Subscription count: 1`；`http_ros_gateway` 与
+`slam_d1_bridge` 不能同时发布。可以观察本工程送入桥的标准速度：
 
 ```bash
 ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 ```
 
-网页顶部“ROS 订阅者”应大于 0。为 0 时网页服务仍可访问，但速度消息还没有接入
-底盘，需要检查两端的 ROS domain、RMW、网卡防火墙和话题名。
+桥启动后，网页顶部 `/cmd_vel` 的“ROS 订阅者”应大于 0。为 0 时网页服务仍可访问，
+但命令没有进入 D1 桥，需要检查桥进程和 ROS 环境。
 
 ## 网页控制 RTAB-Map 建图（当前 NX USB 双目配置）
 
@@ -254,12 +279,23 @@ RTAB-Map，不要再单独启动相机 profile。算法、性能与复测方法�
 网页还会列出 `maps/rtab_maps/mapNNN.db`。选择地图后，网页会自动调用
 `tools/export_rtabmap_octomap.sh` 补齐彩色 PLY 和 `.bt`，并在缺失时调用
 `luxi_hloc` 导出器和 CUDA 模型构建器生成 HLoc 索引，随后立即加载显示；这一步不会
-启动相机定位。保存地图的彩色 PLY 默认读取并显示全部有效顶点，不使用实时预览的
+启动相机定位。“生成过滤地图”会保留原始导出，生成独立的过滤 PLY 和 `.bt`；完成后
+同一按键用于在原始版和过滤版之间切换。自动定位和路径规划始终使用网页当前显示的
+版本，避免混用点云与 OctoMap。保存地图的彩色 PLY 默认读取并显示全部有效顶点，不使用实时预览的
 1800 点抽样上限。地图画布支持拖动旋转视角和滚轮缩放。默认视角遵循 ROS REP-103：
 `+X`（机器人前方）朝屏幕上方，`+Y`（机器人左方）朝屏幕左侧，画布左下角同时显示
 方向标记。首次打开时默认选择编号最大的可用地图；定时刷新列表不会改变用户已经选择
 的地图。水平拖动采用轨道视角语义：向右拖动时观察视角向右环绕，地图内容向左旋转；
 该手势只改变观察角度，不修改地图坐标。
+
+地图加载时还会调用 `luxi_3d_navigation/terrain_map_to_points`，使用与规划器相同的
+C++ `TerrainModel` 生成网页地形层。它读取与当前地图版本匹配的 PLY，按 0.05 m
+体素降采样并以 0.30 m
+局部邻域法向和高度连续性拆分平面，只保留最大的连续主地面；只有高于附近地面至少 0.15 m、且确有点云
+支撑的栅格才显示为红色障碍，稀疏或没有观测的区域保持 unknown。青绿色表示可通行
+表面，黄色到红色表示逐渐靠近地图边界或不可通行区域；原始 OctoMap 体素可用独立
+开关显示。当前按机器人半径 0.10 m 做碰撞检查，并在 0.60 m 边缘带内生成代价。
+A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低代价的中间路线。
 
 ### 已有地图的离线语义标注
 
@@ -341,6 +377,12 @@ RTAB-Map，不要再单独启动相机 profile。算法、性能与复测方法�
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
 | `max_cloud_points` | `0` | 单次浏览器点云预览的最大抽样点数；`0` 表示不抽样 |
 | `max_saved_cloud_points` | `30000` | 浏览器 Canvas 的保存点云显示上限；只限制预览，不改变 PLY、OctoMap 或定位精度 |
+| `max_terrain_points` | `12000` | 每类 C++ 地形图层的浏览器抽样上限，不改变规划地图 |
+| `navigation_robot_radius` | `0.10` | 网页离线地形预览使用的机器人半径（m），应与规划器一致 |
+| `navigation_costmap_margin` | `0.60` | 网页离线地形预览的边缘代价宽度（m） |
+| `navigation_ground_normal_radius` | `0.30` | PLY 局部法向拟合邻域半径（m） |
+| `navigation_ground_max_slope_degrees` | `35.0` | 地面分割允许的法向倾角（度），不是底盘最终爬坡角 |
+| `navigation_obstacle_min_height` | `0.15` | 点云高于附近地面后进入障碍层的最小高度（m） |
 | `semantic_annotation_timeout` | `15.0` | 单次标注检查或保存的超时秒数 |
 | `semantic_maps_root` | `maps/semantic_maps` | 独立语义标注输出目录 |
 | `navigation_localization_pose_topic` | `/luxi_hloc/coarse_pose` | HLoc 粗定位输入 |
@@ -358,9 +400,11 @@ RTAB-Map，不要再单独启动相机 profile。算法、性能与复测方法�
 - `POST /api/estop`：`{"active": true}` 锁定，`false` 解除。
 - `POST /api/mapping/start`：启动受网页管理的 RTAB-Map 建图进程。
 - `POST /api/mapping/stop`：停止受网页管理的 RTAB-Map 建图进程并保存数据库。
-- `POST /api/navigation/load_map`：转换并加载地图显示图层，不启动定位。
+- `POST /api/navigation/load_map`：传入 `map_id` 以及布尔字段 `filtered`，转换并加载
+  原始或过滤地图显示图层，不启动定位。
 - `POST /api/navigation/localize`：以所选地图启动 GPU HLoc 粗定位和 ICP 精定位。
 - `POST /api/navigation/stop`：停止定位、规划相关进程。
+- `GET /api/navigation/terrain`：当前地图的可通行点、归一化边缘代价和障碍物点。
 - `GET /api/preview/rgb`：最新压缩 RGB 图像，未收到相机数据时返回 404。
 - `GET /api/preview/cloud`：抽样后的 XYZRGB 点云 JSON，用于网页 Canvas 预览。
 - `GET /api/semantic/annotations?map_id=mapNNN`：检查 OctoMap 并加载独立标注。

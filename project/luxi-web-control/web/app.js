@@ -12,6 +12,9 @@ const linearInput = $("#linearSpeed");
 const angularInput = $("#angularSpeed");
 const linearValue = $("#linearValue");
 const angularValue = $("#angularValue");
+const robotControlToggle = $("#robotControlToggle");
+const robotControlState = $("#robotControlState");
+const robotControlDetail = $("#robotControlDetail");
 const estopButton = $("#estopButton");
 const releaseButton = $("#releaseButton");
 const toast = $("#toast");
@@ -34,12 +37,18 @@ const navigationState = $("#navigationState");
 const navigationDetail = $("#navigationDetail");
 const navigationMapSelect = $("#navigationMapSelect");
 const navigationLoadButton = $("#navigationLoadButton");
+const navigationFilterButton = $("#navigationFilterButton");
 const navigationLocateButton = $("#navigationLocateButton");
 const navigationStopButton = $("#navigationStopButton");
 const navigationGoalButton = $("#navigationGoalButton");
+const navigationStartButton = $("#navigationStartButton");
+const navigationHaltButton = $("#navigationHaltButton");
 const voxelMapCanvas = $("#voxelMapCanvas");
 const voxelMapHint = $("#voxelMapHint");
 const navigationShowCloud = $("#navigationShowCloud");
+const navigationShowTraversable = $("#navigationShowTraversable");
+const navigationShowCostmap = $("#navigationShowCostmap");
+const navigationShowObstacles = $("#navigationShowObstacles");
 const navigationShowVoxels = $("#navigationShowVoxels");
 const navigationShowSemantics = $("#navigationShowSemantics");
 const navigationShowMappingOrigin = $("#navigationShowMappingOrigin");
@@ -61,6 +70,8 @@ let online = false;
 let toastTimer = null;
 let commandRequestPending = false;
 let mappingModeInitialized = false;
+let robotControlReady = true;
+let robotControlRequestPending = false;
 let joystickPointerId = null;
 let joystickX = 0;
 let joystickY = 0;
@@ -76,6 +87,7 @@ let voxelViewport = null;
 let selectedGoal = null;
 let navigationCloud = {};
 let navigationVoxels = {};
+let navigationTerrain = {};
 let navigationPath = {};
 let navigationView = null;
 let navigationDrag = null;
@@ -83,6 +95,7 @@ let navigationPinch = null;
 const navigationPointers = new Map();
 let navigationGoalMode = false;
 let navigationMapRecords = new Map();
+let navigationUseFiltered = false;
 let navigationPose = null;
 let semanticAnnotation = null;
 let semanticDraftPit = [];
@@ -154,7 +167,7 @@ function controlActive() {
 }
 
 async function sendCommand() {
-  if (!controlActive() || estopActive || commandRequestPending) return;
+  if (!controlActive() || !robotControlReady || estopActive || commandRequestPending) return;
   commandRequestPending = true;
   const command = currentCommand();
   updateReadout(command);
@@ -180,6 +193,10 @@ function stop(options = {}) {
 function beginAction(action) {
   if (estopActive) {
     showToast("请先解除急停");
+    return;
+  }
+  if (!robotControlReady) {
+    showToast("请先开启机器人控制");
     return;
   }
   joystickPointerId = null;
@@ -243,6 +260,10 @@ joystickPad.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   if (estopActive) {
     showToast("请先解除急停");
+    return;
+  }
+  if (!robotControlReady) {
+    showToast("请先开启机器人控制");
     return;
   }
   held.clear();
@@ -334,6 +355,83 @@ function setEstopUi(active) {
 estopButton.addEventListener("click", activateEstop);
 releaseButton.addEventListener("click", releaseEstop);
 
+const robotControlStateNames = {
+  disabled: "不可用",
+  inactive: "已趴下",
+  enabling: "正在站立",
+  active: "站立且可控制",
+  disabling: "正在趴下",
+  standing_up: "正在站立",
+  standing_uncontrolled: "站立但控制未就绪",
+  offline: "状态离线",
+  unknown: "未知姿态",
+  failed: "切换失败",
+};
+
+const robotPostureNames = {
+  prone: "趴下",
+  standing_up: "站立转换中",
+  standing: "非趴下",
+  offline: "离线",
+  unknown: "未知",
+};
+
+function updateRobotControl(control) {
+  if (!control) return;
+  const managed = Boolean(control.enabled);
+  const active = Boolean(control.active);
+  const transitioning = Boolean(control.transitioning);
+  robotControlReady = !managed || Boolean(control.control_ready);
+  robotControlToggle.checked = managed && active;
+  robotControlToggle.disabled = !managed || transitioning || robotControlRequestPending
+    || (!control.feedback_online && !active);
+  robotControlState.textContent = robotControlStateNames[control.state] || control.state;
+  robotControlState.className = `mapping-state ${control.state}`;
+  const posture = robotPostureNames[control.posture] || control.posture || "未知";
+  const fsm = control.fsm_state || "无反馈";
+  const sdk = control.sdk_active === true ? "SDK 已开启"
+    : control.sdk_active === false ? "SDK 已关闭" : "SDK 未知";
+  const bridge = control.bridge_active ? "桥已连接" : "桥未连接";
+  const morphology = control.controller_mode ? ` · 形态 ${control.controller_mode}` : "";
+  const actualState = `姿态 ${posture} · FSM ${fsm} · ${sdk} · ${bridge}${morphology}`;
+  if (!managed) {
+    robotControlDetail.textContent = "当前启动配置未启用 D1 控制";
+  } else if (control.last_error || control.feedback_error) {
+    robotControlDetail.textContent = `${actualState} · ${control.last_error || control.feedback_error}`;
+  } else if (transitioning) {
+    const action = control.state === "enabling"
+      ? "正在启用 SDK 并让机器人站立"
+      : "正在清零、趴下并释放 SDK";
+    robotControlDetail.textContent = `${action} · ${actualState}`;
+  } else {
+    robotControlDetail.textContent = actualState;
+  }
+}
+
+async function toggleRobotControl() {
+  const requested = robotControlToggle.checked;
+  robotControlToggle.checked = !requested;
+  const prompt = requested
+    ? "机器人将站立并开放网页运动控制。确认场地已清空且有人持急停？"
+    : "机器人将立即停车、趴下并释放 SDK 控制。确认继续？";
+  if (!window.confirm(prompt)) return;
+  stop();
+  robotControlRequestPending = true;
+  robotControlToggle.disabled = true;
+  try {
+    const result = await api("/api/robot/control", {active: requested});
+    updateRobotControl(result.robot_control);
+    showToast(requested ? "正在开启机器人控制" : "正在结束机器人控制");
+  } catch (error) {
+    showToast(`机器人控制切换失败：${error.message}`);
+  } finally {
+    robotControlRequestPending = false;
+    refreshStatus();
+  }
+}
+
+robotControlToggle.addEventListener("change", toggleRobotControl);
+
 function setConnection(isOnline) {
   online = isOnline;
   connection.classList.toggle("online", isOnline);
@@ -375,19 +473,46 @@ const navigationStateNames = {
 
 function updateNavigation(navigation) {
   if (!navigation) return;
-  const name = navigationStateNames[navigation.state] || navigation.state;
+  if (!navigationLoadPending && ["original", "filtered"].includes(navigation.map_variant)) {
+    navigationUseFiltered = navigation.map_variant === "filtered";
+  }
+  let name = navigationStateNames[navigation.state] || navigation.state;
+  if (navigation.follower_state === "localization_degraded") {
+    name = "定位恢复中（已停车）";
+  } else if (navigation.active) {
+    name = "行驶中";
+  } else if (navigation.follower_state === "goal_reached") {
+    name = "已到达";
+  } else if (navigation.path_ready) {
+    name = "规划完成";
+  }
   navigationState.textContent = name;
   navigationState.className = `preview-state ${navigation.state === "running" ? "live" : ""}`;
   const selectedMap = navigationMapRecords.get(navigationMapSelect.value);
+  const selectedVariant = navigationUseFiltered ? "filtered" : "original";
+  const selectedLocalizable = navigationUseFiltered
+    ? selectedMap?.filtered_localizable
+    : selectedMap?.localizable;
   navigationLoadButton.disabled = navigationLoadPending || !selectedMap?.convertible;
+  navigationFilterButton.disabled = navigationLoadPending || !selectedMap?.convertible;
+  navigationFilterButton.textContent = navigationUseFiltered
+    ? "查看原始地图"
+    : selectedMap?.filtered_loadable ? "查看过滤地图" : "生成过滤地图";
+  navigationFilterButton.classList.toggle("active", navigationUseFiltered);
   navigationMapSelect.disabled = navigationLoadPending;
   navigationLocateButton.disabled =
     navigationLoadPending || navigationLocatePending ||
     navigation.state === "running" ||
-    !selectedMap?.localizable ||
-    navigationCloud.map_id !== selectedMap?.id;
+    !selectedLocalizable ||
+    navigationCloud.map_id !== selectedMap?.id ||
+    navigationCloud.variant !== selectedVariant ||
+    navigationVoxels.variant !== selectedVariant;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
   navigationGoalButton.disabled = !navigation.localization_ready;
+  navigationStartButton.disabled =
+    !navigation.localization_ready || !navigation.path_ready ||
+    navigation.active || estopActive;
+  navigationHaltButton.disabled = !navigation.active;
   navigationPose = navigation.pose || null;
   if (navigationLoadPending) {
     drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
@@ -400,11 +525,21 @@ function updateNavigation(navigation) {
     const poseText = pose
       ? ` x=${pose.x.toFixed(2)}m，y=${pose.y.toFixed(2)}m，yaw=${pose.yaw_degrees.toFixed(1)}°`
       : "";
-    if (navigation.localization_stage === "localized") {
+    if (navigation.follower_state === "localization_degraded") {
+      navigationDetail.textContent =
+        `${mapName} 定位暂时失效，车辆保持零速度；可信定位恢复后将自动继续。`;
+    } else if (navigation.localization_stage === "localized") {
       const fitness = navigation.localization_fitness == null
         ? "" : `，fitness=${Number(navigation.localization_fitness).toFixed(3)}`;
+      const motionText = navigation.active
+        ? "正在沿规划路径行驶。"
+        : navigation.follower_state === "goal_reached"
+          ? "已到达目标点。"
+          : navigation.path_ready
+            ? `规划完成，共 ${navigation.path_point_count} 个路径点；可点击“出发”。`
+            : "请选择目标点并等待路径规划完成。";
       navigationDetail.textContent =
-        `${mapName} 已完成 HLoc 粗定位和 ICP 精定位：${poseText}${fitness}。`;
+        `${mapName} 已完成 HLoc 粗定位和 ICP 精定位：${poseText}${fitness}。${motionText}`;
     } else if (navigation.localization_stage === "refining") {
       navigationDetail.textContent =
         `${mapName} 已找到 HLoc 全局候选，正在进行 ICP 精配准：${poseText}。`;
@@ -437,6 +572,7 @@ function updateNavigationMaps(maps) {
       : item.convertible
         ? `${item.id}（选择后自动转换）`
         : `${item.id}（缺少 .db，无法转换）`;
+    if (item.filtered_loadable) option.textContent += "；可切换过滤版";
     navigationMapSelect.append(option);
   }
   if (!maps.length) {
@@ -540,10 +676,19 @@ function drawNavigationMap(voxels, path, cloud) {
   const points = Array.isArray(voxels.points) ? voxels.points : [];
   const pathPoints = Array.isArray(path.points) ? path.points : [];
   const cloudPoints = Array.isArray(cloud.points) ? cloud.points : [];
-  const mapHasGeometry = Boolean(cloudPoints.length || points.length || pathPoints.length);
+  const traversablePoints = Array.isArray(navigationTerrain.traversable_points)
+    ? navigationTerrain.traversable_points : [];
+  const obstaclePoints = Array.isArray(navigationTerrain.obstacle_points)
+    ? navigationTerrain.obstacle_points : [];
+  const mapHasGeometry = Boolean(
+    cloudPoints.length || points.length || traversablePoints.length ||
+    obstaclePoints.length || pathPoints.length
+  );
   const mappingOrigin = [0, 0, 0];
   const all = cloudPoints.concat(
     points,
+    traversablePoints,
+    obstaclePoints,
     pathPoints,
     selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : [],
     mapHasGeometry && navigationShowMappingOrigin.checked ? [mappingOrigin] : [],
@@ -631,8 +776,38 @@ function drawNavigationMap(voxels, path, cloud) {
       context.fillRect(x - 1, y - 1, 2, 2);
     }
   }
+  const terrainResolution = Number(navigationTerrain.resolution) || 0.05;
+  if (navigationShowObstacles.checked) {
+    context.fillStyle = "rgba(216, 59, 72, .78)";
+    for (const point of obstaclePoints) {
+      const [x, y] = toCanvas(point);
+      const size = Math.max(2, Math.min(15, terrainResolution * scale));
+      context.fillRect(x - size * 0.5, y - size * 0.5, size, size);
+    }
+  }
+  if (navigationShowTraversable.checked) {
+    context.fillStyle = "rgba(101, 227, 181, .38)";
+    for (const point of traversablePoints) {
+      const [x, y] = toCanvas(point);
+      const size = Math.max(1.5, Math.min(14, terrainResolution * scale));
+      context.fillRect(x - size * 0.5, y - size * 0.5, size, size);
+    }
+  }
+  if (navigationShowCostmap.checked) {
+    for (const point of traversablePoints) {
+      const cost = Math.max(0, Math.min(1, Number(point[3]) || 0));
+      if (cost <= 0) continue;
+      const red = 255;
+      const green = Math.round(209 - 71 * cost);
+      const blue = Math.round(102 - 41 * cost);
+      context.fillStyle = `rgba(${red}, ${green}, ${blue}, ${0.35 + 0.55 * cost})`;
+      const size = Math.max(2, Math.min(15, terrainResolution * scale));
+      const [x, y] = toCanvas(point);
+      context.fillRect(x - size * 0.5, y - size * 0.5, size, size);
+    }
+  }
   if (navigationShowVoxels.checked) {
-    context.fillStyle = "rgba(101, 227, 181, .54)";
+    context.fillStyle = "rgba(190, 203, 218, .42)";
     const ground = semanticGround();
     const filterHighVoxels = (
       semanticAnnotation && ["rock", "wall"].includes(semanticTool.value)
@@ -642,7 +817,7 @@ function drawNavigationMap(voxels, path, cloud) {
         continue;
       }
       const [x, y] = toCanvas(point);
-      const voxelSize = Math.max(1, Math.min(14, (Number(point[3]) || voxels.resolution || 0.1) * scale));
+      const voxelSize = Math.max(1, Math.min(14, (Number(point[3]) || voxels.resolution || 0.05) * scale));
       context.fillRect(x - voxelSize * 0.5, y - voxelSize * 0.5, voxelSize, voxelSize);
     }
   }
@@ -773,17 +948,26 @@ async function refreshVoxelMap() {
   if (voxelRefreshPending) return;
   voxelRefreshPending = true;
   try {
-    const [voxelResponse, pathResponse] = await Promise.all([
+    const [voxelResponse, pathResponse, terrainResponse] = await Promise.all([
       fetch("/api/navigation/voxels", {cache: "no-store"}),
       fetch("/api/navigation/path", {cache: "no-store"}),
+      fetch("/api/navigation/terrain", {cache: "no-store"}),
     ]);
-    if (!voxelResponse.ok || !pathResponse.ok) throw new Error("preview unavailable");
+    if (!voxelResponse.ok || !pathResponse.ok || !terrainResponse.ok) {
+      throw new Error("preview unavailable");
+    }
     navigationVoxels = (await voxelResponse.json()).voxels || {};
     navigationPath = (await pathResponse.json()).path || {};
+    navigationTerrain = (await terrainResponse.json()).terrain || {};
     drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
     voxelMapHint.classList.toggle(
       "hidden",
-      Boolean((navigationVoxels.points || []).length || (navigationCloud.points || []).length),
+      Boolean(
+        (navigationVoxels.points || []).length ||
+        (navigationCloud.points || []).length ||
+        (navigationTerrain.traversable_points || []).length ||
+        (navigationTerrain.obstacle_points || []).length
+      ),
     );
   } catch (_error) {
     voxelMapHint.classList.remove("hidden");
@@ -807,7 +991,12 @@ async function refreshNavigationCloud() {
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
   voxelMapHint.classList.toggle(
     "hidden",
-    Boolean((navigationVoxels.points || []).length || (navigationCloud.points || []).length),
+    Boolean(
+      (navigationVoxels.points || []).length ||
+      (navigationCloud.points || []).length ||
+      (navigationTerrain.traversable_points || []).length ||
+      (navigationTerrain.obstacle_points || []).length
+    ),
   );
 }
 
@@ -845,26 +1034,35 @@ async function refreshSemanticAnnotations(mapId) {
 async function loadNavigationMap(automatic = false) {
   const mapId = navigationMapSelect.value;
   const map = navigationMapRecords.get(mapId);
-  if (!map?.convertible || navigationLoadPending) return;
+  if (!map?.convertible || navigationLoadPending) return false;
+  const filtered = navigationUseFiltered;
+  const variantLabel = filtered ? "过滤地图" : "原始地图";
+  const variantLoadable = filtered ? map.filtered_loadable : map.loadable;
+  const variantLocalizable = filtered ? map.filtered_localizable : map.localizable;
   let navigationResult = {enabled: true, state: "stopped"};
   navigationLoadPending = true;
   updateNavigation(navigationResult);
   selectedGoal = null;
   navigationCloud = {};
   navigationVoxels = {};
+  navigationTerrain = {};
   navigationPath = {};
   navigationView = null;
   navigationPose = null;
   clearSemanticAnnotations();
   setNavigationGoalMode(false);
   drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
-  if (!map.loadable) {
-    navigationDetail.textContent = `${mapId} 正在转换为网页显示格式，请稍候…`;
-  } else if (!map.localizable) {
+  if (!variantLoadable) {
+    navigationDetail.textContent = `${mapId} 正在生成${variantLabel}，请稍候…`;
+  } else if (!variantLocalizable) {
     navigationDetail.textContent = `${mapId} 正在使用 GPU 构建 HLoc 索引，请稍候…`;
   }
   try {
-    const result = await api("/api/navigation/load_map", {map_id: mapId});
+    const result = await api("/api/navigation/load_map", {
+      map_id: mapId,
+      filtered: navigationUseFiltered,
+    });
+    navigationUseFiltered = result.map_variant === "filtered";
     updateNavigationMaps(Array.isArray(result.maps) ? result.maps : []);
     navigationResult = result.navigation || navigationResult;
     updateNavigation(navigationResult);
@@ -875,14 +1073,28 @@ async function loadNavigationMap(automatic = false) {
     ]);
     const loadedMap = navigationMapRecords.get(mapId);
     showToast(
-      `${mapId}${map.loadable ? " 已加载" : " 已转换并加载"}；` +
-      (loadedMap?.localizable ? "可点击“自动定位”" : "尚未构建 HLoc 索引")
+      `${mapId} ${variantLoadable ? "已加载" : "已生成并加载"}${variantLabel}；` +
+      ((navigationUseFiltered ? loadedMap?.filtered_localizable : loadedMap?.localizable)
+        ? "可点击“自动定位”" : "尚未构建 HLoc 索引")
     );
+    return true;
   } catch (error) {
     showToast(`${automatic ? "地图转换或加载" : "地图加载"}失败：${error.message}`);
+    return false;
   } finally {
     navigationLoadPending = false;
     updateNavigation(navigationResult);
+  }
+}
+
+async function toggleNavigationFilter() {
+  if (navigationLoadPending) return;
+  const previous = navigationUseFiltered;
+  navigationUseFiltered = !previous;
+  updateNavigation({enabled: true, state: "stopped"});
+  if (!await loadNavigationMap(false)) {
+    navigationUseFiltered = previous;
+    updateNavigation({enabled: true, state: "stopped"});
   }
 }
 
@@ -914,13 +1126,40 @@ async function stopNavigation() {
   }
 }
 
+async function startNavigationMotion() {
+  navigationStartButton.disabled = true;
+  try {
+    const result = await api("/api/navigation/start");
+    updateNavigation(result.navigation);
+    showToast("导航已出发；手动操作或停止按钮会立即取消导航");
+  } catch (error) {
+    showToast(`出发失败：${error.message}`);
+  }
+}
+
+async function haltNavigationMotion() {
+  navigationHaltButton.disabled = true;
+  try {
+    const result = await api("/api/navigation/halt");
+    updateNavigation(result.navigation);
+    showToast("导航行驶已停止，定位和规划路径仍保留");
+  } catch (error) {
+    showToast(`停止行驶失败：${error.message}`);
+  }
+}
+
 navigationLoadButton.addEventListener("click", loadNavigationMap);
+navigationFilterButton.addEventListener("click", toggleNavigationFilter);
 navigationLocateButton.addEventListener("click", startNavigationLocalization);
 navigationStopButton.addEventListener("click", stopNavigation);
+navigationStartButton.addEventListener("click", startNavigationMotion);
+navigationHaltButton.addEventListener("click", haltNavigationMotion);
 navigationMapSelect.addEventListener("change", () => {
+  navigationUseFiltered = false;
   selectedGoal = null;
   navigationCloud = {};
   navigationVoxels = {};
+  navigationTerrain = {};
   navigationPath = {};
   navigationView = null;
   navigationPose = null;
@@ -931,6 +1170,9 @@ navigationMapSelect.addEventListener("change", () => {
   loadNavigationMap(true);
 });
 navigationShowCloud.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowTraversable.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowCostmap.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
+navigationShowObstacles.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowVoxels.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowSemantics.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowMappingOrigin.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
@@ -1046,7 +1288,7 @@ function applySemanticBrush(event) {
         x: Number(point[0]),
         y: Number(point[1]),
         z: Number(point[2]),
-        size: Number(point[3]) || Number(navigationVoxels.resolution) || 0.1,
+        size: Number(point[3]) || Number(navigationVoxels.resolution) || 0.05,
       });
     }
   }
@@ -1445,6 +1687,7 @@ async function refreshStatus() {
     subscribers.textContent = String(data.subscriber_count);
     state.textContent = stateNames[data.state] || data.state;
     setEstopUi(Boolean(data.estop_active));
+    updateRobotControl(data.robot_control);
     updateMapping(data.mapping);
     updateNavigation(data.navigation);
     updatePreviewStatus(data.preview);

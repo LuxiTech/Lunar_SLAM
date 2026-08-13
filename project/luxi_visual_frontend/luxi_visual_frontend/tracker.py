@@ -61,10 +61,12 @@ class TrackerConfig:
     keyframe_min_inlier_ratio: float = 0.40
     maximum_frame_translation: float = 1.0
     maximum_frame_rotation: float = math.radians(60.0)
+    maximum_frame_angular_rate: float = math.radians(90.0)
     maximum_consecutive_tracking_failures: int = 3
     minimum_depth_consistency_matches: int = 20
     maximum_depth_consistency_error: float = 0.08
     maximum_imu_rotation_error: float = math.radians(12.0)
+    maximum_imu_gravity_error: float = math.radians(10.0)
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,7 @@ class TrackingResult:
     keyframe_updated: bool
     pose_source: str = "NONE"
     imu_rotation_error: float | None = None
+    imu_gravity_error: float | None = None
     depth_consistency_inliers: int = 0
 
 
@@ -111,14 +114,18 @@ class VisualOdometryTracker:
         self._keyframe: _Keyframe | None = None
         self._last_pose: np.ndarray | None = None
         self._consecutive_tracking_failures = 0
-        self._odom_from_world_rotation: np.ndarray | None = None
+        self._last_accepted_pose: np.ndarray | None = None
+        self._last_accepted_world_from_camera_rotation: np.ndarray | None = None
+        self._last_accepted_stamp: float | None = None
 
     def reset(self) -> None:
         """Discard tracking state while retaining loaded neural models."""
         self._keyframe = None
         self._last_pose = None
         self._consecutive_tracking_failures = 0
-        self._odom_from_world_rotation = None
+        self._last_accepted_pose = None
+        self._last_accepted_world_from_camera_rotation = None
+        self._last_accepted_stamp = None
 
     @staticmethod
     def _rotation_matrix(rotation: np.ndarray | None) -> np.ndarray | None:
@@ -136,14 +143,54 @@ class VisualOdometryTracker:
         return matrix
 
     def _predicted_odom_rotation(
-        self, world_from_camera_rotation: np.ndarray | None
+        self,
+        world_from_camera_rotation: np.ndarray | None,
+        stamp: float,
     ) -> np.ndarray | None:
         if (
             world_from_camera_rotation is None
-            or self._odom_from_world_rotation is None
+            or self._last_accepted_pose is None
+            or self._last_accepted_world_from_camera_rotation is None
+            or self._last_accepted_stamp is None
         ):
             return None
-        return self._odom_from_world_rotation @ world_from_camera_rotation
+        elapsed = stamp - self._last_accepted_stamp
+        if elapsed <= 0.0:
+            return None
+        current_from_last_accepted = (
+            world_from_camera_rotation.T
+            @ self._last_accepted_world_from_camera_rotation
+        )
+        if (
+            rotation_angle(current_from_last_accepted) / elapsed
+            > self.config.maximum_frame_angular_rate
+        ):
+            return None
+        return (
+            self._last_accepted_pose[:3, :3]
+            @ current_from_last_accepted.T
+        )
+
+    @staticmethod
+    def _gravity_rotation_error(
+        current_from_reference: np.ndarray,
+        reference_world_from_camera: np.ndarray,
+        current_world_from_camera: np.ndarray,
+    ) -> float:
+        """Compare visual and IMU gravity without treating IMU yaw as truth."""
+        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        reference_up = reference_world_from_camera.T @ world_up
+        visual_current_up = current_from_reference @ reference_up
+        imu_current_up = current_world_from_camera.T @ world_up
+        cosine = float(
+            np.clip(
+                np.dot(visual_current_up, imu_current_up)
+                / (np.linalg.norm(visual_current_up) * np.linalg.norm(imu_current_up)),
+                -1.0,
+                1.0,
+            )
+        )
+        return math.acos(cosine)
 
     def _maybe_reseed_keyframe(
         self,
@@ -162,9 +209,13 @@ class VisualOdometryTracker:
             or self._last_pose is None
         ):
             return False
-        pose = self._last_pose.copy()
+        pose = (
+            self._last_accepted_pose.copy()
+            if self._last_accepted_pose is not None
+            else self._last_pose.copy()
+        )
         predicted_rotation = self._predicted_odom_rotation(
-            world_from_camera_rotation
+            world_from_camera_rotation, stamp
         )
         if predicted_rotation is not None:
             pose[:3, :3] = predicted_rotation
@@ -199,6 +250,7 @@ class VisualOdometryTracker:
         keyframe_updated: bool = False,
         pose_source: str = "NONE",
         imu_rotation_error: float | None = None,
+        imu_gravity_error: float | None = None,
         depth_consistency_inliers: int = 0,
     ) -> TrackingResult:
         return TrackingResult(
@@ -219,6 +271,7 @@ class VisualOdometryTracker:
             keyframe_updated,
             pose_source,
             imu_rotation_error,
+            imu_gravity_error,
             depth_consistency_inliers,
         )
 
@@ -261,12 +314,15 @@ class VisualOdometryTracker:
             pose = np.eye(4) if initial_odom_from_camera is None else np.asarray(
                 initial_odom_from_camera, dtype=np.float64
             ).copy()
-            if imu_rotation is not None:
-                self._odom_from_world_rotation = pose[:3, :3] @ imu_rotation.T
             self._keyframe = _Keyframe(
                 features, points3d, valid_depth, pose, stamp, imu_rotation
             )
             self._last_pose = pose
+            self._last_accepted_pose = pose.copy()
+            self._last_accepted_world_from_camera_rotation = (
+                None if imu_rotation is None else imu_rotation.copy()
+            )
+            self._last_accepted_stamp = stamp
             self._consecutive_tracking_failures = 0
             return self._result(
                 started,
@@ -328,6 +384,7 @@ class VisualOdometryTracker:
             )
         pose_source = "PNP"
         imu_rotation_error = 0.0
+        imu_gravity_error = 0.0
         depth_consistency_inliers = 0
         if self.config.use_depth_translation_refinement:
             pnp_match_indices = pose.inlier_indices
@@ -376,6 +433,11 @@ class VisualOdometryTracker:
                 @ imu_current_from_reference
             )
             imu_rotation_error = rotation_angle(rotation_delta)
+            imu_gravity_error = self._gravity_rotation_error(
+                pose.current_from_reference[:3, :3],
+                reference.world_from_camera_rotation,
+                imu_rotation,
+            )
             pnp_match_indices = pose.inlier_indices
             pnp_current_indices = current_indices[pnp_match_indices]
             current_depth_mask = valid_depth[pnp_current_indices]
@@ -399,6 +461,10 @@ class VisualOdometryTracker:
                     fixed_rotation_pose is not None
                     and fixed_rotation_pose.reprojection_rmse
                     <= self.config.maximum_reprojection_rmse
+                    and imu_rotation_error
+                    <= self.config.maximum_imu_rotation_error
+                    and imu_gravity_error
+                    <= self.config.maximum_imu_gravity_error
                 ):
                     remapped_inliers = pnp_match_indices[
                         consistent_match_positions[fixed_rotation_pose.inlier_indices]
@@ -419,12 +485,11 @@ class VisualOdometryTracker:
         )
         rejection = ""
         if (
-            pose_source == "PNP"
-            and imu_rotation is not None
+            imu_rotation is not None
             and reference.world_from_camera_rotation is not None
-            and imu_rotation_error > self.config.maximum_imu_rotation_error
+            and imu_gravity_error > self.config.maximum_imu_gravity_error
         ):
-            rejection = "IMU_ROTATION_MISMATCH"
+            rejection = "IMU_GRAVITY_MISMATCH"
         elif inlier_count < self.config.minimum_inliers:
             rejection = "INLIERS_LOW"
         elif inlier_ratio < self.config.minimum_inlier_ratio:
@@ -436,12 +501,24 @@ class VisualOdometryTracker:
 
         reference_from_current = invert_transform(pose.current_from_reference)
         odom_from_camera = reference.odom_from_camera @ reference_from_current
-        if self._last_pose is not None:
-            last_from_current = invert_transform(self._last_pose) @ odom_from_camera
+        if self._last_accepted_pose is not None:
+            last_from_current = (
+                invert_transform(self._last_accepted_pose) @ odom_from_camera
+            )
             if np.linalg.norm(last_from_current[:3, 3]) > self.config.maximum_frame_translation:
                 rejection = "TRANSLATION_JUMP"
-            elif rotation_angle(last_from_current) > self.config.maximum_frame_rotation:
-                rejection = "ROTATION_JUMP"
+            else:
+                elapsed = (
+                    0.0
+                    if self._last_accepted_stamp is None
+                    else max(0.0, stamp - self._last_accepted_stamp)
+                )
+                maximum_rotation = max(
+                    self.config.maximum_frame_rotation,
+                    self.config.maximum_frame_angular_rate * elapsed,
+                )
+                if rotation_angle(last_from_current) > maximum_rotation:
+                    rejection = "ROTATION_JUMP"
         if rejection:
             reseeded = self._maybe_reseed_keyframe(
                 features, points3d, valid_depth, stamp, imu_rotation
@@ -454,6 +531,7 @@ class VisualOdometryTracker:
                 keyframe_updated=reseeded,
                 pose_source=pose_source,
                 imu_rotation_error=imu_rotation_error,
+                imu_gravity_error=imu_gravity_error,
                 depth_consistency_inliers=depth_consistency_inliers,
             )
 
@@ -475,6 +553,11 @@ class VisualOdometryTracker:
                 imu_rotation,
             )
         self._last_pose = odom_from_camera
+        self._last_accepted_pose = odom_from_camera.copy()
+        self._last_accepted_world_from_camera_rotation = (
+            None if imu_rotation is None else imu_rotation.copy()
+        )
+        self._last_accepted_stamp = stamp
         self._consecutive_tracking_failures = 0
         return self._result(
             started,
@@ -493,5 +576,6 @@ class VisualOdometryTracker:
             keyframe_updated,
             pose_source,
             imu_rotation_error,
+            imu_gravity_error,
             depth_consistency_inliers,
         )

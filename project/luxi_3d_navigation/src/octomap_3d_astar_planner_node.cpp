@@ -11,12 +11,15 @@
 #include "octomap_msgs/conversions.h"
 #include "octomap_msgs/msg/octomap.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/color_rgba.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include "visualization_msgs/msg/marker.hpp"
 
 #include "luxi_3d_navigation/terrain_model.hpp"
+#include "luxi_3d_navigation/terrain_cloud_classifier.hpp"
 
 class Octomap3DAstarPlannerNode : public rclcpp::Node
 {
@@ -30,8 +33,10 @@ public:
     declare_parameter<std::string>("map_frame", "map");
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<std::string>("semantic_path", "");
-    declare_parameter<double>("robot_radius", 0.18);
+    declare_parameter<std::string>("cloud_path", "");
+    declare_parameter<double>("robot_radius", 0.10);
     declare_parameter<double>("robot_height", 0.35);
+    declare_parameter<double>("body_reference_height", 0.35);
     declare_parameter<double>("max_step_height", 0.15);
     declare_parameter<double>("max_slope_degrees", 50.0);
     declare_parameter<int>("ground_support_xy_radius_cells", 1);
@@ -39,6 +44,17 @@ public:
     declare_parameter<bool>("strict_direct_ground_support", false);
     declare_parameter<int>("snap_search_radius_cells", 12);
     declare_parameter<int>("max_iterations", 500000);
+    declare_parameter<double>("costmap_margin", 0.60);
+    declare_parameter<double>("costmap_weight", 8.0);
+    declare_parameter<double>("ground_normal_radius", 0.30);
+    declare_parameter<double>("ground_max_slope_degrees", 35.0);
+    declare_parameter<double>("obstacle_min_height", 0.15);
+    declare_parameter<std::string>(
+      "terrain_obstacle_topic", "/navigation/terrain/obstacles");
+    declare_parameter<std::string>(
+      "terrain_traversable_topic", "/navigation/terrain/traversable");
+    declare_parameter<std::string>(
+      "terrain_costmap_topic", "/navigation/terrain/costmap");
 
     pit_polygons_ = loadPitPolygons(get_parameter("semantic_path").as_string());
     octomap_sub_ = create_subscription<octomap_msgs::msg::Octomap>(
@@ -49,6 +65,15 @@ public:
       std::bind(&Octomap3DAstarPlannerNode::onGoal, this, std::placeholders::_1));
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local());
+    obstacle_pub_ = create_publisher<visualization_msgs::msg::Marker>(
+      get_parameter("terrain_obstacle_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
+    traversable_pub_ = create_publisher<visualization_msgs::msg::Marker>(
+      get_parameter("terrain_traversable_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
+    costmap_pub_ = create_publisher<visualization_msgs::msg::Marker>(
+      get_parameter("terrain_costmap_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
   }
 
 private:
@@ -102,7 +127,73 @@ private:
       static_cast<int>(get_parameter("snap_search_radius_cells").as_int());
     result.max_iterations = static_cast<std::size_t>(
       std::max<int64_t>(1, get_parameter("max_iterations").as_int()));
+    result.costmap_margin = get_parameter("costmap_margin").as_double();
+    result.costmap_weight = get_parameter("costmap_weight").as_double();
     return result;
+  }
+
+  visualization_msgs::msg::Marker layerMarker(
+    const std::string & name, float red, float green, float blue, float alpha) const
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.stamp = now();
+    marker.header.frame_id = map_frame_;
+    marker.ns = name;
+    marker.id = 0;
+    marker.type = visualization_msgs::msg::Marker::CUBE_LIST;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = terrain_->resolution();
+    marker.scale.y = terrain_->resolution();
+    marker.scale.z = terrain_->resolution();
+    marker.color.r = red;
+    marker.color.g = green;
+    marker.color.b = blue;
+    marker.color.a = alpha;
+    return marker;
+  }
+
+  void publishTerrainLayers()
+  {
+    const auto & layers = terrain_->layers();
+    auto obstacles = layerMarker("terrain_obstacles", 0.95F, 0.18F, 0.16F, 0.85F);
+    obstacles.points.reserve(layers.obstacle_cells.size());
+    for (const auto & cell : layers.obstacle_cells) {
+      const auto point = terrain_->gridToWorld(cell);
+      geometry_msgs::msg::Point output;
+      output.x = point.x();
+      output.y = point.y();
+      output.z = point.z();
+      obstacles.points.push_back(output);
+    }
+
+    auto traversable = layerMarker("terrain_traversable", 0.20F, 0.90F, 0.52F, 0.30F);
+    auto costmap = layerMarker("terrain_costmap", 1.0F, 0.75F, 0.10F, 0.72F);
+    traversable.points.reserve(layers.traversable_cells.size());
+    for (const auto & entry : layers.traversable_cells) {
+      const auto point = terrain_->gridToWorld(entry.cell);
+      geometry_msgs::msg::Point output;
+      output.x = point.x();
+      output.y = point.y();
+      output.z = point.z();
+      traversable.points.push_back(output);
+      if (entry.cost <= 0.0) {
+        continue;
+      }
+      costmap.points.push_back(output);
+      std_msgs::msg::ColorRGBA color;
+      color.r = 1.0F;
+      color.g = static_cast<float>(1.0 - entry.cost);
+      color.b = 0.08F;
+      color.a = static_cast<float>(0.35 + 0.55 * entry.cost);
+      costmap.colors.push_back(color);
+    }
+    obstacle_pub_->publish(obstacles);
+    traversable_pub_->publish(traversable);
+    costmap_pub_->publish(costmap);
+    RCLCPP_INFO(
+      get_logger(), "Terrain layers: obstacles=%zu traversable=%zu cost_edges=%zu",
+      obstacles.points.size(), traversable.points.size(), costmap.points.size());
   }
 
   void onOctomap(const octomap_msgs::msg::Octomap::SharedPtr message)
@@ -114,11 +205,33 @@ private:
       return;
     }
     octree_.reset(static_cast<octomap::OcTree *>(abstract_tree.release()));
+    const auto cloud_path = get_parameter("cloud_path").as_string();
+    if (!cloud_path.empty() && !terrain_observation_) {
+      try {
+        luxi_3d_navigation::TerrainCloudParameters cloud_parameters;
+        cloud_parameters.resolution = octree_->getResolution();
+        cloud_parameters.normal_radius = get_parameter("ground_normal_radius").as_double();
+        cloud_parameters.maximum_ground_slope_degrees =
+          get_parameter("ground_max_slope_degrees").as_double();
+        cloud_parameters.obstacle_min_height = get_parameter("obstacle_min_height").as_double();
+        terrain_observation_ = luxi_3d_navigation::classifyTerrainCloudFile(
+          cloud_path, cloud_parameters);
+        RCLCPP_INFO(
+          get_logger(), "Point-cloud terrain fitted: ground=%zu obstacles=%zu",
+          terrain_observation_->ground_cells.size(),
+          terrain_observation_->obstacle_cells.size());
+      } catch (const std::exception & error) {
+        RCLCPP_ERROR(
+          get_logger(), "Cannot fit point-cloud terrain '%s': %s",
+          cloud_path.c_str(), error.what());
+      }
+    }
     terrain_ = std::make_unique<luxi_3d_navigation::TerrainModel>(
-      *octree_, parameters(), pit_polygons_);
+      *octree_, parameters(), pit_polygons_, terrain_observation_);
     if (!message->header.frame_id.empty()) {
       map_frame_ = message->header.frame_id;
     }
+    publishTerrainLayers();
     RCLCPP_INFO(
       get_logger(), "Ground-supported 3D map ready: nodes=%zu resolution=%.3f frame=%s",
       octree_->size(), octree_->getResolution(), map_frame_.c_str());
@@ -143,7 +256,10 @@ private:
 
   void plan(double start_x, double start_y, double start_z, const geometry_msgs::msg::PoseStamped & goal)
   {
-    const auto start = terrain_->snapToTerrain(terrain_->worldToGrid(start_x, start_y, start_z));
+    const double terrain_start_z =
+      start_z - get_parameter("body_reference_height").as_double();
+    const auto start = terrain_->snapToTerrain(
+      terrain_->worldToGrid(start_x, start_y, terrain_start_z));
     const auto target = terrain_->snapToTerrain(terrain_->worldToGrid(
       goal.pose.position.x, goal.pose.position.y, goal.pose.position.z));
     if (!start || !target) {
@@ -189,6 +305,7 @@ private:
 
   std::unique_ptr<octomap::OcTree> octree_;
   std::unique_ptr<luxi_3d_navigation::TerrainModel> terrain_;
+  std::optional<luxi_3d_navigation::TerrainObservation> terrain_observation_;
   std::vector<luxi_3d_navigation::Polygon2D> pit_polygons_;
   std::string map_frame_{"map"};
   tf2_ros::Buffer tf_buffer_;
@@ -196,6 +313,9 @@ private:
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr obstacle_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr traversable_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr costmap_pub_;
 };
 
 int main(int argc, char ** argv)

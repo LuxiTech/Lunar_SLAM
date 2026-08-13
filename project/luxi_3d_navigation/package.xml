@@ -9,6 +9,7 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>geometry_msgs</depend>
+  <depend>libpcl-all-dev</depend>
   <depend>nav_msgs</depend>
   <depend>nlohmann-json3-dev</depend>
   <depend>octomap</depend>
@@ -18,10 +19,12 @@
   <depend>tf2</depend>
   <depend>tf2_geometry_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>visualization_msgs</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>luxi_hloc</exec_depend>
   <exec_depend>luxi_voxel_navigation</exec_depend>
+  <exec_depend>rtabmap_odom</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

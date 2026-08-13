@@ -102,7 +102,7 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .navigation-detail, .navigation-note { color: var(--muted); font-size: .73rem; line-height: 1.5; }
 .navigation-detail { margin: 12px 0; }
 .navigation-note { margin: 10px 0 0; }
-.navigation-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; gap: 8px; align-items: end; }
+.navigation-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto auto; gap: 8px; align-items: end; }
 .navigation-actions label { display: grid; gap: 5px; color: var(--muted); font-size: .68rem; }
 .navigation-actions select, .navigation-actions button { min-height: 38px; border: 1px solid var(--border); border-radius: 9px; font-size: .74rem; }
 .navigation-actions select { width: 100%; padding: 0 9px; background: #0d121a; color: var(--text); }
@@ -114,6 +114,13 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .navigation-layers > span { font-weight: 800; color: var(--text); }
 .navigation-layers label { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
 .navigation-layers input { accent-color: var(--accent); }
+.terrain-legend { display: flex; flex-wrap: wrap; gap: 8px 15px; margin-top: 8px; color: var(--muted); font-size: .68rem; }
+.terrain-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.terrain-legend i { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+.legend-traversable { background: #65e3b5; }
+.legend-cost-low { background: #ffd166; }
+.legend-cost-high { background: #ff8a3d; }
+.legend-obstacle { background: #d83b48; }
 .semantic-toolbar {
   display: grid;
   grid-template-columns: repeat(5, minmax(92px, 1fr)) repeat(4, auto);
@@ -316,6 +323,52 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
 .command-readout span { color: var(--muted); font-size: .68rem; }
 .command-readout code { color: #bfcbdb; font-size: .76rem; }
 
+.robot-control-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 24px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #101721;
+}
+.robot-control-panel b, .robot-control-panel small { display: block; }
+.robot-control-panel small { margin-top: 5px; color: var(--muted); font-size: .66rem; }
+.control-switch { position: relative; width: 48px; height: 26px; flex: 0 0 auto; }
+.control-switch input { position: absolute; opacity: 0; pointer-events: none; }
+.control-switch span {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #252c36;
+  cursor: pointer;
+  transition: background .18s ease, border-color .18s ease;
+}
+.control-switch span::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #aab4c2;
+  transition: transform .18s ease, background .18s ease;
+}
+.control-switch input:checked + span { border-color: #3e9077; background: var(--accent-dark); }
+.control-switch input:checked + span::after { transform: translateX(22px); background: var(--accent); }
+.control-switch input:disabled + span { cursor: wait; opacity: .55; }
+#robotControlState { display: inline-block; margin-top: 8px; }
+#robotControlState.active { border-color: #3e9077; color: var(--accent); background: var(--accent-dark); }
+#robotControlState.standing_uncontrolled,
+#robotControlState.standing_up { border-color: #806a35; color: #f5cc6b; background: #2b2517; }
+#robotControlState.offline,
+#robotControlState.unknown,
+#robotControlState.failed { border-color: #77353d; color: #ffadb1; background: var(--danger-dark); }
+
 .mapping-panel {
   margin: 24px 0;
   padding: 15px;
@@ -338,6 +391,11 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
   font-size: .67rem;
 }
 .mapping-state.running { border-color: #3e9077; color: var(--accent); background: var(--accent-dark); }
+.mapping-state.active { border-color: #3e9077; color: var(--accent); background: var(--accent-dark); }
+.mapping-state.standing_up,
+.mapping-state.standing_uncontrolled { border-color: #81662e; color: #ffd27c; background: #2a2314; }
+.mapping-state.offline,
+.mapping-state.unknown,
 .mapping-state.failed { border-color: #77353d; color: #ffadb1; background: var(--danger-dark); }
 .mapping-mode-row { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); font-size: .68rem; }
 .mapping-mode-row select {

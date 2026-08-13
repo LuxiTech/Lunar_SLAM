@@ -41,8 +41,8 @@ ROS 2 使用 DDS 自动发现，不需要把 `192.168.123.49` 写入节点参数
 ```bash
 ping 192.168.123.49
 export ROS_LOCALHOST_ONLY=0
-# 如果小车不是默认 domain 0，在这里设置为小车的 domain：
-export ROS_DOMAIN_ID=0
+# 当前小车使用 domain 42：
+export ROS_DOMAIN_ID=42
 ros2 topic info /cmd_vel --verbose
 ```
 

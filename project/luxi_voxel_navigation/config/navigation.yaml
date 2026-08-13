@@ -1,6 +1,6 @@
 cloud_to_octomap:
   ros__parameters:
-    resolution: 0.10
+    resolution: 0.05
 
 octomap_astar_planner:
   ros__parameters:

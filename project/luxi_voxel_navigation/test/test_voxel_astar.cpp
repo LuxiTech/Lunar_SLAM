@@ -1,6 +1,12 @@
 #include <gtest/gtest.h>
 
+#include "luxi_voxel_navigation/octomap_defaults.hpp"
 #include "luxi_voxel_navigation/voxel_astar.hpp"
+
+TEST(VoxelDefaults, UsesFiveCentimeterOctomapResolution)
+{
+  EXPECT_DOUBLE_EQ(luxi_voxel_navigation::kDefaultOctomapResolution, 0.05);
+}
 
 TEST(VoxelAstar, FindsRouteAroundObstacle)
 {

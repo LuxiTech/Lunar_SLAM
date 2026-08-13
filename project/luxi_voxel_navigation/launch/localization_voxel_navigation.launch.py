@@ -15,7 +15,7 @@ def generate_launch_description() -> LaunchDescription:
     ])
     return LaunchDescription([
         DeclareLaunchArgument("database_path", default_value=""),
-        DeclareLaunchArgument("octomap_resolution", default_value="0.10"),
+        DeclareLaunchArgument("octomap_resolution", default_value="0.05"),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/navigation/cmd_vel"),
         IncludeLaunchDescription(
             localization_launch,

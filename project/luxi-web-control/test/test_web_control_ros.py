@@ -108,6 +108,12 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"navigationShowSemantics" in page
             assert b"mappingModeSelect" in page
             assert b"vpi_learned" in page
+            assert b"navigationShowTraversable" in page
+            assert b"navigationShowCostmap" in page
+            assert b"navigationFilterButton" in page
+            assert b"navigationStartButton" in page
+            assert b"navigationHaltButton" in page
+            assert b"robotControlToggle" in page
 
         with _LOCAL_OPENER.open(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -115,9 +121,24 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"/api/semantic/save" in app
             assert b"applySemanticBrush" in app
             assert b"semanticAnnotation && navigationShowSemantics.checked" in app
+            assert b"/api/navigation/terrain" in app
             assert b"[...maps].reverse().find" in app
             assert b"navigationDrag.yaw +" in app
             assert b'{mode: mappingModeSelect.value}' in app
+            assert b'filtered: navigationUseFiltered' in app
+            assert b'api("/api/navigation/start")' in app
+            assert b'api("/api/navigation/halt")' in app
+            assert b'api("/api/robot/control", {active: requested})' in app
+
+        robot_control = node.status()["robot_control"]
+        assert robot_control["state"] == "disabled"
+        assert robot_control["posture"] == "offline"
+        assert robot_control["control_ready"] is False
+        try:
+            _post(base_url, "/api/robot/control", {"active": True})
+            assert False, "disabled D1 control must reject enable requests"
+        except HTTPError as error:
+            assert error.code == 409
 
         with _LOCAL_OPENER.open(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200
@@ -131,10 +152,16 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             saved_cloud = json.load(response)["cloud"]
             assert saved_cloud == {
                 "map_id": "map011",
+                "variant": "original",
                 "point_count": 2,
                 "error": None,
                 "points": [[0.0, 1.0, 2.0, 3, 4, 5], [6.0, 7.0, 8.0, 9, 10, 11]],
             }
+        with urlopen(base_url + "/api/navigation/terrain", timeout=2.0) as response:
+            assert response.status == 200
+            terrain = json.load(response)["terrain"]
+            assert terrain["traversable_points"] == []
+            assert terrain["obstacle_points"] == []
         try:
             _LOCAL_OPENER.open(base_url + "/api/preview/rgb", timeout=2.0)
             assert False, "an RGB endpoint without camera input must return 404"
@@ -148,6 +175,16 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             )
         except HTTPError as error:
             assert error.code == 409
+
+        try:
+            _post(
+                base_url,
+                "/api/navigation/load_map",
+                {"map_id": "map011", "filtered": "true"},
+            )
+            assert False, "a non-boolean filtered selector must be rejected"
+        except HTTPError as error:
+            assert error.code == 400
 
         status, result = _post(
             base_url,

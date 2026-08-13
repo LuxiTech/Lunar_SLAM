@@ -58,7 +58,7 @@ def _launch_d435i(context):
 
     enable_imu = _as_bool(settings.get("enable_imu", True), "enable_imu")
     rmw_implementation = str(settings.get("rmw_implementation", "rmw_cyclonedds_cpp"))
-    ros_domain_id = str(settings.get("ros_domain_id", 0))
+    ros_domain_id = str(settings.get("ros_domain_id", 42))
     driver_command = shlex.join([
         "ros2", "launch", "lunar_realsense_bringup", "d435i.launch.py",
         "rviz:=false",

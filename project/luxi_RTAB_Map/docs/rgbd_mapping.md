@@ -3,6 +3,9 @@
 `luxi_rtab_map` 是 `project` 目录下的建图功能包。它只负责算法节点，
 不包含任何特定相机硬件驱动；所有硬件由 `luxi_adapter` 提供统一接口。
 
+大范围运动时的位姿漂移、视觉-IMU 融合、RTAB 图优化和点云质量调试方法见
+[Lunar SLAM 大范围运动建图稳定性诊断与实现方案](SLAM_STABILITY_DEBUG_GUIDE.md)。
+
 ## 职责边界
 
 ```text
@@ -43,6 +46,10 @@ source install/setup.bash
 ros2 launch luxi_rtab_map rgbd_mapping_learned.launch.py \
   new_map:=true load_saved_map:=false
 ```
+
+学习型入口默认由视觉前端融合一次 IMU，RTAB 后端不再重复消费 IMU yaw
+（`use_rtabmap_imu:=false`）。该参数只用于同一 bag 的诊断 A/B；生产建图不要开启。
+当前回环使用至少 30 个几何内点、robust 优化及 `RGBD/OptimizeMaxError=1.0`。
 
 正常启动应先显示两台相机的 `TriggerMode=On, TriggerSource=Line0` 和 Line0 电平跳变，
 随后显示 `SYNC PASS`。`external_trigger:=false` 仅用于诊断相机取流，不应作为正式

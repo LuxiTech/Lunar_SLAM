@@ -5,6 +5,8 @@
 build/
 install/
 log/
+/logs/
+/tools/test/
 
 # Common generated files
 __pycache__/

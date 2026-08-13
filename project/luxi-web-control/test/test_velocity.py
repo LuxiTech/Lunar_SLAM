@@ -19,6 +19,8 @@ import os
 import signal
 import struct
 import subprocess
+import threading
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -29,6 +31,8 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from sensor_msgs.msg import PointCloud2, PointField
 
 from luxi_web_control.web_control_node import discover_navigation_maps
+from luxi_web_control.web_control_node import D1ControlManager
+from luxi_web_control.web_control_node import classify_d1_posture
 from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import HlocIndexBuilder
@@ -41,8 +45,10 @@ from luxi_web_control.web_control_node import make_access_urls
 from luxi_web_control.web_control_node import mapping_graph_conflicts
 from luxi_web_control.web_control_node import NavigationController
 from luxi_web_control.web_control_node import parse_octomap_point_output
+from luxi_web_control.web_control_node import parse_terrain_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
 from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
+from luxi_web_control.web_control_node import WebControlNode
 
 
 LIMITS = VelocityCommand(0.25, 0.1, 0.8)
@@ -59,6 +65,120 @@ def test_saved_map_browser_preview_is_bounded_by_default():
     assert 10_000 <= limit <= 50_000
 
 
+def test_navigation_preview_uses_ten_centimeter_robot_radius():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    radius = config["web_control"]["ros__parameters"][
+        "navigation_robot_radius"
+    ]
+    assert radius == 0.10
+
+
+def test_lekiwi_launch_uses_vehicle_domain_42():
+    launch_source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/launch/lekiwi_web_control.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'SetEnvironmentVariable("ROS_DOMAIN_ID", "42")' in launch_source
+
+
+def test_d1_control_keeps_standard_yaw_direction():
+    launch_source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/launch/lekiwi_web_control.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"invert_angular_z": False' in launch_source
+    assert 'default_value="/d1/cmd_vel_standard"' in launch_source
+
+
+def test_d1_control_scripts_do_not_depend_on_ros_daemon_discovery():
+    scripts = WORKSPACE_ROOT / "project/slam_d1_bridge/scripts"
+    for script_name in (
+        "start_slam_d1_bridge.sh",
+        "stop_slam_d1_bridge.sh",
+    ):
+        source = (scripts / script_name).read_text(encoding="utf-8")
+        assert "topic info --no-daemon --spin-time 5.0" in source
+        assert "rcl_interfaces/srv/SetParameters" in source
+        assert "successful=True" in source
+
+
+def test_d1_web_control_is_enabled_and_exposes_switch():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )
+    assert config["web_control"]["ros__parameters"]["enable_d1_control"] is True
+
+    page = (WORKSPACE_ROOT / "project/luxi-web-control/web/index.html").read_text(
+        encoding="utf-8"
+    )
+    app = (WORKSPACE_ROOT / "project/luxi-web-control/web/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'id="robotControlToggle"' in page
+    assert 'api("/api/robot/control", {active: requested})' in app
+
+
+def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
+    pid_file = tmp_path / "bridge.pid"
+    start_script = tmp_path / "start.sh"
+    stop_script = tmp_path / "stop.sh"
+    start_script.write_text(
+        f"#!/bin/sh\necho {os.getpid()} > {pid_file}\n",
+        encoding="utf-8",
+    )
+    stop_script.write_text(
+        f"#!/bin/sh\nrm -f {pid_file}\n",
+        encoding="utf-8",
+    )
+    start_script.chmod(0o755)
+    stop_script.chmod(0o755)
+    manager = D1ControlManager(
+        enabled=True,
+        start_script=start_script,
+        stop_script=stop_script,
+        bridge_pid_file=pid_file,
+        log_path=tmp_path / "d1.log",
+    )
+
+    assert manager.set_active(True)[0]
+    for _ in range(100):
+        if not manager.status()["transitioning"]:
+            break
+        threading.Event().wait(0.01)
+    assert manager.status()["state"] == "active"
+
+    assert manager.set_active(False)[0]
+    for _ in range(100):
+        if not manager.status()["transitioning"]:
+            break
+        threading.Event().wait(0.01)
+    assert manager.status()["state"] == "inactive"
+
+
+@pytest.mark.parametrize(
+    ("fsm_state", "posture"),
+    [
+        ("loco", "standing"),
+        ("car", "standing"),
+        ("rl_3", "standing"),
+        ("transform_up", "standing_up"),
+        ("transform_down", "prone"),
+        ("idle", "prone"),
+        ("", "unknown"),
+        ("unexpected", "unknown"),
+    ],
+)
+def test_d1_posture_is_derived_from_actual_fsm(fsm_state, posture):
+    assert classify_d1_posture(fsm_state) == posture
+
+
 def test_map_export_filters_isolated_depth_outliers():
     script = (
         WORKSPACE_ROOT / "project/luxi_RTAB_Map/scripts/export_3d_map.sh"
@@ -68,6 +188,13 @@ def test_map_export_filters_isolated_depth_outliers():
     assert "--edge_bleeding_error 0.10" in script
     assert "--noise_radius 0.08" in script
     assert "--noise_k 8" in script
+
+
+def test_map_export_uses_five_centimeter_octomap_resolution():
+    script = (
+        WORKSPACE_ROOT / "tools/export_rtabmap_octomap.sh"
+    ).read_text(encoding="utf-8")
+    assert '"${octomap_path}" 0.05' in script
 
 
 def test_velocity_is_clamped_to_server_limits():
@@ -107,6 +234,37 @@ def test_only_our_own_web_control_command_can_be_auto_stopped():
         "web_control_node"
     )
     assert not is_managed_web_control_command("python3 -m http.server 8080")
+
+
+def test_web_launch_shuts_down_when_the_web_node_exits():
+    launch_source = (
+        WORKSPACE_ROOT / "project/luxi-web-control/launch/web_control.launch.py"
+    ).read_text(encoding="utf-8")
+    assert 'on_exit=Shutdown(reason="web control node exited")' in launch_source
+
+
+def test_web_main_restores_sigint_for_automatic_port_takeover():
+    source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/luxi_web_control/web_control_node.py"
+    ).read_text(encoding="utf-8")
+    assert "signal.signal(signal.SIGINT, signal.default_int_handler)" in source
+
+
+def test_documented_cleanup_uses_the_bounded_workspace_script():
+    readme = (
+        WORKSPACE_ROOT / "project/luxi-web-control/README.md"
+    ).read_text(encoding="utf-8")
+    cleanup = WORKSPACE_ROOT / "scripts/stop_luxi_system.sh"
+    source = cleanup.read_text(encoding="utf-8")
+    assert "bash scripts/stop_luxi_system.sh" in readme
+    assert "post_if_available /api/stop" in source
+    assert "post_if_available /api/mapping/stop" in source
+    assert "post_if_available /api/navigation/stop" in source
+    assert "signal_matches INT" in source
+    assert "signal_matches TERM" in source
+    assert "velocity_command_mux_node" in source
+    assert "sport = :8080" in source
 
 
 def test_map_export_sanitizes_camera_sdk_libraries():
@@ -455,6 +613,7 @@ def test_hloc_index_builder_runs_export_and_cuda_model_build(
 def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
     (tmp_path / "rtab_maps").mkdir()
     (tmp_path / "octo_maps" / "map011_octomap").mkdir(parents=True)
+    (tmp_path / "octo_maps" / "map011_filtered_octomap").mkdir(parents=True)
     (tmp_path / "rtab_maps" / "map011.db").write_bytes(b"database")
     (tmp_path / "rtab_maps" / "map012.db").write_bytes(b"database")
     (tmp_path / "hloc_maps" / "map011").mkdir(parents=True)
@@ -471,6 +630,15 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
         "end_header\n0 0 0 255 0 1\n1.25 -2.5 3 4 5 6\n",
         encoding="ascii",
     )
+    filtered_octomap = (
+        tmp_path / "octo_maps" / "map011_filtered_octomap" / "map011.bt"
+    )
+    filtered_octomap.write_bytes(b"filtered octomap")
+    filtered_cloud = (
+        tmp_path / "octo_maps" / "map011_filtered_octomap"
+        / "map011_filtered_cloud.ply"
+    )
+    filtered_cloud.write_text(cloud_path.read_text(encoding="ascii"), encoding="ascii")
 
     assert discover_navigation_maps(tmp_path) == [
         {
@@ -480,22 +648,30 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
                 (tmp_path / "octo_maps" / "map011_octomap" / "map011.bt").resolve()
             ),
             "cloud_path": str(cloud_path.resolve()),
+            "filtered_octomap_path": str(filtered_octomap.resolve()),
+            "filtered_cloud_path": str(filtered_cloud.resolve()),
             "hloc_map_directory": str(
                 (tmp_path / "hloc_maps" / "map011").resolve()
             ),
             "convertible": True,
             "loadable": True,
             "localizable": True,
+            "filtered_loadable": True,
+            "filtered_localizable": True,
         },
         {
             "id": "map012",
             "database_path": str((tmp_path / "rtab_maps" / "map012.db").resolve()),
             "octomap_path": None,
             "cloud_path": None,
+            "filtered_octomap_path": None,
+            "filtered_cloud_path": None,
             "hloc_map_directory": None,
             "convertible": True,
             "loadable": False,
             "localizable": False,
+            "filtered_loadable": False,
+            "filtered_localizable": False,
         },
     ]
 
@@ -540,6 +716,55 @@ def test_octomap_converter_output_keeps_occupied_voxel_size():
         0.1,
         [(1.234, -2.0, 3.0, 0.1), (0.0, 0.0, 0.0, 0.2)],
     )
+
+
+def test_terrain_converter_output_separates_obstacles_and_costs():
+    assert parse_terrain_point_output(
+        "resolution 0.1\n"
+        "traversable 1.2345 -2 0.1 0.75\n"
+        "obstacle 0 0 0.2 1\n"
+    ) == (
+        0.1,
+        [(1.234, -2.0, 0.1, 0.75)],
+        [(0.0, 0.0, 0.2)],
+    )
+
+
+def test_terrain_loader_fits_the_matching_point_cloud(monkeypatch, tmp_path):
+    node = WebControlNode.__new__(WebControlNode)
+    node.terrain_points_executable = Path("/test/terrain_map_to_points")
+    node.max_terrain_points = 12000
+    node.navigation_robot_radius = 0.10
+    node.navigation_costmap_margin = 0.60
+    node.navigation_ground_normal_radius = 0.30
+    node.navigation_ground_max_slope_degrees = 35.0
+    node.navigation_obstacle_min_height = 0.15
+    node.navigation = SimpleNamespace(octomap_library_path=tmp_path)
+    node._navigation_lock = threading.Lock()
+
+    def fake_run(command, **kwargs):
+        assert command == [
+            "/test/terrain_map_to_points", "/maps/map042.bt", "12000",
+            "0.1", "0.6", "/maps/map042_cloud.ply", "0.3", "35.0",
+            "0.15",
+        ]
+        assert kwargs["timeout"] == 60.0
+        return subprocess.CompletedProcess(
+            command, 0,
+            stdout=(
+                "resolution 0.1\n"
+                "traversable 1 2 0.1 0.25\n"
+                "obstacle 3 4 0.2 1\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert node._load_navigation_terrain(
+        "map042", "/maps/map042.bt", "/maps/map042_cloud.ply"
+    ) == ""
+    assert node._terrain_traversable_points == [(1.0, 2.0, 0.1, 0.25)]
+    assert node._terrain_obstacle_points == [(3.0, 4.0, 0.2)]
 
 
 def test_localization_requires_confident_xyz_yaw_covariance():
@@ -590,6 +815,43 @@ def test_navigation_goal_accepts_finite_coordinates(payload):
 def test_navigation_goal_rejects_invalid_coordinates(payload):
     with pytest.raises(ValueError):
         parse_navigation_goal(payload)
+
+
+def test_navigation_motion_requires_localization_and_path():
+    node = WebControlNode.__new__(WebControlNode)
+    node._lock = threading.Lock()
+    node._navigation_lock = threading.Lock()
+    node._estop_active = False
+    node._navigation_follower_state = "plan_ready"
+    published = []
+    node.navigation_start_publisher = SimpleNamespace(
+        publish=published.append
+    )
+    node.navigation_status = lambda: {
+        "state": "running",
+        "localization_ready": True,
+        "path_ready": True,
+        "active": False,
+    }
+
+    started, message = node.start_navigation_motion()
+
+    assert started
+    assert message == "navigation start command sent"
+    assert len(published) == 1
+    assert published[0].data is True
+    assert node._navigation_follower_state == "starting"
+
+    node.navigation_status = lambda: {
+        "state": "running",
+        "localization_ready": True,
+        "path_ready": False,
+        "active": False,
+    }
+    started, message = node.start_navigation_motion()
+    assert not started
+    assert "valid path" in message
+    assert len(published) == 1
 
 
 @pytest.mark.parametrize("value", ["fast", True, None, math.inf, math.nan])

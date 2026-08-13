@@ -30,7 +30,10 @@ def generate_launch_description() -> LaunchDescription:
             "--Kp/MaxFeatures 2048 "
             "--Vis/FeatureType 1 "
             "--Vis/MaxFeatures 2048 "
-            "--Vis/MinInliers 20 "
+            # Reject the weak 21/36 loop closure pattern observed in map033.
+            "--Vis/MinInliers 30 "
+            "--Optimizer/Robust true "
+            "--RGBD/OptimizeMaxError 1.0 "
             "--Mem/UseOdomFeatures true "
             "--Grid/DepthDecimation ",
             LaunchConfiguration("grid_depth_decimation"),
@@ -80,6 +83,18 @@ def generate_launch_description() -> LaunchDescription:
                 "mapping_depth_max"),
             "visual_frontend_camera_to_imu_time_offset": LaunchConfiguration(
                 "camera_to_imu_time_offset"),
+            "use_imu": LaunchConfiguration("use_imu"),
+            "imu_topic": LaunchConfiguration("imu_topic"),
+            "rtabmap_imu_topic": PythonExpression(
+                [
+                    "'",
+                    LaunchConfiguration("imu_topic"),
+                    "' if '",
+                    LaunchConfiguration("use_rtabmap_imu"),
+                    "'.lower() in ('true', '1', 'yes', 'on') else "
+                    "'/luxi_visual_frontend/rtabmap_imu_disabled'",
+                ]
+            ),
             "rtabmap_args": learned_rtabmap_args,
         }.items(),
     )
@@ -104,6 +119,16 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("mapping_depth_min", default_value="0.2"),
             DeclareLaunchArgument("mapping_depth_max", default_value="6.0"),
             DeclareLaunchArgument("camera_to_imu_time_offset", default_value="0.0"),
+            DeclareLaunchArgument("use_imu", default_value="true"),
+            DeclareLaunchArgument("imu_topic", default_value="/sensors/imu/data"),
+            DeclareLaunchArgument(
+                "use_rtabmap_imu",
+                default_value="false",
+                description=(
+                    "Forward IMU orientation to RTAB in addition to the learned "
+                    "frontend. Disabled by default to prevent duplicate yaw fusion."
+                ),
+            ),
             DeclareLaunchArgument("grid_noise_filtering_radius", default_value="0.0"),
             DeclareLaunchArgument(
                 "grid_noise_filtering_min_neighbors", default_value="5"),

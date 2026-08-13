@@ -29,17 +29,18 @@ luxi_adapter:
     # Runtime configuration for the D435i profile.
     # Empty selects device/D435i/ros2_ws/install/setup.bash under the detected workspace.
     d435i_setup: ""
-    rmw_implementation: rmw_cyclonedds_cpp
-    ros_domain_id: 0
+    rmw_implementation: rmw_fastrtps_cpp
+    ros_domain_id: 42
     d435i_color_profile: 640,480,30
     d435i_depth_profile: 640,480,30
     d435i_initial_reset: false
     d435i_unite_imu_method: 2
 
-    # Mounting transform. Keep identity until physical extrinsics are measured.
+    # Estimated mounting transform: D435i is 0.20 m in front of the robot's
+    # rotation center and faces the robot's forward direction.
     base_frame: base_link
     camera_frame: camera_link
-    camera_x: 0.0
+    camera_x: 0.20
     camera_y: 0.0
     camera_z: 0.0
     camera_roll: 0.0
