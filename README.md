@@ -10,12 +10,27 @@
 | 平台 | Jetson Orin NX、ROS 2 Humble |
 | 主链路 | CREStereo 预训练模型（FP16/CUDA Graph） |
 | 备用链路 | VPI OFA/PVA/VIC |
+| IMU | H30，默认启用并带启动健康检查 |
 | 近场地图 | 0.4–4 m，全量稠密深度 |
 | 远距地图 | 4–6 m 按 4×4 采样，6–10 m 按 8×8 采样 |
 | 网页默认选项 | CREStereo |
 
 远距层用于补充房间轮廓，不参与超过 4 m 的视觉里程计约束。这样可以避免低视差
 远距深度拉坏位姿，同时控制地图大小和 NX 负载。
+
+## 本次 main 合并
+
+当前 `nvidia_nx` 已完整合入 `origin/main` 至 `0176f7c`，主要更新如下：
+
+- 优化运动建图稳定性：增加视觉/IMU 一致性、角速度和位姿跳变门禁，降低运动模糊、
+  错误重定位及地图重影。
+- 增加地图点云过滤、地面/障碍分类和可通行区域标注；OctoMap 默认分辨率调整为 5 cm。
+- 跑通已建静态地图的定位与导航闭环，增加路径跟随状态、速度仲裁、停止和急停控制。
+- 修复底盘运动方向相反问题，并加入登月小车 D1 SDK、控制桥和网页启停/姿态控制。
+- 优化 HLoc + ICP 定位、`map→odom` 对齐、跟踪健康检查和路径跟随安全门禁。
+
+`main` 本身不包含 NX 的 USB/CRE 实现。本次融合保留完整 USB 相机工作区，并把上述
+导航、定位、D1 和网页能力接入 CREStereo 主链路；VPI 继续作为网页备用项。
 
 ## 快速启动
 
@@ -39,11 +54,11 @@ cd /home/nvidia/Desktop/lunar_-slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch lunar_usb_rtabmap_bringup usb_crestereo_rtabmap.launch.py \
-  rviz:=true use_imu:=false new_map:=true
+  rviz:=true use_imu:=true new_map:=true
 ```
 
-H30 恢复稳定出流并通过健康检查后，可将 `use_imu` 改为 `true`。网页和终端不要同时
-启动建图，避免相机占用、重复 TF 和 GPU 竞争。
+H30 是默认姿态源；没有 H30 时仅可在诊断或纯视觉对比中显式传入 `use_imu:=false`。
+网页和终端不要同时启动建图，避免相机占用、重复 TF 和 GPU 竞争。
 
 ## 当前实测
 
