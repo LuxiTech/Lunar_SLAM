@@ -55,9 +55,20 @@ ros2 launch luxi_rtab_map rgbd_mapping_learned.launch.py \
 
 The default `d435i` profile reads its driver setup path, ROS domain and all
 topic names from `config/sensor_bringup.yaml`. It starts the existing D435i
-driver, relays the vendor topics into the stable contract, filters the canonical
-raw IMU with Madgwick, and publishes the configured `base_link` to
-`camera_link` static transform.
+driver, relays the vendor topics into the stable contract and filters the
+canonical raw IMU with Madgwick. The profile waits for an explicit calibration
+request from the web page and does not publish `base_link` to `camera_link`
+before that request succeeds. Put the robot on level ground, keep it stationary,
+then click `一键水平校准`. The C++ calibrator collects 200 samples and publishes
+one static transform whose roll and pitch align gravity with the robot's vertical
+axis. Translation and yaw remain configured values because gravity cannot
+estimate them.
+
+The current camera-forward translation is the midpoint of the measured range,
+`camera_x=0.14 m`. Replace it with a measured value when available. Do not move
+the robot until the page reports `校准完成`; motion or an abnormal acceleration
+magnitude restarts the sample window automatically. Mapping and localization
+are blocked while calibration is missing or in progress.
 
 ```bash
 cd /home/lunar/project/lunar_slam

@@ -228,6 +228,27 @@ TEST(LocalizationSupervisor, SuccessfulTrackingResetsFailureCount)
   EXPECT_EQ(supervisor.consecutive_icp_failures(), 0);
 }
 
+TEST(LocalizationRecovery, KeepsOdometryOnlyWhenRejectedScanStillOverlapsMap)
+{
+  EXPECT_TRUE(luxi_location::should_retain_odometry_after_rejected_icp(
+    false, false, false, true, 0.61, 0.25));
+  EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
+    false, false, false, true, 0.0, 0.25));
+  EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
+    false, false, false, true,
+    std::numeric_limits<double>::quiet_NaN(), 0.25));
+}
+
+TEST(LocalizationRecovery, DoesNotBypassExplicitRelocalizationPolicy)
+{
+  EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
+    false, false, true, true, 0.80, 0.25));
+  EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
+    true, false, false, true, 0.80, 0.25));
+  EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
+    false, true, false, true, 0.80, 0.25));
+}
+
 TEST(TrackingPoseGate, RejectsSinglePhysicallyImpossibleJumpAndAcceptsRecovery)
 {
   luxi_location::TrackingPoseGateParameters parameters;

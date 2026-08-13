@@ -399,6 +399,7 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
 .mapping-state.failed { border-color: #77353d; color: #ffadb1; background: var(--danger-dark); }
 .mapping-detail { min-height: 30px; margin: 12px 0; color: var(--muted); font-size: .7rem; line-height: 1.45; }
 .mapping-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mapping-actions.single-action { grid-template-columns: 1fr; }
 .mapping-actions button {
   padding: 10px 8px;
   border: 1px solid var(--border);

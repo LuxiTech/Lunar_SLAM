@@ -36,16 +36,26 @@ luxi_adapter:
     d435i_initial_reset: false
     d435i_unite_imu_method: 2
 
-    # Estimated mounting transform: D435i is 0.20 m in front of the robot's
-    # rotation center and faces the robot's forward direction.
+    # Estimated mounting transform: D435i is 0.13-0.15 m in front of the
+    # robot's rotation center. Use the midpoint until it is measured.
     base_frame: base_link
     camera_frame: camera_link
-    camera_x: 0.20
+    camera_x: 0.14
     camera_y: 0.0
     camera_z: 0.0
     camera_roll: 0.0
     camera_pitch: 0.0
     camera_yaw: 0.0
+    # The robot must remain stationary on level ground at sensor startup.
+    # Gravity estimates camera roll/pitch; yaw and translation remain configured above.
+    auto_level_imu: true
+    auto_level_start_automatically: false
+    imu_level_calibration_service: /sensors/imu/calibrate_level
+    imu_level_status_topic: /sensors/imu/level_calibration_status
+    auto_level_samples: 200
+    auto_level_gravity_tolerance: 0.8
+    auto_level_maximum_angular_speed: 0.05
+    auto_level_maximum_tilt_degrees: 40.0
 
 sensor_imu_filter:
   ros__parameters:

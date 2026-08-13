@@ -26,8 +26,10 @@ import yaml
 
 from pathlib import Path
 
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Path as NavigationPath
 from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import Float32, String
 
 from luxi_web_control.web_control_node import discover_navigation_maps
 from luxi_web_control.web_control_node import D1ControlManager
@@ -73,6 +75,29 @@ def test_navigation_preview_uses_ten_centimeter_robot_radius():
         "navigation_robot_radius"
     ]
     assert radius == 0.10
+
+
+def test_mapping_keeps_3d_cloud_with_planar_test_trajectory():
+    launch_source = (
+        WORKSPACE_ROOT
+        / "project/luxi_RTAB_Map/launch/rgbd_mapping_learned.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'LaunchConfiguration("planar_motion")' in launch_source
+    assert '" --Grid/3D true "' in launch_source
+    assert '"--Reg/Force3DoF "' in launch_source
+    assert '" --RGBD/ForceOdom3DoF "' in launch_source
+
+
+def test_goal_can_be_selected_before_icp_recovers_without_being_sent():
+    app = (WORKSPACE_ROOT / "project/luxi-web-control/web/app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'navigation.state !== "running" || !hasTraversableTerrain' in app
+    assert "if (!navigationStatus.planning_localization_ready)" in app
+    assert "selectedGoalPending = true" in app
+    assert 'await api("/api/navigation/goal", goal)' in app
 
 
 def test_lekiwi_launch_uses_vehicle_domain_42():
@@ -121,6 +146,25 @@ def test_d1_web_control_is_enabled_and_exposes_switch():
     )
     assert 'id="robotControlToggle"' in page
     assert 'api("/api/robot/control", {active: requested})' in app
+
+
+def test_web_imu_calibration_button_and_mapping_gate_are_present():
+    page = (WORKSPACE_ROOT / "project/luxi-web-control/web/index.html").read_text(
+        encoding="utf-8"
+    )
+    app = (WORKSPACE_ROOT / "project/luxi-web-control/web/app.js").read_text(
+        encoding="utf-8"
+    )
+    backend = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/luxi_web_control/web_control_node.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'id="imuCalibrationButton"' in page
+    assert 'api("/api/imu/calibrate")' in app
+    assert 'currentImuCalibration.state !== "calibrated"' in app
+    assert 'calibration.get("state") != "calibrated"' in backend
+    assert "请先在水平面完成 IMU 一键校准" in backend
 
 
 def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
@@ -302,6 +346,7 @@ def test_mapping_start_only_requires_workspace_setup(tmp_path):
     assert f"source {workspace_setup}" in command
     assert "device/D435i" not in command
     assert "new_map:=true" in command
+    assert "planar_motion:=true" in command
 
 
 def test_mapping_graph_conflicts_detects_external_slam_nodes():
@@ -666,6 +711,29 @@ def test_localization_pose_summary_rejects_invalid_quaternion():
     assert localization_pose_summary(message) is None
 
 
+def test_terrain_pose_callback_keeps_the_ground_constrained_height():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._terrain_pose = None
+    node._terrain_pose_received_at = None
+    message = PoseStamped()
+    message.pose.position.x = -6.825
+    message.pose.position.y = 2.375
+    message.pose.position.z = -2.575
+    message.pose.orientation.w = 1.0
+
+    node._on_navigation_terrain_pose(message)
+
+    assert node._terrain_pose == {
+        "x": -6.825,
+        "y": 2.375,
+        "z": -2.575,
+        "yaw": 0.0,
+        "yaw_degrees": 0.0,
+    }
+    assert node._terrain_pose_received_at is not None
+
+
 @pytest.mark.parametrize("payload", [
     {"x": 0.1, "y": -0.2},
     {"x": 0, "y": 0, "z": 0.3},
@@ -696,6 +764,7 @@ def test_navigation_motion_requires_localization_and_path():
     node.navigation_status = lambda: {
         "state": "running",
         "localization_ready": True,
+        "planning_localization_ready": True,
         "path_ready": True,
         "active": False,
     }
@@ -711,6 +780,7 @@ def test_navigation_motion_requires_localization_and_path():
     node.navigation_status = lambda: {
         "state": "running",
         "localization_ready": True,
+        "planning_localization_ready": True,
         "path_ready": False,
         "active": False,
     }
@@ -718,6 +788,80 @@ def test_navigation_motion_requires_localization_and_path():
     assert not started
     assert "valid path" in message
     assert len(published) == 1
+
+
+def test_failed_replan_keeps_only_a_stale_preview():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._planned_path_points = []
+    node._last_valid_path_points = []
+    node._path_frame_id = "map"
+    node._last_valid_path_frame_id = "map"
+    node._path_received_at = None
+    node._last_valid_path_received_at = None
+    node._planning_state = "pending"
+    node._planning_error = ""
+
+    valid_path = NavigationPath()
+    valid_path.header.frame_id = "map"
+    valid_path.poses.append(PoseStamped())
+    valid_path.poses[0].pose.position.x = 1.0
+    node._on_navigation_path(valid_path)
+    assert node.path_preview()["valid"] is True
+
+    node._planning_state = "pending"
+    node._on_navigation_path(NavigationPath())
+    failure = String()
+    failure.data = "failed_start_or_goal_unsupported"
+    node._on_navigation_planning_status(failure)
+
+    preview = node.path_preview()
+    assert preview["valid"] is False
+    assert preview["stale"] is True
+    assert preview["active_point_count"] == 0
+    assert preview["points"] == [(1.0, 0.0, 0.0)]
+    assert preview["planning_state"] == "failed"
+    assert "可通行地形" in preview["error"]
+
+
+def test_icp_fitness_refreshes_map_verification():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._refined_localization_status = ""
+    node._refined_localization_verified_at = None
+    node._refined_localization_fitness = None
+    node.navigation_icp_minimum_fitness = 0.25
+    node._coarse_gate_ready = True
+    node._refined_localization_pose = {"x": 0.0}
+    node._refined_localization_received_at = 1.0
+
+    good_fitness = Float32()
+    good_fitness.data = 0.9
+    node._on_navigation_refined_fitness(good_fitness)
+    verified_at = node._refined_localization_verified_at
+    assert verified_at is not None
+
+    bad_fitness = Float32()
+    bad_fitness.data = 0.0
+    node._on_navigation_refined_fitness(bad_fitness)
+    assert node._refined_localization_verified_at == verified_at
+
+
+def test_navigation_goal_is_blocked_without_recent_icp_verification():
+    node = WebControlNode.__new__(WebControlNode)
+    published = []
+    node.navigation_goal_publisher = SimpleNamespace(publish=published.append)
+    node.navigation_status = lambda: {
+        "state": "running",
+        "localization_ready": True,
+        "planning_localization_ready": False,
+    }
+
+    accepted, message = node.set_navigation_goal(0.5, 0.0, 0.0)
+
+    assert accepted is False
+    assert "recent accepted ICP" in message
+    assert published == []
 
 
 @pytest.mark.parametrize("value", ["fast", True, None, math.inf, math.nan])

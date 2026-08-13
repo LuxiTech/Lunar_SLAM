@@ -67,7 +67,7 @@ def test_d435i_uses_project_domain_42():
     assert parameters["ros_domain_id"] == 42
 
 
-def test_d435i_estimated_mount_is_twenty_centimeters_forward():
+def test_d435i_estimated_mount_uses_fourteen_centimeter_midpoint_and_auto_level():
     yaml = pytest.importorskip("yaml")
     parameters = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "sensor_bringup.yaml").read_text(
@@ -75,9 +75,12 @@ def test_d435i_estimated_mount_is_twenty_centimeters_forward():
         )
     )["luxi_adapter"]["ros__parameters"]
 
-    assert parameters["camera_x"] == pytest.approx(0.20)
+    assert parameters["camera_x"] == pytest.approx(0.14)
     assert parameters["camera_y"] == pytest.approx(0.0)
     assert parameters["camera_yaw"] == pytest.approx(0.0)
+    assert parameters["auto_level_imu"] is True
+    assert parameters["auto_level_start_automatically"] is False
+    assert parameters["imu_level_calibration_service"] == "/sensors/imu/calibrate_level"
 
 
 def test_explicit_hardware_rejects_mismatched_config():

@@ -205,6 +205,7 @@ public:
     use_imu_yaw_prediction_ = get_parameter("use_imu_yaw_prediction").as_bool();
     relocalize_on_tracking_icp_failure_ =
       get_parameter("relocalize_on_tracking_icp_failure").as_bool();
+    minimum_fitness_ = get_parameter("minimum_fitness").as_double();
     preserve_initial_translation_ =
       get_parameter("preserve_initial_translation").as_bool();
     maximum_odometry_age_ = get_parameter("maximum_odometry_age").as_double();
@@ -576,6 +577,7 @@ private:
     MapOdomCorrection odometry_correction;
     HlocAction hloc_action = HlocAction::kNone;
     int consecutive_failures = 0;
+    bool keep_odometry_tracking = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (accepted) {
@@ -610,9 +612,10 @@ private:
           }
         }
       }
-      const bool keep_odometry_tracking =
-        !initial_alignment && !accepted && !relocalize_on_tracking_icp_failure_ &&
-        map_odom_alignment_->initialized();
+      keep_odometry_tracking =
+        should_retain_odometry_after_rejected_icp(
+        initial_alignment, accepted, relocalize_on_tracking_icp_failure_,
+        map_odom_alignment_->initialized(), result.fitness, minimum_fitness_);
       hloc_action = supervisor_->report_icp_result(
         keep_odometry_tracking ? true : accepted);
       consecutive_failures = supervisor_->consecutive_icp_failures();
@@ -648,7 +651,7 @@ private:
              << " consecutive ICP failures, restarting HLoc";
     }
     if (!accepted) {
-      if (!initial_alignment && !relocalize_on_tracking_icp_failure_) {
+      if (keep_odometry_tracking) {
         status << "; local odometry remains authoritative";
       } else if (hloc_action != HlocAction::kEnable) {
         status << "; consecutive failures=" << consecutive_failures << "/"
@@ -776,6 +779,7 @@ private:
   double initial_pose_max_variance_{0.0};
   bool use_imu_yaw_prediction_{true};
   bool relocalize_on_tracking_icp_failure_{false};
+  double minimum_fitness_{0.25};
   bool preserve_initial_translation_{true};
   int consistent_pose_count_required_{3};
   int failures_before_relocalization_{5};

@@ -123,8 +123,41 @@ def _launch_d435i(context):
             additional_env=environment,
             output="screen",
         ))
-    actions.append(
-        Node(
+    auto_level = _as_bool(settings.get("auto_level_imu", True), "auto_level_imu")
+    if auto_level and enable_imu:
+        actions.append(Node(
+            package="luxi_adapter",
+            executable="imu_level_calibrator_node",
+            name="imu_level_calibrator",
+            parameters=[{
+                "imu_topic": str(settings.get("imu_output_topic", "/sensors/imu/data_raw")),
+                "base_frame": str(settings.get("base_frame", "base_link")),
+                "camera_frame": str(settings.get("camera_frame", "camera_link")),
+                "camera_x": float(settings.get("camera_x", 0.0)),
+                "camera_y": float(settings.get("camera_y", 0.0)),
+                "camera_z": float(settings.get("camera_z", 0.0)),
+                "camera_yaw": float(settings.get("camera_yaw", 0.0)),
+                "calibration_samples": int(settings.get("auto_level_samples", 200)),
+                "gravity_tolerance": float(settings.get("auto_level_gravity_tolerance", 0.8)),
+                "maximum_angular_speed": float(
+                    settings.get("auto_level_maximum_angular_speed", 0.05)
+                ),
+                "maximum_tilt_degrees": float(
+                    settings.get("auto_level_maximum_tilt_degrees", 40.0)
+                ),
+                "auto_start": bool(settings.get("auto_level_start_automatically", False)),
+                "calibration_service": str(settings.get(
+                    "imu_level_calibration_service", "/sensors/imu/calibrate_level"
+                )),
+                "status_topic": str(settings.get(
+                    "imu_level_status_topic", "/sensors/imu/level_calibration_status"
+                )),
+            }],
+            additional_env=environment,
+            output="screen",
+        ))
+    else:
+        actions.append(Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="base_to_sensor_tf",
@@ -140,8 +173,7 @@ def _launch_d435i(context):
             ],
             additional_env=environment,
             output="screen",
-        )
-    )
+        ))
     return actions
 
 

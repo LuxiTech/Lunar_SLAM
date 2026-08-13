@@ -1,4 +1,5 @@
 #include <fstream>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
@@ -12,6 +13,7 @@
 #include "octomap_msgs/msg/octomap.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
@@ -30,6 +32,8 @@ public:
     declare_parameter<std::string>("octomap_topic", "/navigation/octomap");
     declare_parameter<std::string>("goal_topic", "/navigation/goal_pose");
     declare_parameter<std::string>("path_topic", "/navigation/planned_path");
+    declare_parameter<std::string>("planning_status_topic", "/navigation/planning_status");
+    declare_parameter<std::string>("terrain_pose_topic", "/navigation/terrain_pose");
     declare_parameter<std::string>("map_frame", "map");
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<std::string>("semantic_path", "");
@@ -65,6 +69,11 @@ public:
       std::bind(&Octomap3DAstarPlannerNode::onGoal, this, std::placeholders::_1));
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local());
+    planning_status_pub_ = create_publisher<std_msgs::msg::String>(
+      get_parameter("planning_status_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
+    terrain_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+      get_parameter("terrain_pose_topic").as_string(), 10);
     obstacle_pub_ = create_publisher<visualization_msgs::msg::Marker>(
       get_parameter("terrain_obstacle_topic").as_string(),
       rclcpp::QoS(1).reliable().transient_local());
@@ -74,6 +83,9 @@ public:
     costmap_pub_ = create_publisher<visualization_msgs::msg::Marker>(
       get_parameter("terrain_costmap_topic").as_string(),
       rclcpp::QoS(1).reliable().transient_local());
+    terrain_pose_timer_ = create_wall_timer(
+      std::chrono::milliseconds(200), [this]() {publishTerrainPose();});
+    publishPlanningStatus("waiting_map");
   }
 
 private:
@@ -239,8 +251,11 @@ private:
 
   void onGoal(const geometry_msgs::msg::PoseStamped::SharedPtr goal)
   {
+    publishPlanningStatus("planning");
     if (!terrain_) {
       RCLCPP_WARN(get_logger(), "Ignoring goal: no OctoMap has arrived");
+      publishPath({});
+      publishPlanningStatus("failed_map_unavailable");
       return;
     }
     try {
@@ -251,6 +266,37 @@ private:
         transform.transform.translation.z, *goal);
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN(get_logger(), "Cannot obtain the localized robot pose: %s", error.what());
+      publishPath({});
+      publishPlanningStatus("failed_localization_unavailable");
+    }
+  }
+
+  void publishTerrainPose()
+  {
+    if (!terrain_) {
+      return;
+    }
+    try {
+      const auto transform = tf_buffer_.lookupTransform(
+        map_frame_, get_parameter("base_frame").as_string(), tf2::TimePointZero);
+      const double terrain_z = transform.transform.translation.z -
+        get_parameter("body_reference_height").as_double();
+      const auto ground = terrain_->snapToTerrainAtXY(terrain_->worldToGrid(
+        transform.transform.translation.x, transform.transform.translation.y, terrain_z));
+      if (!ground) {
+        return;
+      }
+      const auto point = terrain_->gridToWorld(*ground);
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.stamp = now();
+      pose.header.frame_id = map_frame_;
+      pose.pose.position.x = transform.transform.translation.x;
+      pose.pose.position.y = transform.transform.translation.y;
+      pose.pose.position.z = point.z();
+      pose.pose.orientation = transform.transform.rotation;
+      terrain_pose_pub_->publish(pose);
+    } catch (const tf2::TransformException &) {
+      return;
     }
   }
 
@@ -258,24 +304,34 @@ private:
   {
     const double terrain_start_z =
       start_z - get_parameter("body_reference_height").as_double();
-    const auto start = terrain_->snapToTerrain(
+    const auto start = terrain_->snapToTerrainAtXY(
       terrain_->worldToGrid(start_x, start_y, terrain_start_z));
-    const auto target = terrain_->snapToTerrain(terrain_->worldToGrid(
+    const auto target = terrain_->snapGoalToTerrain(terrain_->worldToGrid(
       goal.pose.position.x, goal.pose.position.y, goal.pose.position.z));
     if (!start || !target) {
       RCLCPP_ERROR(
         get_logger(), "No supported terrain near start or goal (snap radius=%ld cells)",
         get_parameter("snap_search_radius_cells").as_int());
       publishPath({});
+      publishPlanningStatus("failed_start_or_goal_unsupported");
       return;
     }
     const auto cells = terrain_->plan(*start, *target);
     if (cells.empty()) {
       RCLCPP_WARN(get_logger(), "No ground-supported 3D A* path found");
       publishPath({});
+      publishPlanningStatus("failed_no_path");
       return;
     }
     publishPath(cells);
+    publishPlanningStatus("ready");
+  }
+
+  void publishPlanningStatus(const std::string & status)
+  {
+    std_msgs::msg::String message;
+    message.data = status;
+    planning_status_pub_->publish(message);
   }
 
   void publishPath(const std::vector<luxi_3d_navigation::GridCell3D> & cells)
@@ -313,9 +369,12 @@ private:
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr planning_status_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr terrain_pose_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr obstacle_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr traversable_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr costmap_pub_;
+  rclcpp::TimerBase::SharedPtr terrain_pose_timer_;
 };
 
 int main(int argc, char ** argv)

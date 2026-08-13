@@ -28,6 +28,19 @@ bool finite_planar_pose(const Eigen::Matrix4d & pose)
 
 }  // namespace
 
+bool should_retain_odometry_after_rejected_icp(
+  const bool initial_alignment,
+  const bool accepted,
+  const bool relocalize_on_tracking_icp_failure,
+  const bool alignment_initialized,
+  const double fitness,
+  const double minimum_fitness)
+{
+  return !initial_alignment && !accepted &&
+         !relocalize_on_tracking_icp_failure && alignment_initialized &&
+         std::isfinite(fitness) && fitness >= minimum_fitness;
+}
+
 LocalizationSupervisor::LocalizationSupervisor(
   LocalizationSupervisorParameters parameters)
 : parameters_(parameters)

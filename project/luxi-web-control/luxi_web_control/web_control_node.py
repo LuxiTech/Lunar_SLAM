@@ -972,6 +972,7 @@ class MappingController:
         sensor_setup: Optional[Path],
         workspace_setup: Path,
         log_path: Path,
+        planar_motion: bool = True,
     ) -> None:
         self.enabled = enabled
         self.package = package
@@ -980,6 +981,7 @@ class MappingController:
         self.sensor_setup = sensor_setup
         self.workspace_setup = workspace_setup
         self.log_path = log_path
+        self.planar_motion = planar_motion
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
         self._started_at: Optional[float] = None
@@ -1006,6 +1008,7 @@ class MappingController:
             self.package,
             self.launch_file,
             "new_map:=true",
+            f"planar_motion:={'true' if self.planar_motion else 'false'}",
             "rviz:=false",
             "rtabmap_viz:=false",
         ])
@@ -1138,6 +1141,7 @@ class MappingController:
             "last_exit_code": exit_code,
             "last_error": error,
             "log_path": str(self.log_path),
+            "planar_motion": self.planar_motion,
         }
 
 
@@ -1581,6 +1585,20 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/api/imu/calibrate":
+            started, message = node.start_imu_level_calibration()
+            if not started:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.ACCEPTED,
+                {
+                    "ok": True,
+                    "message": message,
+                    "imu_calibration": node.imu_calibration_status(),
+                },
+            )
+            return
         if path == "/api/mapping/start":
             started, message = node.start_mapping()
             if not started:
@@ -1739,6 +1757,12 @@ class WebControlNode(Node):
             "/d15041873/teleop_command/get_parameters",
         )
         self.declare_parameter("d1_feedback_timeout", 3.0)
+        self.declare_parameter(
+            "imu_level_calibration_service", "/sensors/imu/calibrate_level"
+        )
+        self.declare_parameter(
+            "imu_level_status_topic", "/sensors/imu/level_calibration_status"
+        )
         self.declare_parameter("enable_mapping_control", True)
         self.declare_parameter("mapping_launch_package", "luxi_rtab_map")
         self.declare_parameter("mapping_launch_file", "rgbd_mapping_learned.launch.py")
@@ -1750,6 +1774,7 @@ class WebControlNode(Node):
         self.declare_parameter("mapping_d435_setup", "")
         self.declare_parameter("mapping_workspace_setup", "")
         self.declare_parameter("mapping_log_path", "")
+        self.declare_parameter("mapping_planar_motion", True)
         self.declare_parameter("enable_navigation_control", True)
         self.declare_parameter("navigation_launch_package", "luxi_3d_navigation")
         self.declare_parameter("navigation_launch_file", "saved_map_navigation.launch.py")
@@ -1765,6 +1790,9 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
+        self.declare_parameter(
+            "navigation_planning_status_topic", "/navigation/planning_status"
+        )
         self.declare_parameter("navigation_start_topic", "/navigation/start")
         self.declare_parameter("navigation_stop_topic", "/navigation/stop")
         self.declare_parameter("navigation_active_topic", "/navigation/active")
@@ -1783,6 +1811,9 @@ class WebControlNode(Node):
             "navigation_refined_pose_topic", "/luxi_location/pose"
         )
         self.declare_parameter(
+            "navigation_terrain_pose_topic", "/navigation/terrain_pose"
+        )
+        self.declare_parameter(
             "navigation_refined_fitness_topic", "/luxi_location/fitness"
         )
         self.declare_parameter(
@@ -1790,6 +1821,8 @@ class WebControlNode(Node):
         )
         self.declare_parameter("navigation_localization_max_variance", 0.5)
         self.declare_parameter("navigation_localization_timeout", 3.0)
+        self.declare_parameter("navigation_icp_verification_timeout", 20.0)
+        self.declare_parameter("navigation_icp_minimum_fitness", 0.25)
         self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("max_terrain_points", 12000)
         self.declare_parameter("navigation_robot_radius", 0.10)
@@ -1810,6 +1843,12 @@ class WebControlNode(Node):
         self.declare_parameter("semantic_maps_root", "")
 
         self.cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
+        self.imu_level_calibration_service = str(
+            self.get_parameter("imu_level_calibration_service").value
+        )
+        self.imu_level_status_topic = str(
+            self.get_parameter("imu_level_status_topic").value
+        )
         bind_address = str(self.get_parameter("bind_address").value)
         http_port = int(self.get_parameter("http_port").value)
         auto_stop_existing = bool(
@@ -1912,6 +1951,9 @@ class WebControlNode(Node):
                 mapping_log_path
                 or workspace_root / "log/luxi_web_control_rtabmap.log"
             ).resolve(),
+            planar_motion=bool(
+                self.get_parameter("mapping_planar_motion").value
+            ),
         )
         navigation_sensor_setup = str(
             self.get_parameter("navigation_sensor_setup").value
@@ -1989,6 +2031,9 @@ class WebControlNode(Node):
         self.navigation_path_topic = str(
             self.get_parameter("navigation_path_topic").value
         )
+        self.navigation_planning_status_topic = str(
+            self.get_parameter("navigation_planning_status_topic").value
+        )
         self.navigation_start_topic = str(
             self.get_parameter("navigation_start_topic").value
         )
@@ -2010,6 +2055,9 @@ class WebControlNode(Node):
         self.navigation_refined_pose_topic = str(
             self.get_parameter("navigation_refined_pose_topic").value
         )
+        self.navigation_terrain_pose_topic = str(
+            self.get_parameter("navigation_terrain_pose_topic").value
+        )
         self.navigation_refined_fitness_topic = str(
             self.get_parameter("navigation_refined_fitness_topic").value
         )
@@ -2021,6 +2069,12 @@ class WebControlNode(Node):
         )
         self.navigation_localization_timeout = float(
             self.get_parameter("navigation_localization_timeout").value
+        )
+        self.navigation_icp_verification_timeout = float(
+            self.get_parameter("navigation_icp_verification_timeout").value
+        )
+        self.navigation_icp_minimum_fitness = float(
+            self.get_parameter("navigation_icp_minimum_fitness").value
         )
         self.max_voxel_points = int(self.get_parameter("max_voxel_points").value)
         self.max_terrain_points = int(
@@ -2120,17 +2174,37 @@ class WebControlNode(Node):
         self._coarse_gate_ready = False
         self._refined_localization_pose: Optional[dict] = None
         self._refined_localization_received_at: Optional[float] = None
+        self._terrain_pose: Optional[dict] = None
+        self._terrain_pose_received_at: Optional[float] = None
         self._refined_localization_fitness: Optional[float] = None
         self._refined_localization_status = ""
+        self._refined_localization_verified_at: Optional[float] = None
         self._navigation_cloud_points = []
         self._navigation_cloud_map_id: Optional[str] = None
         self._navigation_cloud_variant: Optional[str] = None
         self._navigation_cloud_error = ""
         self._planned_path_points = []
+        self._last_valid_path_points = []
+        self._last_valid_path_frame_id = "map"
         self._path_frame_id = "map"
         self._path_received_at: Optional[float] = None
+        self._last_valid_path_received_at: Optional[float] = None
+        self._planning_state = "idle"
+        self._planning_error = ""
         self._navigation_active = False
         self._navigation_follower_state = "stopped"
+        self._imu_calibration_lock = threading.Lock()
+        self._imu_calibration = {
+            "state": "offline",
+            "message": "IMU 校准服务未连接",
+            "sample_count": 0,
+            "required_samples": 0,
+            "calibrated": False,
+            "roll_degrees": None,
+            "pitch_degrees": None,
+        }
+        self._imu_calibration_received_at: Optional[float] = None
+        self._imu_calibration_future = None
 
         qos = QoSProfile(
             depth=10,
@@ -2138,6 +2212,20 @@ class WebControlNode(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         self.publisher = self.create_publisher(Twist, self.cmd_vel_topic, qos)
+        self.imu_calibration_client = self.create_client(
+            Trigger, self.imu_level_calibration_service
+        )
+        imu_calibration_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.imu_calibration_subscription = self.create_subscription(
+            String,
+            self.imu_level_status_topic,
+            self._on_imu_calibration_status,
+            imu_calibration_qos,
+        )
         self.d1_fsm_subscription = None
         self.d1_controller_status_client = None
         self.d1_parameter_client = None
@@ -2192,6 +2280,12 @@ class WebControlNode(Node):
             self._on_navigation_path,
             navigation_qos,
         )
+        self.navigation_planning_status_subscription = self.create_subscription(
+            String,
+            self.navigation_planning_status_topic,
+            self._on_navigation_planning_status,
+            navigation_qos,
+        )
         self.navigation_active_subscription = self.create_subscription(
             Bool,
             self.navigation_active_topic,
@@ -2219,6 +2313,12 @@ class WebControlNode(Node):
             PoseWithCovarianceStamped,
             self.navigation_refined_pose_topic,
             self._on_navigation_refined_pose,
+            localization_qos,
+        )
+        self.navigation_terrain_pose_subscription = self.create_subscription(
+            PoseStamped,
+            self.navigation_terrain_pose_topic,
+            self._on_navigation_terrain_pose,
             localization_qos,
         )
         self.navigation_refined_fitness_subscription = self.create_subscription(
@@ -2356,6 +2456,80 @@ class WebControlNode(Node):
             self._d1_fsm_received_at = time.monotonic()
             self._d1_feedback_error = ""
 
+    def _on_imu_calibration_status(self, message: String) -> None:
+        """Cache the C++ level calibrator's transient-local status."""
+        try:
+            status = json.loads(message.data)
+            if not isinstance(status, dict) or not isinstance(status.get("state"), str):
+                raise ValueError("invalid IMU calibration status")
+        except (json.JSONDecodeError, ValueError):
+            self.get_logger().warning("Ignoring invalid IMU calibration status")
+            return
+        with self._imu_calibration_lock:
+            self._imu_calibration = status
+            self._imu_calibration_received_at = time.monotonic()
+
+    def _on_imu_calibration_response(self, future) -> None:
+        try:
+            response = future.result()
+            if response is None or not response.success:
+                raise RuntimeError(
+                    response.message if response is not None else "empty response"
+                )
+        except Exception as exc:  # noqa: BLE001 - ROS futures expose transport errors.
+            with self._imu_calibration_lock:
+                self._imu_calibration = {
+                    **self._imu_calibration,
+                    "state": "failed",
+                    "message": f"IMU 校准请求失败：{exc}",
+                }
+
+    def imu_calibration_status(self) -> Dict[str, Any]:
+        """Return the latest C++ calibrator state for the web page."""
+        with self._imu_calibration_lock:
+            status = dict(self._imu_calibration)
+            received_at = self._imu_calibration_received_at
+        status["service_available"] = self.imu_calibration_client.service_is_ready()
+        status["status_age_seconds"] = (
+            None if received_at is None
+            else round(max(0.0, time.monotonic() - received_at), 2)
+        )
+        status["busy"] = status.get("state") in {
+            "waiting_stationary", "collecting"
+        }
+        mapping_running = self.mapping.status()["state"] == "running"
+        navigation_status = self.navigation.status()
+        navigation_running = navigation_status["state"] == "running"
+        status["can_start"] = (
+            status["service_available"] and not status["busy"]
+            and not mapping_running and not navigation_running
+        )
+        return status
+
+    def start_imu_level_calibration(self) -> Tuple[bool, str]:
+        """Request stationary level calibration only outside mapping/navigation."""
+        if self.mapping_status()["state"] == "running":
+            return False, "请先停止建图，再校准 IMU"
+        navigation = self.navigation_status()
+        if navigation["state"] == "running" or navigation["active"]:
+            return False, "请先停止定位和导航，再校准 IMU"
+        if not self.imu_calibration_client.service_is_ready():
+            return False, "IMU 校准服务未连接，请先启动 D435i 硬件"
+        if self.imu_calibration_status()["busy"]:
+            return False, "IMU 正在校准，请保持机器人静止"
+        self.stop_motion()
+        with self._imu_calibration_lock:
+            self._imu_calibration = {
+                **self._imu_calibration,
+                "state": "waiting_stationary",
+                "message": "等待机器人在水平面保持静止",
+                "sample_count": 0,
+            }
+        future = self.imu_calibration_client.call_async(Trigger.Request())
+        self._imu_calibration_future = future
+        future.add_done_callback(self._on_imu_calibration_response)
+        return True, "IMU 水平校准已启动，请勿移动机器人"
+
     def _poll_d1_feedback(self) -> None:
         """Poll the vendor's morphology and SDK-mode services at 1 Hz."""
         if (
@@ -2465,6 +2639,39 @@ class WebControlNode(Node):
             self._planned_path_points = points
             self._path_frame_id = message.header.frame_id or "map"
             self._path_received_at = time.monotonic()
+            if points:
+                self._last_valid_path_points = list(points)
+                self._last_valid_path_frame_id = self._path_frame_id
+                self._last_valid_path_received_at = self._path_received_at
+                self._planning_state = "ready"
+                self._planning_error = ""
+            elif self._planning_state != "failed":
+                self._planning_state = "failed"
+                self._planning_error = "规划器未生成可执行路径"
+
+    def _on_navigation_planning_status(self, message: String) -> None:
+        errors = {
+            "failed_map_unavailable": "三维地图尚未加载完成",
+            "failed_localization_unavailable": "无法获取机器人在地图中的定位",
+            "failed_start_or_goal_unsupported": "机器人起点或目标点附近没有可通行地形",
+            "failed_no_path": "起点与目标点之间不存在连通的可通行路径",
+        }
+        status = message.data[:80]
+        with self._navigation_lock:
+            if status == "planning":
+                self._planning_state = "pending"
+                self._planning_error = ""
+            elif status == "ready":
+                if self._planned_path_points:
+                    self._planning_state = "ready"
+                    self._planning_error = ""
+            elif status in errors:
+                self._planned_path_points = []
+                self._planning_state = "failed"
+                self._planning_error = errors[status]
+            elif status == "waiting_map":
+                self._planning_state = "idle"
+                self._planning_error = ""
 
     def _on_navigation_active(self, message: Bool) -> None:
         """Track whether the C++ path follower currently owns navigation."""
@@ -2506,11 +2713,24 @@ class WebControlNode(Node):
             self._refined_localization_pose = pose
             self._refined_localization_received_at = time.monotonic()
 
+    def _on_navigation_terrain_pose(self, message: PoseStamped) -> None:
+        wrapped = PoseWithCovarianceStamped()
+        wrapped.header = message.header
+        wrapped.pose.pose = message.pose
+        pose = localization_pose_summary(wrapped)
+        if pose is None:
+            return
+        with self._navigation_lock:
+            self._terrain_pose = pose
+            self._terrain_pose_received_at = time.monotonic()
+
     def _on_navigation_refined_fitness(self, message: Float32) -> None:
         if not math.isfinite(message.data):
             return
         with self._navigation_lock:
             self._refined_localization_fitness = round(float(message.data), 4)
+            if message.data >= self.navigation_icp_minimum_fitness:
+                self._refined_localization_verified_at = time.monotonic()
 
     def _on_navigation_refined_status(self, message: String) -> None:
         with self._navigation_lock:
@@ -2524,6 +2744,7 @@ class WebControlNode(Node):
                 self._coarse_gate_ready = False
                 self._refined_localization_pose = None
                 self._refined_localization_received_at = None
+                self._refined_localization_verified_at = None
 
     def _clear_cloud_preview(self) -> None:
         """Discard map data which belongs to a previous mapping session."""
@@ -2552,14 +2773,22 @@ class WebControlNode(Node):
             self._coarse_gate_ready = False
             self._refined_localization_pose = None
             self._refined_localization_received_at = None
+            self._terrain_pose = None
+            self._terrain_pose_received_at = None
             self._refined_localization_fitness = None
             self._refined_localization_status = ""
+            self._refined_localization_verified_at = None
             self._navigation_cloud_points = []
             self._navigation_cloud_map_id = None
             self._navigation_cloud_variant = None
             self._navigation_cloud_error = ""
             self._planned_path_points = []
+            self._last_valid_path_points = []
+            self._last_valid_path_frame_id = "map"
             self._path_received_at = None
+            self._last_valid_path_received_at = None
+            self._planning_state = "idle"
+            self._planning_error = ""
             self._navigation_active = False
             self._navigation_follower_state = "stopped"
 
@@ -2742,12 +2971,26 @@ class WebControlNode(Node):
     def path_preview(self) -> Dict[str, Any]:
         """Return the latest A* global path for Canvas rendering."""
         with self._navigation_lock:
+            valid = bool(self._planned_path_points)
+            points = (
+                self._planned_path_points if valid else self._last_valid_path_points
+            )
+            received_at = (
+                self._path_received_at if valid else self._last_valid_path_received_at
+            )
             return {
-                "frame_id": self._path_frame_id,
-                "point_count": len(self._planned_path_points),
-                "age_seconds": None if self._path_received_at is None
-                else round(time.monotonic() - self._path_received_at, 2),
-                "points": list(self._planned_path_points),
+                "frame_id": (
+                    self._path_frame_id if valid else self._last_valid_path_frame_id
+                ),
+                "point_count": len(points),
+                "active_point_count": len(self._planned_path_points),
+                "valid": valid,
+                "stale": bool(points) and not valid,
+                "planning_state": self._planning_state,
+                "error": self._planning_error or None,
+                "age_seconds": None if received_at is None
+                else round(time.monotonic() - received_at, 2),
+                "points": list(points),
             }
 
     def preview_status(self) -> Dict[str, Any]:
@@ -2926,6 +3169,11 @@ class WebControlNode(Node):
 
     def start_mapping(self) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
+        calibration = self.imu_calibration_status()
+        if calibration["service_available"] and (
+            calibration.get("state") != "calibrated" or calibration["busy"]
+        ):
+            return False, "请先在水平面完成 IMU 一键校准"
         if self.mapping.status()["state"] != "running":
             conflicts = mapping_graph_conflicts(
                 self.get_node_names_and_namespaces()
@@ -3138,6 +3386,11 @@ class WebControlNode(Node):
 
     def start_navigation_localization(self, map_id: str) -> Tuple[bool, str]:
         """Start HLoc coarse localization followed by ICP refinement."""
+        calibration = self.imu_calibration_status()
+        if calibration["service_available"] and (
+            calibration.get("state") != "calibrated" or calibration["busy"]
+        ):
+            return False, "请先在水平面完成 IMU 一键校准"
         if not MAP_IDENTIFIER.fullmatch(map_id):
             return False, "map_id must use the mapNNN format"
         record = next(
@@ -3178,8 +3431,15 @@ class WebControlNode(Node):
             self._coarse_gate_ready = False
             self._refined_localization_pose = None
             self._refined_localization_received_at = None
+            self._terrain_pose = None
+            self._terrain_pose_received_at = None
             self._refined_localization_fitness = None
             self._refined_localization_status = ""
+            self._refined_localization_verified_at = None
+            self._planned_path_points = []
+            self._path_received_at = None
+            self._planning_state = "idle"
+            self._planning_error = ""
         return self.navigation.start(
             map_id,
             Path(record["database_path"]),
@@ -3202,8 +3462,11 @@ class WebControlNode(Node):
                 self._coarse_gate_ready = False
                 self._refined_localization_pose = None
                 self._refined_localization_received_at = None
+                self._terrain_pose = None
+                self._terrain_pose_received_at = None
                 self._refined_localization_fitness = None
                 self._refined_localization_status = ""
+                self._refined_localization_verified_at = None
                 self._navigation_active = False
                 self._navigation_follower_state = "stopped"
         return stopped, message
@@ -3217,8 +3480,8 @@ class WebControlNode(Node):
             return False, "release emergency stop before starting navigation"
         if navigation["state"] != "running":
             return False, "start map localization before navigation"
-        if not navigation["localization_ready"]:
-            return False, "wait for fresh HLoc and ICP localization"
+        if not navigation["planning_localization_ready"]:
+            return False, "wait for a recent accepted ICP localization before starting"
         if not navigation["path_ready"]:
             return False, "select a reachable goal and wait for a valid path"
         if navigation["active"]:
@@ -3244,8 +3507,8 @@ class WebControlNode(Node):
         navigation = self.navigation_status()
         if navigation["state"] != "running":
             return False, "load a map and wait for navigation to start first"
-        if not navigation["localization_ready"]:
-            return False, "wait for HLoc and ICP localization before selecting a goal"
+        if not navigation["planning_localization_ready"]:
+            return False, "wait for a recent accepted ICP localization before selecting a goal"
         self.halt_navigation_motion()
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
@@ -3253,6 +3516,8 @@ class WebControlNode(Node):
             goal.header.frame_id = self._voxel_frame_id or "map"
             self._planned_path_points = []
             self._path_received_at = None
+            self._planning_state = "pending"
+            self._planning_error = ""
         goal.pose.position.x = x
         goal.pose.position.y = y
         goal.pose.position.z = z
@@ -3273,7 +3538,18 @@ class WebControlNode(Node):
                 time.monotonic() - self._localization_received_at, 2)
             refined_age = (
                 None if self._refined_localization_received_at is None else round(
-                    time.monotonic() - self._refined_localization_received_at, 2)
+                    time.monotonic() - self._refined_localization_received_at, 2
+                )
+            )
+            terrain_pose_age = (
+                None if self._terrain_pose_received_at is None else round(
+                    time.monotonic() - self._terrain_pose_received_at, 2
+                )
+            )
+            icp_verification_age = (
+                None if self._refined_localization_verified_at is None else round(
+                    time.monotonic() - self._refined_localization_verified_at, 2
+                )
             )
             coarse_ready = (
                 self._coarse_gate_ready
@@ -3286,11 +3562,22 @@ class WebControlNode(Node):
                 and refined_age is not None
                 and refined_age <= self.navigation_localization_timeout
             )
+            terrain_pose_ready = (
+                self._terrain_pose is not None
+                and terrain_pose_age is not None
+                and terrain_pose_age <= self.navigation_localization_timeout
+            )
+            icp_verified = (
+                icp_verification_age is not None
+                and icp_verification_age <= self.navigation_icp_verification_timeout
+            )
             running = status["state"] == "running"
             status["path_ready"] = running and bool(
                 self._planned_path_points
             )
             status["path_point_count"] = len(self._planned_path_points)
+            status["planning_state"] = self._planning_state
+            status["planning_error"] = self._planning_error or None
             status["active"] = running and self._navigation_active
             status["follower_state"] = (
                 self._navigation_follower_state if running else "stopped"
@@ -3301,17 +3588,27 @@ class WebControlNode(Node):
             )
             status["refined_localization_ready"] = running and refined_ready
             status["localization_ready"] = running and refined_ready
+            status["planning_localization_ready"] = (
+                running and refined_ready and icp_verified
+            )
+            status["icp_verified"] = running and icp_verified
+            status["icp_verification_age_seconds"] = icp_verification_age
             status["localization_variance"] = self._localization_variance
             status["localization_age_seconds"] = refined_age
+            status["terrain_pose_age_seconds"] = terrain_pose_age
             status["coarse_localization_age_seconds"] = coarse_age
             status["localization_fitness"] = self._refined_localization_fitness
             status["localization_status"] = self._refined_localization_status or None
             if running and refined_ready:
+                pose = dict(self._refined_localization_pose)
+                if terrain_pose_ready:
+                    pose.update(self._terrain_pose)
+                    pose["localization_z"] = self._refined_localization_pose["z"]
+                    pose["source"] = "terrain_constrained"
+                else:
+                    pose["source"] = "icp"
                 status["localization_stage"] = "localized"
-                status["pose"] = {
-                    **self._refined_localization_pose,
-                    "source": "icp",
-                }
+                status["pose"] = pose
             elif running and coarse_ready and self._coarse_localization_pose:
                 status["localization_stage"] = "refining"
                 status["pose"] = {
@@ -3364,6 +3661,7 @@ class WebControlNode(Node):
             "limits": self.limits.as_dict(),
             "subscriber_count": self.publisher.get_subscription_count(),
             "robot_control": self.d1_control_status(),
+            "imu_calibration": self.imu_calibration_status(),
             "mapping": self.mapping_status(),
             "navigation": self.navigation_status(),
             "preview": self.preview_status(),

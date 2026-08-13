@@ -381,7 +381,7 @@ std::optional<GridCell3D> TerrainModel::snapToTerrain(const GridCell3D & seed) c
     for (int dy = -radius; dy <= radius; ++dy) {
       for (int dx = -radius; dx <= radius; ++dx) {
         const GridCell3D candidate{seed.x + dx, seed.y + dy, seed.z + dz};
-        if (!isTraversable(candidate)) {
+        if (surface_cells_.find(candidate) == surface_cells_.end()) {
           continue;
         }
         const double score = static_cast<double>(dx * dx + dy * dy) +
@@ -396,12 +396,42 @@ std::optional<GridCell3D> TerrainModel::snapToTerrain(const GridCell3D & seed) c
   return best;
 }
 
+std::optional<GridCell3D> TerrainModel::snapGoalToTerrain(const GridCell3D & seed) const
+{
+  return snapToTerrainAtXY(seed);
+}
+
+std::optional<GridCell3D> TerrainModel::snapToTerrainAtXY(const GridCell3D & seed) const
+{
+  const int radius = std::max(0, parameters_.snap_radius_cells);
+  std::optional<GridCell3D> best;
+  std::tuple<int, int, int> best_score{
+    std::numeric_limits<int>::max(), std::numeric_limits<int>::max(),
+    std::numeric_limits<int>::max()};
+  for (const auto & candidate : surface_cells_) {
+    const int dx = candidate.x - seed.x;
+    const int dy = candidate.y - seed.y;
+    if (std::abs(dx) > radius || std::abs(dy) > radius) {
+      continue;
+    }
+    const std::tuple<int, int, int> score{
+      dx * dx + dy * dy, std::abs(candidate.z - seed.z), candidate.z};
+    if (score < best_score) {
+      best = candidate;
+      best_score = score;
+    }
+  }
+  return best;
+}
+
 std::vector<GridCell3D> TerrainModel::plan(
   const GridCell3D & start, const GridCell3D & goal) const
 {
   return planAstar3D(
     start, goal,
-    [this](const auto & cell) {return isTraversable(cell);},
+    [this](const auto & cell) {
+      return surface_cells_.find(cell) != surface_cells_.end();
+    },
     [this](const auto & from, const auto & to) {return transitionAllowed(from, to);},
     [this](const auto & cell) {
       return parameters_.costmap_weight * traversalCost(cell);
