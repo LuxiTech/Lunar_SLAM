@@ -1,6 +1,11 @@
 #include "luxi_location/depth_projection.hpp"
 #include "luxi_location/icp_localizer.hpp"
+#include "luxi_location/initial_pose_fusion.hpp"
 #include "luxi_location/localization_supervisor.hpp"
+#include "luxi_location/map_odom_alignment.hpp"
+#include "luxi_location/command_gated_odometry.hpp"
+#include "luxi_location/tracking_pose_gate.hpp"
+#include "luxi_location/yaw_motion_predictor.hpp"
 
 #include <gtest/gtest.h>
 #include <open3d/Open3D.h>
@@ -221,4 +226,201 @@ TEST(LocalizationSupervisor, SuccessfulTrackingResetsFailureCount)
     supervisor.report_icp_result(true),
     luxi_location::HlocAction::kNone);
   EXPECT_EQ(supervisor.consecutive_icp_failures(), 0);
+}
+
+TEST(TrackingPoseGate, RejectsSinglePhysicallyImpossibleJumpAndAcceptsRecovery)
+{
+  luxi_location::TrackingPoseGateParameters parameters;
+  parameters.maximum_linear_speed = 0.20;
+  parameters.translation_margin = 0.08;
+  luxi_location::TrackingPoseGate gate(parameters);
+  gate.reset(luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0), 10.0);
+
+  const auto normal = gate.evaluate(
+    luxi_location::IcpLocalizer::planar_pose(0.08, 0.0, 0.0, 0.0), 10.5);
+  EXPECT_TRUE(normal.accepted) << normal.reason;
+
+  const auto runaway = gate.evaluate(
+    luxi_location::IcpLocalizer::planar_pose(0.65, 0.0, 0.0, 0.0), 11.0);
+  EXPECT_FALSE(runaway.accepted);
+  EXPECT_EQ(runaway.reason, "translation jump exceeds physical limit");
+
+  const auto recovered = gate.evaluate(
+    luxi_location::IcpLocalizer::planar_pose(0.15, 0.0, 0.0, 0.0), 11.5);
+  EXPECT_TRUE(recovered.accepted) << recovered.reason;
+}
+
+TEST(TrackingPoseGate, RejectsYawJumpAndOutOfOrderMeasurement)
+{
+  luxi_location::TrackingPoseGate gate;
+  gate.reset(luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0), 1.0);
+
+  const auto yaw_jump = gate.evaluate(
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 1.0), 1.5);
+  EXPECT_FALSE(yaw_jump.accepted);
+  EXPECT_EQ(yaw_jump.reason, "yaw jump exceeds physical limit");
+
+  const auto old = gate.evaluate(
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0), 0.9);
+  EXPECT_FALSE(old.accepted);
+  EXPECT_EQ(old.reason, "pose timestamp is not newer than the accepted pose");
+}
+
+TEST(TrackingPoseGate, RelocalizationMustReconnectToLastTrustedPose)
+{
+  luxi_location::TrackingPoseGateParameters parameters;
+  parameters.maximum_relocalization_translation = 0.40;
+  parameters.maximum_relocalization_yaw = 30.0 * M_PI / 180.0;
+  luxi_location::TrackingPoseGate gate(parameters);
+  gate.reset(luxi_location::IcpLocalizer::planar_pose(-2.2, -0.4, 0.0, 0.8), 1.0);
+
+  const auto runaway = gate.evaluate_relocalization(
+    luxi_location::IcpLocalizer::planar_pose(-1.62, -0.4, 0.0, 0.8), 30.0);
+  EXPECT_FALSE(runaway.accepted);
+  EXPECT_EQ(
+    runaway.reason,
+    "relocalized translation is inconsistent with the last trusted pose");
+
+  const auto recovered = gate.evaluate_relocalization(
+    luxi_location::IcpLocalizer::planar_pose(-2.05, -0.45, 0.0, 0.9), 31.0);
+  EXPECT_TRUE(recovered.accepted) << recovered.reason;
+}
+
+TEST(TrackingPoseGate, AcceptsNearbyPoseAfterLongMeasurementGap)
+{
+  luxi_location::TrackingPoseGate gate;
+  gate.reset(luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0), 1.0);
+
+  const auto recovered = gate.evaluate(
+    luxi_location::IcpLocalizer::planar_pose(0.25, 0.0, 0.0, 0.1), 6.0);
+  EXPECT_TRUE(recovered.accepted) << recovered.reason;
+}
+
+TEST(YawMotionPredictor, AppliesWrappedImuYawDeltaWithoutChangingPosition)
+{
+  luxi_location::YawMotionPredictor predictor(0.7);
+  predictor.update(3.10);
+  predictor.anchor();
+  predictor.update(-3.08);
+  const auto pose =
+    luxi_location::IcpLocalizer::planar_pose(1.0, 2.0, 0.3, 0.20);
+  const auto predicted = predictor.predict(pose);
+
+  EXPECT_NEAR(predicted(0, 3), 1.0, 1e-9);
+  EXPECT_NEAR(predicted(1, 3), 2.0, 1e-9);
+  EXPECT_NEAR(predicted(2, 3), 0.3, 1e-9);
+  EXPECT_NEAR(
+    luxi_location::IcpLocalizer::yaw(predicted),
+    0.20 + (-3.08 - 3.10 + 2.0 * M_PI), 1e-9);
+}
+
+TEST(YawMotionPredictor, IgnoresImplausiblyLargeDelta)
+{
+  luxi_location::YawMotionPredictor predictor(0.3);
+  predictor.update(0.0);
+  predictor.anchor();
+  predictor.update(1.0);
+  const auto pose =
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.2);
+
+  EXPECT_TRUE(predictor.predict(pose).isApprox(pose, 1e-9));
+}
+
+TEST(MapOdomAlignment, UsesContinuousOdometryInsteadOfRepeatedGlobalIcpMotion)
+{
+  luxi_location::MapOdomAlignment alignment(0.05, 0.10, 10.0 * M_PI / 180.0);
+  const auto initial_map_base =
+    luxi_location::IcpLocalizer::planar_pose(-1.2, -1.0, 0.0, 0.8);
+  alignment.initialize(initial_map_base, Eigen::Matrix4d::Identity());
+
+  const auto odom_after_motion =
+    luxi_location::IcpLocalizer::planar_pose(0.05, 0.0, 0.0, 0.0);
+  const auto predicted = alignment.predict(odom_after_motion);
+
+  EXPECT_NEAR(predicted(0, 3), -1.2 + 0.05 * std::cos(0.8), 1e-9);
+  EXPECT_NEAR(predicted(1, 3), -1.0 + 0.05 * std::sin(0.8), 1e-9);
+  EXPECT_NEAR(luxi_location::IcpLocalizer::yaw(predicted), 0.8, 1e-9);
+}
+
+TEST(MapOdomAlignment, RejectsRunawayIcpWithoutMovingTrustedAlignment)
+{
+  luxi_location::MapOdomAlignment alignment(0.05, 0.10, 10.0 * M_PI / 180.0);
+  const auto initial =
+    luxi_location::IcpLocalizer::planar_pose(1.0, 2.0, 0.0, 0.2);
+  alignment.initialize(initial, Eigen::Matrix4d::Identity());
+
+  const auto runaway =
+    luxi_location::IcpLocalizer::planar_pose(1.35, 2.0, 0.0, 0.2);
+  const auto decision = alignment.correct(runaway, Eigen::Matrix4d::Identity());
+
+  EXPECT_FALSE(decision.accepted);
+  EXPECT_EQ(decision.reason, "ICP translation disagrees with local odometry");
+  EXPECT_TRUE(alignment.predict(Eigen::Matrix4d::Identity()).isApprox(initial, 1e-9));
+}
+
+TEST(MapOdomAlignment, AppliesOnlyBoundedFractionOfAcceptedIcpCorrection)
+{
+  luxi_location::MapOdomAlignment alignment(0.10, 0.10, 10.0 * M_PI / 180.0);
+  alignment.initialize(Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity());
+  const auto measured =
+    luxi_location::IcpLocalizer::planar_pose(0.08, -0.04, 0.0, 0.05);
+
+  const auto decision = alignment.correct(measured, Eigen::Matrix4d::Identity());
+  ASSERT_TRUE(decision.accepted) << decision.reason;
+  const auto corrected = alignment.predict(Eigen::Matrix4d::Identity());
+  EXPECT_NEAR(corrected(0, 3), 0.008, 1e-9);
+  EXPECT_NEAR(corrected(1, 3), -0.004, 1e-9);
+  EXPECT_NEAR(luxi_location::IcpLocalizer::yaw(corrected), 0.005, 1e-9);
+}
+
+TEST(CommandGatedOdometry, FreezesVisualDriftWhileVelocityCommandIsZero)
+{
+  luxi_location::CommandGatedOdometry odometry;
+  const auto origin = luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0);
+  const auto drift = luxi_location::IcpLocalizer::planar_pose(0.08, -0.03, 0.0, 0.04);
+
+  EXPECT_TRUE(odometry.update(origin, false).isApprox(origin, 1e-9));
+  EXPECT_TRUE(odometry.update(drift, false).isApprox(origin, 1e-9));
+}
+
+TEST(CommandGatedOdometry, StartsFromLatestRawReferenceWithoutReleaseJump)
+{
+  luxi_location::CommandGatedOdometry odometry;
+  odometry.update(Eigen::Matrix4d::Identity(), false);
+  const auto drift = luxi_location::IcpLocalizer::planar_pose(0.08, 0.0, 0.0, 0.0);
+  odometry.update(drift, false);
+  const auto moved = luxi_location::IcpLocalizer::planar_pose(0.13, 0.0, 0.0, 0.0);
+
+  const auto filtered = odometry.update(moved, true);
+  EXPECT_NEAR(filtered(0, 3), 0.05, 1e-9);
+  EXPECT_NEAR(filtered(1, 3), 0.0, 1e-9);
+}
+
+TEST(InitialPoseFusion, PreservesTrustedTranslationOnPlanarMap)
+{
+  const auto trusted =
+    luxi_location::IcpLocalizer::planar_pose(-0.51, -1.35, -0.08, 1.82);
+  const auto refined =
+    luxi_location::IcpLocalizer::planar_pose(-0.12, -1.34, -0.19, 1.93);
+
+  const auto fused = luxi_location::initialPoseForMapAlignment(trusted, refined, true);
+
+  EXPECT_NEAR(fused(0, 3), trusted(0, 3), 1e-9);
+  EXPECT_NEAR(fused(1, 3), trusted(1, 3), 1e-9);
+  EXPECT_NEAR(fused(2, 3), trusted(2, 3), 1e-9);
+  EXPECT_NEAR(
+    luxi_location::IcpLocalizer::yaw(fused),
+    luxi_location::IcpLocalizer::yaw(refined), 1e-9);
+}
+
+TEST(InitialPoseFusion, CanUseFullIcpTranslationWhenMapHasEnoughGeometry)
+{
+  const auto trusted =
+    luxi_location::IcpLocalizer::planar_pose(-0.51, -1.35, -0.08, 1.82);
+  const auto refined =
+    luxi_location::IcpLocalizer::planar_pose(-0.48, -1.31, -0.07, 1.84);
+
+  EXPECT_TRUE(
+    luxi_location::initialPoseForMapAlignment(trusted, refined, false)
+    .isApprox(refined, 1e-9));
 }

@@ -67,6 +67,19 @@ def test_d435i_uses_project_domain_42():
     assert parameters["ros_domain_id"] == 42
 
 
+def test_d435i_estimated_mount_is_twenty_centimeters_forward():
+    yaml = pytest.importorskip("yaml")
+    parameters = yaml.safe_load(
+        (PACKAGE_ROOT / "config" / "sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["luxi_adapter"]["ros__parameters"]
+
+    assert parameters["camera_x"] == pytest.approx(0.20)
+    assert parameters["camera_y"] == pytest.approx(0.0)
+    assert parameters["camera_yaw"] == pytest.approx(0.0)
+
+
 def test_explicit_hardware_rejects_mismatched_config():
     module = _load_launch_module()
 

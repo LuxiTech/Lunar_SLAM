@@ -31,7 +31,7 @@ web_control:
     mapping_launch_package: luxi_rtab_map
     mapping_launch_file: rgbd_mapping_learned.launch.py
     # The mapping child uses the same RMW as the sensor pipeline.
-    mapping_rmw_implementation: rmw_cyclonedds_cpp
+    mapping_rmw_implementation: rmw_fastrtps_cpp
 
     # Map pairs are discovered as rtab_maps/mapNNN.db and
     # octo_maps/mapNNN_octomap/mapNNN.bt. Loading also reads the saved
@@ -40,7 +40,7 @@ web_control:
     enable_navigation_control: true
     navigation_launch_package: luxi_3d_navigation
     navigation_launch_file: saved_map_navigation.launch.py
-    navigation_rmw_implementation: rmw_cyclonedds_cpp
+    navigation_rmw_implementation: rmw_fastrtps_cpp
     maps_root: ""
     # Selecting a database without exported layers runs tools/export_rtabmap_octomap.sh.
     # The database must already be saved; this limits the one-shot export duration.

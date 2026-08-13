@@ -465,7 +465,9 @@ function updateNavigation(navigation) {
     navigationUseFiltered = navigation.map_variant === "filtered";
   }
   let name = navigationStateNames[navigation.state] || navigation.state;
-  if (navigation.active) {
+  if (navigation.follower_state === "localization_degraded") {
+    name = "定位恢复中（已停车）";
+  } else if (navigation.active) {
     name = "行驶中";
   } else if (navigation.follower_state === "goal_reached") {
     name = "已到达";
@@ -511,7 +513,10 @@ function updateNavigation(navigation) {
     const poseText = pose
       ? ` x=${pose.x.toFixed(2)}m，y=${pose.y.toFixed(2)}m，yaw=${pose.yaw_degrees.toFixed(1)}°`
       : "";
-    if (navigation.localization_stage === "localized") {
+    if (navigation.follower_state === "localization_degraded") {
+      navigationDetail.textContent =
+        `${mapName} 定位暂时失效，车辆保持零速度；可信定位恢复后将自动继续。`;
+    } else if (navigation.localization_stage === "localized") {
       const fitness = navigation.localization_fitness == null
         ? "" : `，fitness=${Number(navigation.localization_fitness).toFixed(3)}`;
       const motionText = navigation.active

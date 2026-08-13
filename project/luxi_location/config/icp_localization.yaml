@@ -6,7 +6,31 @@ luxi_icp_localization:
     # Zero accepts manual initial poses without checking their covariance.
     initial_pose_max_variance: 0.0
     map_frame: map
+    odom_frame: odom
     base_frame: base_link
+
+    # Continuous local motion comes from RTAB-Map RGB-D odometry. ICP only
+    # estimates a bounded, slowly applied map-to-odom correction.
+    odometry_topic: /navigation/odom
+    navigation_active_topic: /navigation/active
+    maximum_odometry_age: 0.25
+    # The current map's large uniform floor gives scan-to-map ICP a directional
+    # bias even while stationary. Keep ICP as a health check for the 0.5 m
+    # acceptance stage; do not let it rewrite the continuous odometry track.
+    map_odom_correction_gain: 0.0
+    maximum_odometry_icp_translation_correction: 0.10
+    maximum_odometry_icp_yaw_correction_deg: 10.0
+    # A scan-to-map mismatch must not reset an otherwise healthy local odometry
+    # track into a different HLoc hypothesis while the robot is navigating.
+    relocalize_on_tracking_icp_failure: false
+    # map045 has a large uniform floor. Preserve the HLoc/manual translation at
+    # initialization so planar ICP cannot slide to another high-fitness offset.
+    preserve_initial_translation: true
+
+    # D1 body IMU supplies short-term yaw change between 2 Hz ICP updates.
+    imu_topic: /d15041873/imu_sensor_broadcaster/imu
+    use_imu_yaw_prediction: true
+    maximum_imu_yaw_prediction_deg: 40.0
 
     processing_period: 0.5
     pixel_stride: 4
@@ -36,5 +60,16 @@ luxi_icp_localization:
     hloc_maximum_yaw_difference_deg: 20.0
     icp_failures_before_relocalization: 5
     hloc_enable_service: /luxi_hloc_localizer/enable
+
+    # Reject geometrically plausible ICP local minima that imply motion beyond
+    # the robot's physical envelope. A rejected frame never replaces the last
+    # trusted map pose and contributes to the existing HLoc recovery counter.
+    tracking_maximum_linear_speed: 0.20
+    tracking_maximum_angular_speed: 0.70
+    tracking_translation_margin: 0.08
+    tracking_yaw_margin_deg: 8.0
+    tracking_maximum_interval: 2.0
+    relocalization_maximum_translation: 0.40
+    relocalization_maximum_yaw_deg: 30.0
 
     publish_tf: true

@@ -76,6 +76,7 @@ endforeach()
 
 add_executable(terrain_path_follower_node src/terrain_path_follower_node.cpp)
 target_compile_features(terrain_path_follower_node PUBLIC cxx_std_17)
+target_include_directories(terrain_path_follower_node PRIVATE include)
 ament_target_dependencies(terrain_path_follower_node
   geometry_msgs nav_msgs rclcpp std_msgs tf2 tf2_geometry_msgs tf2_ros)
 
@@ -127,6 +128,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_velocity_command_mux test/test_velocity_command_mux.cpp)
   target_include_directories(test_velocity_command_mux PRIVATE include)
   ament_target_dependencies(test_velocity_command_mux geometry_msgs)
+  ament_add_gtest(
+    test_localization_health_monitor test/test_localization_health_monitor.cpp)
+  target_include_directories(test_localization_health_monitor PRIVATE include)
+  ament_add_gtest(test_path_follower_control test/test_path_follower_control.cpp)
+  target_include_directories(test_path_follower_control PRIVATE include)
   set_target_properties(
     test_terrain_cloud_classifier PROPERTIES BUILD_RPATH "/lib/aarch64-linux-gnu")
   target_link_options(test_terrain_cloud_classifier PRIVATE "-Wl,--disable-new-dtags")

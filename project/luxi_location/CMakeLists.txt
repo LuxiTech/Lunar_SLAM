@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -26,9 +27,13 @@ if(NOT Open3D_FOUND)
 endif()
 
 add_library(luxi_location_core
+  src/command_gated_odometry.cpp
   src/depth_projection.cpp
   src/icp_localizer.cpp
-  src/localization_supervisor.cpp)
+  src/localization_supervisor.cpp
+  src/map_odom_alignment.cpp
+  src/tracking_pose_gate.cpp
+  src/yaw_motion_predictor.cpp)
 target_include_directories(luxi_location_core
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -40,6 +45,7 @@ target_link_libraries(icp_localization_node luxi_location_core)
 ament_target_dependencies(
   icp_localization_node
   geometry_msgs
+  nav_msgs
   rclcpp
   sensor_msgs
   std_msgs

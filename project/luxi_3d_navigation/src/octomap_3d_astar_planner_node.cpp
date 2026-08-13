@@ -36,6 +36,7 @@ public:
     declare_parameter<std::string>("cloud_path", "");
     declare_parameter<double>("robot_radius", 0.10);
     declare_parameter<double>("robot_height", 0.35);
+    declare_parameter<double>("body_reference_height", 0.35);
     declare_parameter<double>("max_step_height", 0.15);
     declare_parameter<double>("max_slope_degrees", 50.0);
     declare_parameter<int>("ground_support_xy_radius_cells", 1);
@@ -255,7 +256,10 @@ private:
 
   void plan(double start_x, double start_y, double start_z, const geometry_msgs::msg::PoseStamped & goal)
   {
-    const auto start = terrain_->snapToTerrain(terrain_->worldToGrid(start_x, start_y, start_z));
+    const double terrain_start_z =
+      start_z - get_parameter("body_reference_height").as_double();
+    const auto start = terrain_->snapToTerrain(
+      terrain_->worldToGrid(start_x, start_y, terrain_start_z));
     const auto target = terrain_->snapToTerrain(terrain_->worldToGrid(
       goal.pose.position.x, goal.pose.position.y, goal.pose.position.z));
     if (!start || !target) {
