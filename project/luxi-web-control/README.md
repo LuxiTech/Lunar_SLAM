@@ -249,7 +249,9 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 4. 点击“停止建图”。网页会向它启动的建图进程发送 `SIGINT`，RTAB-Map 正常关闭并
    保存数据库。
 
-网页只在遥控盘上方显示当前硬件 profile 的 RGB 图像。默认
+网页只在遥控盘上方以 10 Hz 显示当前硬件 profile 的 RGB 图像；D435i 适配层以
+12 Hz 上限按需生成 JPEG，为 30 FPS 时间戳离散抽样和网络调度留出余量，浏览器页面
+隐藏时暂停拉取。默认
 `enable_cloud_preview=false`，网页节点不会订阅 `/rtabmap/cloud_map`，实时点云 HTTP
 接口也不可用，避免大 JSON 响应阻塞手机控制心跳。这不会改变 RTAB-Map 内部点云、地图
 数据库、保存地图的 PLY/OctoMap 或定位精度。若在非遥控部署中显式恢复可选点云接口，

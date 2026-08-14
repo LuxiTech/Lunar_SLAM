@@ -104,7 +104,7 @@ SensorAdapter::SensorAdapter(const rclcpp::NodeOptions & options)
     "generate_compressed_color_from_raw", false);
   compressed_color_jpeg_quality_ = declare_parameter<int>(
     "compressed_color_jpeg_quality", 80);
-  const auto compressed_color_rate = declare_parameter<double>("compressed_color_rate", 5.0);
+  const auto compressed_color_rate = declare_parameter<double>("compressed_color_rate", 12.0);
   if (compressed_color_jpeg_quality_ < 1 || compressed_color_jpeg_quality_ > 100) {
     throw std::invalid_argument("compressed_color_jpeg_quality must be in [1, 100].");
   }

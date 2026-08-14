@@ -22,7 +22,9 @@ luxi_adapter:
     # RealSense publishes raw RGB only. Generate a bounded on-demand JPEG
     # preview for web clients without changing the algorithm RGB-D stream.
     generate_compressed_color_from_raw: true
-    compressed_color_rate: 5.0
+    # Keep modest producer headroom so a 10 Hz browser poll does not repeatedly
+    # hit the same frame after discrete 30 FPS camera timestamp sampling.
+    compressed_color_rate: 12.0
     compressed_color_jpeg_quality: 80
     enable_imu: true
 

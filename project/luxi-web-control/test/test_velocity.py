@@ -128,7 +128,24 @@ def test_drive_page_prioritizes_control_over_large_previews():
     assert "refreshCloudPreview" not in app
     assert "cancelHeavyPreviewRequests" in app
     assert "{timeoutMs: 250}" in app
+    assert "const RGB_PREVIEW_INTERVAL_MS = 100" in app
+    assert "setInterval(refreshRgbPreview, RGB_PREVIEW_INTERVAL_MS)" in app
     assert 'window.addEventListener("blur"' not in app
+
+
+def test_d435i_web_preview_has_headroom_for_ten_hz_delivery():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi_adapter/config/sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    parameters = config["luxi_adapter"]["ros__parameters"]
+    assert parameters["compressed_color_rate"] == 12.0
+
+    source = (
+        WORKSPACE_ROOT / "project/luxi_adapter/src/sensor_adapter.cpp"
+    ).read_text(encoding="utf-8")
+    assert '"compressed_color_rate", 12.0' in source
 
 
 def test_lekiwi_launch_uses_vehicle_domain_42():

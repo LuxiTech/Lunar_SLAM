@@ -67,6 +67,7 @@ const semanticUndoButton = $("#semanticUndoButton");
 const semanticReloadButton = $("#semanticReloadButton");
 const semanticSaveButton = $("#semanticSaveButton");
 const semanticStatus = $("#semanticStatus");
+const RGB_PREVIEW_INTERVAL_MS = 100;
 
 const held = new Set();
 const controlClientId = (() => {
@@ -1870,7 +1871,7 @@ function updatePreviewStatus(preview) {
 }
 
 async function refreshRgbPreview() {
-  if (rgbRefreshPending) return;
+  if (rgbRefreshPending || document.hidden) return;
   rgbRefreshPending = true;
   try {
     const response = await fetch(`/api/preview/rgb?t=${Date.now()}`, {cache: "no-store"});
@@ -1929,7 +1930,7 @@ async function refreshStatus() {
 
 setInterval(sendCommand, 100);
 setInterval(refreshStatus, 1000);
-setInterval(refreshRgbPreview, 500);
+setInterval(refreshRgbPreview, RGB_PREVIEW_INTERVAL_MS);
 setInterval(refreshNavigationMaps, 2500);
 setInterval(refreshVoxelMap, 1000);
 window.addEventListener("resize", () => {
