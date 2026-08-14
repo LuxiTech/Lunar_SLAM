@@ -402,6 +402,7 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
 .mapping-mode-row select { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #0b121c; color: var(--text); padding: 8px 10px; font: inherit; }
 .mapping-mode-row select:disabled { opacity: .55; }
 .mapping-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mapping-actions.single-action { grid-template-columns: 1fr; }
 .mapping-actions button {
   padding: 10px 8px;
   border: 1px solid var(--border);

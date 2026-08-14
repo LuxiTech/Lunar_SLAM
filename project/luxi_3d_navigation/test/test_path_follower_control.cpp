@@ -63,3 +63,11 @@ TEST(PathFollowerControl, SinglePointPathStillRequiresTolerance)
   EXPECT_FALSE(luxi_3d_navigation::pathGoalReached(
     0.0, 0.0, 0.0, 0.50, 0.0, 0.50, 0.02, 0.12));
 }
+
+TEST(PathFollowerControl, SameXYOnAnotherTerrainLevelIsNotTheGoal)
+{
+  EXPECT_FALSE(luxi_3d_navigation::pathGoalReached3D(
+    1.0, 2.0, 0.0, 0.9, 2.0, 1.0, 2.0, 1.0, 0.12, 0.12));
+  EXPECT_TRUE(luxi_3d_navigation::pathGoalReached3D(
+    1.0, 2.0, 0.95, 0.9, 2.0, 1.0, 2.0, 1.0, 0.12, 0.12));
+}

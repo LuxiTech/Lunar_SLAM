@@ -20,8 +20,9 @@ luxi_icp_localization:
     map_odom_correction_gain: 0.0
     maximum_odometry_icp_translation_correction: 0.10
     maximum_odometry_icp_yaw_correction_deg: 10.0
-    # A scan-to-map mismatch must not reset an otherwise healthy local odometry
-    # track into a different HLoc hypothesis while the robot is navigating.
+    # A scan that still overlaps the map but disagrees with local odometry must
+    # not reset into another HLoc hypothesis. Zero-overlap scans are handled
+    # separately by the node and restart HLoc after the configured failure count.
     relocalize_on_tracking_icp_failure: false
     # map045 has a large uniform floor. Preserve the HLoc/manual translation at
     # initialization so planar ICP cannot slide to another high-fitness offset.

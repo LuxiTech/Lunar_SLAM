@@ -44,6 +44,18 @@ inline bool pathGoalReached(
   return (robot_x - goal_x) * segment_x + (robot_y - goal_y) * segment_y >= 0.0;
 }
 
+inline bool pathGoalReached3D(
+  const double robot_x, const double robot_y, const double robot_z,
+  const double previous_x, const double previous_y,
+  const double goal_x, const double goal_y, const double goal_z,
+  const double configured_tolerance, const double minimum_safe_tolerance)
+{
+  const double tolerance = std::max(configured_tolerance, minimum_safe_tolerance);
+  return std::abs(goal_z - robot_z) <= tolerance && pathGoalReached(
+    robot_x, robot_y, previous_x, previous_y, goal_x, goal_y,
+    configured_tolerance, minimum_safe_tolerance);
+}
+
 inline PathFollowerCommand pathFollowerCommand(
   const double distance, const double heading_error, const double linear_gain,
   const double angular_gain, const double maximum_linear_speed,

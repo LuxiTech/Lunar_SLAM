@@ -17,6 +17,14 @@ def generate_launch_description() -> LaunchDescription:
             "--Rtabmap/LoopThr 0.2 "
             "--RGBD/LinearUpdate 0.05 "
             "--RGBD/AngularUpdate 0.03 "
+            # Keep the robot trajectory on the test floor while retaining the
+            # full 3D RGB-D cloud. RTAB-Map's own 3D Husky demo uses the same
+            # separation: planar vehicle poses do not flatten depth geometry.
+            "--Reg/Force3DoF ",
+            LaunchConfiguration("planar_motion"),
+            " --RGBD/ForceOdom3DoF ",
+            LaunchConfiguration("planar_motion"),
+            " --Grid/3D true "
             "--Kp/MinDepth ",
             LaunchConfiguration("mapping_depth_min"),
             " --Kp/MaxDepth ",
@@ -118,6 +126,15 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("mapping_depth_min", default_value="0.2"),
             DeclareLaunchArgument("mapping_depth_max", default_value="6.0"),
+            DeclareLaunchArgument(
+                "planar_motion",
+                default_value="true",
+                description=(
+                    "Constrain only the robot trajectory to x/y/yaw on the current "
+                    "flat-floor test. RGB-D points, obstacles and pits remain 3D; set "
+                    "false before mapping terrain that physically pitches the robot."
+                ),
+            ),
             DeclareLaunchArgument("camera_to_imu_time_offset", default_value="0.0"),
             DeclareLaunchArgument("use_imu", default_value="true"),
             DeclareLaunchArgument("imu_topic", default_value="/sensors/imu/data"),

@@ -101,6 +101,20 @@
           <code id="commandValue">x 0.00 · yaw 0.00</code>
         </div>
 
+        <section class="mapping-panel" aria-label="IMU 水平校准">
+          <div class="mapping-heading">
+            <div>
+              <p class="eyebrow">IMU LEVEL</p>
+              <h2>安装角度校准</h2>
+            </div>
+            <strong id="imuCalibrationState" class="mapping-state offline">未校准</strong>
+          </div>
+          <p id="imuCalibrationDetail" class="mapping-detail">将机器人放在水平面并保持静止，然后点击一键校准。</p>
+          <div class="mapping-actions single-action">
+            <button id="imuCalibrationButton" class="mapping-start">一键水平校准</button>
+          </div>
+        </section>
+
         <section class="mapping-panel" aria-label="RTAB-Map 建图控制">
           <div class="mapping-heading">
             <div>

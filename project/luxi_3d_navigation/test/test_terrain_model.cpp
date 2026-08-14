@@ -81,6 +81,90 @@ TEST(TerrainModel, RequiresGroundSupport)
   EXPECT_FALSE(terrain.isTraversable(terrain.worldToGrid(0.25, 0.05, 0.05)));
 }
 
+TEST(TerrainModel, SnappingReturnsTheClassifiedSurfaceInsteadOfAirAboveIt)
+{
+  auto tree = makeGround(1);
+  auto parameters = testParameters();
+  parameters.strict_direct_support = false;
+  parameters.support_depth_cells = 2;
+  luxi_3d_navigation::TerrainModel terrain(tree, parameters);
+
+  const auto air_cell = terrain.worldToGrid(0.05, 0.05, 0.15);
+  ASSERT_TRUE(terrain.isTraversable(air_cell));
+  const auto snapped = terrain.snapToTerrain(air_cell);
+
+  ASSERT_TRUE(snapped.has_value());
+  EXPECT_EQ(*snapped, terrain.worldToGrid(0.05, 0.05, 0.05));
+}
+
+TEST(TerrainModel, GoalSnappingUsesXYToReachTerrainFarFromZeroHeight)
+{
+  auto tree = makeGround(5);
+  luxi_3d_navigation::TerrainModel terrain(tree, testParameters());
+  const auto target_xy = terrain.worldToGrid(0.45, 0.05, 4.05);
+
+  EXPECT_FALSE(terrain.snapToTerrain(target_xy).has_value());
+  const auto grounded = terrain.snapGoalToTerrain(target_xy);
+
+  ASSERT_TRUE(grounded.has_value());
+  EXPECT_EQ(*grounded, terrain.worldToGrid(0.45, 0.05, 0.05));
+}
+
+TEST(TerrainModel, PlannedPathStaysOnAContinuousRampSurface)
+{
+  octomap::OcTree tree(0.1);
+  for (int x = 0; x < 5; ++x) {
+    tree.updateNode(
+      octomap::point3d(0.05F + 0.1F * x, 0.05F, -0.05F + 0.1F * x), true);
+  }
+  tree.updateInnerOccupancy();
+  auto parameters = testParameters();
+  parameters.max_step_height = 0.11;
+  parameters.max_slope_degrees = 50.0;
+  luxi_3d_navigation::TerrainModel terrain(tree, parameters);
+  const auto start = terrain.worldToGrid(0.05, 0.05, 0.05);
+  const auto goal = terrain.snapGoalToTerrain(
+    terrain.worldToGrid(0.45, 0.05, 0.05));
+
+  ASSERT_TRUE(goal.has_value());
+  const auto path = terrain.plan(start, *goal);
+  ASSERT_EQ(path.size(), 5U);
+  for (std::size_t index = 1U; index < path.size(); ++index) {
+    EXPECT_EQ(path[index].x - path[index - 1U].x, 1);
+    EXPECT_EQ(path[index].z - path[index - 1U].z, 1);
+  }
+}
+
+TEST(TerrainModel, ReturnPathGroundsPlanarOdometryOnTheElevatedRampSurface)
+{
+  octomap::OcTree tree(0.1);
+  for (int x = 0; x < 20; ++x) {
+    tree.updateNode(
+      octomap::point3d(0.05F + 0.1F * x, 0.05F, -0.05F + 0.1F * x), true);
+  }
+  tree.updateInnerOccupancy();
+  auto parameters = testParameters();
+  parameters.max_step_height = 0.11;
+  parameters.max_slope_degrees = 50.0;
+  parameters.snap_radius_cells = 6;
+  luxi_3d_navigation::TerrainModel terrain(tree, parameters);
+
+  const auto stale_odometry_height = terrain.worldToGrid(1.95, 0.05, 0.05);
+  EXPECT_FALSE(terrain.snapToTerrain(stale_odometry_height).has_value());
+  const auto grounded_start = terrain.snapToTerrainAtXY(stale_odometry_height);
+
+  ASSERT_TRUE(grounded_start.has_value());
+  const auto return_goal = terrain.snapToTerrainAtXY(
+    terrain.worldToGrid(0.05, 0.05, 0.05));
+  ASSERT_TRUE(return_goal.has_value());
+  const auto path = terrain.plan(*grounded_start, *return_goal);
+  ASSERT_EQ(path.size(), 20U);
+  for (std::size_t index = 1U; index < path.size(); ++index) {
+    EXPECT_EQ(path[index].x - path[index - 1U].x, -1);
+    EXPECT_EQ(path[index].z - path[index - 1U].z, -1);
+  }
+}
+
 TEST(TerrainModel, HonorsMetricRobotRadiusAtVoxelBoundary)
 {
   auto tree = makeGround(1);

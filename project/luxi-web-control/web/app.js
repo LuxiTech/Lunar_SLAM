@@ -27,6 +27,9 @@ const mappingDetail = $("#mappingDetail");
 const mappingStartButton = $("#mappingStartButton");
 const mappingStopButton = $("#mappingStopButton");
 const mappingMode = $("#mappingMode");
+const imuCalibrationState = $("#imuCalibrationState");
+const imuCalibrationDetail = $("#imuCalibrationDetail");
+const imuCalibrationButton = $("#imuCalibrationButton");
 const rgbPreview = $("#rgbPreview");
 const rgbPreviewState = $("#rgbPreviewState");
 const rgbPreviewHint = $("#rgbPreviewHint");
@@ -71,6 +74,8 @@ let toastTimer = null;
 let commandRequestPending = false;
 let robotControlReady = true;
 let robotControlRequestPending = false;
+let imuCalibrationRequestPending = false;
+let currentImuCalibration = {};
 let joystickPointerId = null;
 let joystickX = 0;
 let joystickY = 0;
@@ -93,6 +98,8 @@ let navigationDrag = null;
 let navigationPinch = null;
 const navigationPointers = new Map();
 let navigationGoalMode = false;
+let selectedGoalPending = false;
+let navigationStatus = {};
 let navigationMapRecords = new Map();
 let navigationUseFiltered = false;
 let navigationPose = null;
@@ -453,6 +460,56 @@ const mappingStateNames = {
   failed: "启动失败",
 };
 
+const imuCalibrationStateNames = {
+  offline: "服务离线",
+  idle: "等待校准",
+  waiting_stationary: "等待静止",
+  collecting: "采集中",
+  calibrated: "校准完成",
+  failed: "校准失败",
+};
+
+function updateImuCalibration(calibration) {
+  if (!calibration) return;
+  currentImuCalibration = calibration;
+  const stateName = imuCalibrationStateNames[calibration.state] || calibration.state;
+  imuCalibrationState.textContent = stateName;
+  imuCalibrationState.className = `mapping-state ${calibration.state}`;
+  const busy = Boolean(calibration.busy);
+  imuCalibrationButton.disabled = !calibration.can_start || busy
+    || imuCalibrationRequestPending;
+  if (calibration.state === "collecting") {
+    imuCalibrationDetail.textContent =
+      `请勿移动机器人：${calibration.sample_count || 0}/${calibration.required_samples || 0} 帧`;
+  } else if (calibration.state === "calibrated") {
+    const roll = Number(calibration.roll_degrees).toFixed(2);
+    const pitch = Number(calibration.pitch_degrees).toFixed(2);
+    imuCalibrationDetail.textContent = `已适配当前装配角度：roll=${roll}°，pitch=${pitch}°`;
+  } else {
+    imuCalibrationDetail.textContent = calibration.message
+      || "将机器人放在水平面并保持静止，然后点击一键校准。";
+  }
+}
+
+async function startImuCalibration() {
+  if (!window.confirm("确认机器人已放在水平面并完全静止？校准期间不能建图或导航。")) return;
+  stop();
+  imuCalibrationRequestPending = true;
+  imuCalibrationButton.disabled = true;
+  try {
+    const result = await api("/api/imu/calibrate");
+    updateImuCalibration(result.imu_calibration);
+    showToast("IMU 校准已开始，请保持机器人静止");
+  } catch (error) {
+    showToast(`IMU 校准失败：${error.message}`);
+  } finally {
+    imuCalibrationRequestPending = false;
+    refreshStatus();
+  }
+}
+
+imuCalibrationButton.addEventListener("click", startImuCalibration);
+
 const navigationStateNames = {
   disabled: "不可用",
   stopped: "未加载",
@@ -462,6 +519,7 @@ const navigationStateNames = {
 
 function updateNavigation(navigation) {
   if (!navigation) return;
+  navigationStatus = navigation;
   if (!navigationLoadPending && ["original", "filtered"].includes(navigation.map_variant)) {
     navigationUseFiltered = navigation.map_variant === "filtered";
   }
@@ -474,6 +532,10 @@ function updateNavigation(navigation) {
     name = "已到达";
   } else if (navigation.path_ready) {
     name = "规划完成";
+  } else if (navigation.planning_state === "pending") {
+    name = "正在规划";
+  } else if (navigation.planning_state === "failed") {
+    name = "规划失败";
   }
   navigationState.textContent = name;
   navigationState.className = `preview-state ${navigation.state === "running" ? "live" : ""}`;
@@ -497,9 +559,21 @@ function updateNavigation(navigation) {
     navigationCloud.variant !== selectedVariant ||
     navigationVoxels.variant !== selectedVariant;
   navigationStopButton.disabled = !navigation.enabled || navigation.state !== "running";
-  navigationGoalButton.disabled = !navigation.localization_ready;
+  const hasTraversableTerrain =
+    Array.isArray(navigationTerrain.traversable_points) &&
+    navigationTerrain.traversable_points.length > 0;
+  navigationGoalButton.disabled =
+    navigation.state !== "running" || !hasTraversableTerrain;
+  if (!navigationGoalMode) {
+    navigationGoalButton.textContent =
+      selectedGoalPending
+        ? navigation.planning_localization_ready
+          ? "提交已选目标"
+          : "重新选择目标"
+        : "选择目标点";
+  }
   navigationStartButton.disabled =
-    !navigation.localization_ready || !navigation.path_ready ||
+    !navigation.planning_localization_ready || !navigation.path_ready ||
     navigation.active || estopActive;
   navigationHaltButton.disabled = !navigation.active;
   navigationPose = navigation.pose || null;
@@ -512,7 +586,8 @@ function updateNavigation(navigation) {
     const mapName = navigation.map_id || "所选地图";
     const pose = navigation.pose;
     const poseText = pose
-      ? ` x=${pose.x.toFixed(2)}m，y=${pose.y.toFixed(2)}m，yaw=${pose.yaw_degrees.toFixed(1)}°`
+      ? ` x=${pose.x.toFixed(2)}m，y=${pose.y.toFixed(2)}m，` +
+        `地表z=${pose.z.toFixed(2)}m，yaw=${pose.yaw_degrees.toFixed(1)}°`
       : "";
     if (navigation.follower_state === "localization_degraded") {
       navigationDetail.textContent =
@@ -522,8 +597,17 @@ function updateNavigation(navigation) {
         ? "" : `，fitness=${Number(navigation.localization_fitness).toFixed(3)}`;
       const motionText = navigation.active
         ? "正在沿规划路径行驶。"
+        : !navigation.planning_localization_ready
+          ? Number(navigation.localization_fitness) < 0.05
+            ? "当前扫描与地图没有有效重叠（常见于地图边缘或视野被遮挡），正在重新启动 HLoc；可先选择目标，但恢复前不会提交规划。"
+            : "近期 ICP 未通过地图匹配验证，已暂停新的规划请求；可先选择目标，并调整相机视野等待定位恢复。"
         : navigation.follower_state === "goal_reached"
           ? "已到达目标点。"
+          : navigation.planning_state === "pending"
+            ? "正在计算新路径，请稍候。"
+          : navigation.planning_state === "failed"
+            ? `规划失败：${navigation.planning_error || "未生成可执行路径"}；` +
+              "灰色虚线仅为上一条有效路径参考，不能用于出发。"
           : navigation.path_ready
             ? `规划完成，共 ${navigation.path_point_count} 个路径点；可点击“出发”。`
             : "请选择目标点并等待路径规划完成。";
@@ -679,7 +763,7 @@ function drawNavigationMap(voxels, path, cloud) {
     traversablePoints,
     obstaclePoints,
     pathPoints,
-    selectedGoal ? [[selectedGoal.x, selectedGoal.y, 0]] : [],
+    selectedGoal ? [[selectedGoal.x, selectedGoal.y, selectedGoal.z]] : [],
     mapHasGeometry && navigationShowMappingOrigin.checked ? [mappingOrigin] : [],
     navigationPose && navigationShowRobot.checked
       ? [[navigationPose.x, navigationPose.y, navigationPose.z || 0]]
@@ -850,8 +934,9 @@ function drawNavigationMap(voxels, path, cloud) {
     }
   }
   if (pathPoints.length) {
-    context.strokeStyle = "#ffd166";
+    context.strokeStyle = path.stale ? "rgba(190, 203, 218, .68)" : "#ffd166";
     context.lineWidth = 2.5;
+    context.setLineDash(path.stale ? [8, 6] : []);
     context.beginPath();
     pathPoints.forEach((point, index) => {
       const [x, y] = toCanvas(point);
@@ -859,9 +944,10 @@ function drawNavigationMap(voxels, path, cloud) {
       else context.moveTo(x, y);
     });
     context.stroke();
+    context.setLineDash([]);
   }
   if (selectedGoal) {
-    const [x, y] = toCanvas([selectedGoal.x, selectedGoal.y]);
+    const [x, y] = toCanvas([selectedGoal.x, selectedGoal.y, selectedGoal.z]);
     context.strokeStyle = "#ff7580";
     context.lineWidth = 2;
     context.beginPath();
@@ -1032,6 +1118,7 @@ async function loadNavigationMap(automatic = false) {
   navigationLoadPending = true;
   updateNavigation(navigationResult);
   selectedGoal = null;
+  selectedGoalPending = false;
   navigationCloud = {};
   navigationVoxels = {};
   navigationTerrain = {};
@@ -1146,6 +1233,7 @@ navigationHaltButton.addEventListener("click", haltNavigationMotion);
 navigationMapSelect.addEventListener("change", () => {
   navigationUseFiltered = false;
   selectedGoal = null;
+  selectedGoalPending = false;
   navigationCloud = {};
   navigationVoxels = {};
   navigationTerrain = {};
@@ -1177,24 +1265,75 @@ function setNavigationGoalMode(enabled) {
 
 navigationGoalButton.addEventListener("click", () => {
   if (navigationGoalButton.disabled) return;
+  if (selectedGoalPending && !navigationGoalMode &&
+      navigationStatus.planning_localization_ready) {
+    sendNavigationGoal(selectedGoal);
+    return;
+  }
   setNavigationGoalMode(!navigationGoalMode);
   if (navigationGoalMode) showToast("请在地图中点击目标点；可先退出选点模式调整视角");
 });
 
-async function selectNavigationGoal(event) {
-  if (!voxelViewport) return;
-  const point = canvasGroundPoint(event, 0);
-  if (!point) return;
-  const {x, y} = point;
-  selectedGoal = {x, y};
+async function sendNavigationGoal(goal) {
+  if (!goal) return;
   try {
-    await api("/api/navigation/goal", {x, y, z: 0});
+    await api("/api/navigation/goal", goal);
+    selectedGoalPending = false;
     setNavigationGoalMode(false);
-    showToast(`目标点已发送：${x.toFixed(2)}, ${y.toFixed(2)}`);
+    showToast(
+      `地面目标已发送：${goal.x.toFixed(2)}, ${goal.y.toFixed(2)}, ${goal.z.toFixed(2)}`
+    );
     refreshVoxelMap();
   } catch (error) {
     showToast(`规划请求失败：${error.message}`);
   }
+}
+
+async function selectNavigationGoal(event) {
+  if (!voxelViewport) return;
+  const point = nearestTraversableGoal(event);
+  if (!point) return;
+  const {x, y, z} = point;
+  selectedGoal = {x, y, z};
+  if (!navigationStatus.planning_localization_ready) {
+    selectedGoalPending = true;
+    setNavigationGoalMode(false);
+    showToast(
+      `目标已选：${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}；定位恢复后点击“提交已选目标”`
+    );
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+    return;
+  }
+  await sendNavigationGoal(selectedGoal);
+}
+
+function nearestTraversableGoal(event) {
+  const points = Array.isArray(navigationTerrain.traversable_points)
+    ? navigationTerrain.traversable_points : [];
+  if (!voxelViewport || !points.length) return null;
+  const rect = voxelMapCanvas.getBoundingClientRect();
+  const clickX = event.clientX - rect.left;
+  const clickY = event.clientY - rect.top;
+  let best = null;
+  let bestDistanceSquared = Infinity;
+  for (const point of points) {
+    const screen = navigationPointToCanvas(point);
+    if (!screen) continue;
+    const distanceSquared =
+      (screen.x - clickX) ** 2 + (screen.y - clickY) ** 2;
+    if (distanceSquared < bestDistanceSquared) {
+      best = point;
+      bestDistanceSquared = distanceSquared;
+    }
+  }
+  const terrainPixels =
+    (Number(navigationTerrain.resolution) || 0.05) * voxelViewport.scale;
+  const maximumDistance = Math.max(14, Math.min(30, terrainPixels * 2));
+  if (!best || bestDistanceSquared > maximumDistance ** 2) {
+    showToast("该位置附近没有可通行地面，请点击绿色可通行区域");
+    return null;
+  }
+  return {x: Number(best[0]), y: Number(best[1]), z: Number(best[2])};
 }
 
 function canvasGroundPoint(event, groundZ) {
@@ -1500,7 +1639,10 @@ function updateMapping(mapping) {
   const mappingStateName = mappingStateNames[mapping.state] || mapping.state;
   mappingState.textContent = mappingStateName;
   mappingState.className = `mapping-state ${mapping.state}`;
-  mappingStartButton.disabled = !mapping.enabled || mapping.state === "running";
+  const calibrationRequired = currentImuCalibration.service_available
+    && currentImuCalibration.state !== "calibrated";
+  mappingStartButton.disabled = !mapping.enabled || mapping.state === "running"
+    || calibrationRequired;
   mappingStopButton.disabled = !mapping.enabled || mapping.state !== "running";
   mappingMode.disabled = !mapping.enabled || mapping.state === "running";
   if (mapping.state === "running" && mapping.mode) {
@@ -1517,7 +1659,9 @@ function updateMapping(mapping) {
   } else if (!mapping.enabled) {
     mappingDetail.textContent = "当前节点未启用建图控制。";
   } else {
-    mappingDetail.textContent = "CREStereo 模型深度与学习里程计为主链路；VPI 保留为低资源备用链路。";
+    mappingDetail.textContent = calibrationRequired
+      ? "请先将机器人放在水平面并完成 IMU 一键校准。"
+      : "CREStereo 模型深度与学习里程计为主链路；VPI 保留为低资源备用链路。";
   }
 }
 
@@ -1655,6 +1799,7 @@ async function refreshStatus() {
     state.textContent = stateNames[data.state] || data.state;
     setEstopUi(Boolean(data.estop_active));
     updateRobotControl(data.robot_control);
+    updateImuCalibration(data.imu_calibration);
     updateMapping(data.mapping);
     updateNavigation(data.navigation);
     updatePreviewStatus(data.preview);

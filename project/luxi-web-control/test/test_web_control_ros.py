@@ -114,6 +114,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"robotControlToggle" in page
             assert b'id="mappingMode"' in page
             assert b'CREStereo' in page
+            assert b"imuCalibrationButton" in page
 
         with _LOCAL_OPENER.open(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -127,9 +128,24 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b'filtered: navigationUseFiltered' in app
             assert b'api("/api/navigation/start")' in app
             assert b'api("/api/navigation/halt")' in app
+            assert b"path.stale" in app
+            assert "规划失败".encode("utf-8") in app
+            assert b"nearestTraversableGoal(event)" in app
+            assert b'api("/api/navigation/goal", goal)' in app
+            assert b"selectedGoal.x, selectedGoal.y, selectedGoal.z" in app
+            assert "地表z=".encode("utf-8") in app
             assert b'api("/api/robot/control", {active: requested})' in app
             assert b'const mappingMode = $("#mappingMode")' in app
             assert b'api("/api/mapping/start", {mode: mappingMode.value})' in app
+            assert b'api("/api/imu/calibrate")' in app
+
+        imu_calibration = node.status()["imu_calibration"]
+        assert imu_calibration["service_available"] is False
+        try:
+            _post(base_url, "/api/imu/calibrate", {})
+            assert False, "unavailable IMU calibration must reject requests"
+        except HTTPError as error:
+            assert error.code == 409
 
         robot_control = node.status()["robot_control"]
         assert robot_control["state"] == "disabled"

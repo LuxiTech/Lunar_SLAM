@@ -3,11 +3,13 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "luxi_3d_navigation/localization_health_monitor.hpp"
 #include "luxi_3d_navigation/path_follower_control.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -30,6 +32,7 @@ public:
     declare_parameter<std::string>("cmd_vel_topic", "/navigation/cmd_vel");
     declare_parameter<std::string>("active_topic", "/navigation/active");
     declare_parameter<std::string>("state_topic", "/navigation/follower_state");
+    declare_parameter<std::string>("terrain_pose_topic", "/navigation/terrain_pose");
     declare_parameter<std::string>("map_frame", "map");
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<double>("control_rate", 15.0);
@@ -58,6 +61,11 @@ public:
     state_pub_ = create_publisher<std_msgs::msg::String>(
       get_parameter("state_topic").as_string(),
       rclcpp::QoS(1).reliable().transient_local());
+    terrain_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+      get_parameter("terrain_pose_topic").as_string(), 10,
+      [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
+        terrain_pose_ = *message;
+      });
 
     path_sub_ = create_subscription<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local(),
@@ -117,8 +125,24 @@ private:
         handleLocalizationFault("localization_lost");
         return;
       }
+      if (!terrain_pose_) {
+        handleLocalizationFault("terrain_pose_lost");
+        return;
+      }
+      const rclcpp::Time terrain_stamp(terrain_pose_->header.stamp);
+      const double terrain_age = (now() - terrain_stamp).seconds();
+      if (terrain_stamp.nanoseconds() == 0 || terrain_age < -0.1 ||
+        terrain_age > get_parameter("localization_timeout").as_double())
+      {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Terrain-constrained pose is stale (age=%.3fs)", terrain_age);
+        handleLocalizationFault("terrain_pose_lost");
+        return;
+      }
       follow(
-        transform.transform.translation.x, transform.transform.translation.y,
+        terrain_pose_->pose.position.x, terrain_pose_->pose.position.y,
+        terrain_pose_->pose.position.z,
         tf2::getYaw(transform.transform.rotation));
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN_THROTTLE(
@@ -127,13 +151,14 @@ private:
     }
   }
 
-  void follow(double robot_x, double robot_y, double robot_yaw)
+  void follow(double robot_x, double robot_y, double robot_z, double robot_yaw)
   {
     const auto & goal = path_.back().pose.position;
     const auto & previous = path_.size() > 1U ?
       path_[path_.size() - 2U].pose.position : goal;
-    if (luxi_3d_navigation::pathGoalReached(
-        robot_x, robot_y, previous.x, previous.y, goal.x, goal.y,
+    if (luxi_3d_navigation::pathGoalReached3D(
+        robot_x, robot_y, robot_z, previous.x, previous.y,
+        goal.x, goal.y, goal.z,
         get_parameter("goal_tolerance_m").as_double(),
         get_parameter("minimum_safe_goal_tolerance_m").as_double()))
     {
@@ -146,7 +171,8 @@ private:
     double nearest_distance = std::numeric_limits<double>::infinity();
     for (std::size_t index = 0U; index < path_.size(); ++index) {
       const auto & point = path_[index].pose.position;
-      const double distance = std::hypot(point.x - robot_x, point.y - robot_y);
+      const double distance = std::hypot(
+        std::hypot(point.x - robot_x, point.y - robot_y), point.z - robot_z);
       if (distance < nearest_distance) {
         nearest = index;
         nearest_distance = distance;
@@ -255,12 +281,14 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr terrain_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr start_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stop_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr active_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
+  std::optional<geometry_msgs::msg::PoseStamped> terrain_pose_;
   std::unique_ptr<luxi_3d_navigation::LocalizationHealthMonitor>
     localization_health_monitor_;
 };

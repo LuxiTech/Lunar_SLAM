@@ -62,6 +62,8 @@ public:
   bool isTraversable(const GridCell3D & cell) const;
   bool transitionAllowed(const GridCell3D & from, const GridCell3D & to) const;
   std::optional<GridCell3D> snapToTerrain(const GridCell3D & seed) const;
+  std::optional<GridCell3D> snapToTerrainAtXY(const GridCell3D & seed) const;
+  std::optional<GridCell3D> snapGoalToTerrain(const GridCell3D & seed) const;
   std::vector<GridCell3D> plan(const GridCell3D & start, const GridCell3D & goal) const;
   double traversalCost(const GridCell3D & cell) const;
   const TerrainLayers & layers() const;

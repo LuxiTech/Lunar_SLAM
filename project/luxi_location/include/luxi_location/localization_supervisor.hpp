@@ -29,6 +29,14 @@ struct LocalizationSupervisorParameters
   int failures_before_relocalization{5};
 };
 
+bool should_retain_odometry_after_rejected_icp(
+  bool initial_alignment,
+  bool accepted,
+  bool relocalize_on_tracking_icp_failure,
+  bool alignment_initialized,
+  double fitness,
+  double minimum_fitness);
+
 class LocalizationSupervisor
 {
 public:
