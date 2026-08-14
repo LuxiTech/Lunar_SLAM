@@ -1,0 +1,12 @@
+[Unit]
+Description=Disable D1 Wi-Fi for wired-only robot control
+After=systemd-rfkill.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill block wlan
+ExecStop=/usr/sbin/rfkill unblock wlan
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

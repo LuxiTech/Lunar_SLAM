@@ -2,13 +2,15 @@
 
 set -euo pipefail
 
-readonly WORKSPACE="/home/nvidia/Desktop/lunar_slam"
-readonly WEB_URL="http://127.0.0.1:8080"
+readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
+readonly WORKSPACE="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly WEB_LOG="${WORKSPACE}/log/d1_web_control.log"
 readonly WEB_PID_FILE="/tmp/d1_web_control.pid"
 readonly ROBOT_IP="192.168.123.49"
 readonly ROBOT_NS="d15041873"
 readonly COMMAND_TOPIC="/${ROBOT_NS}/command/user_command"
+readonly D1_DISCOVERY_SPIN_TIME="${D1_DISCOVERY_SPIN_TIME:-30.0}"
 
 RUN_MOTION_TEST=false
 ASSUME_YES=false
@@ -50,6 +52,15 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROBOT_NS
 export SLAM_D1_WORKSPACE="${WORKSPACE}"
 
+readonly D1_LAN_DDS_SETUP="${WORKSPACE}/install/slam_d1_bridge/lib/slam_d1_bridge/setup_d1_lan_dds.sh"
+if [[ ! -r "${D1_LAN_DDS_SETUP}" ]]; then
+    echo "D1 LAN-only DDS setup is missing; rebuild slam_d1_bridge." >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "${D1_LAN_DDS_SETUP}"
+readonly WEB_URL="http://${D1_LAN_ADDRESS}:8080"
+
 safe_web_stop()
 {
     curl --fail --silent --show-error \
@@ -74,8 +85,12 @@ startup_failed()
 trap startup_failed ERR INT TERM
 
 ping -c 1 -W 1 "${ROBOT_IP}" >/dev/null
+echo "D1 control LAN: ${D1_LAN_INTERFACE} (${D1_LAN_ADDRESS}) -> ${ROBOT_IP}"
 
-topic_info="$(ros2 topic info "${COMMAND_TOPIC}" 2>/dev/null || true)"
+topic_info="$(
+    ros2 topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}" \
+        "${COMMAND_TOPIC}" 2>/dev/null || true
+)"
 if ! grep -Eq 'Subscription count: [1-9][0-9]*' <<<"${topic_info}"; then
     echo "D1 command subscriber is not available on ${COMMAND_TOPIC}." >&2
     false
@@ -84,7 +99,7 @@ fi
 mkdir -p "${WORKSPACE}/log"
 if ! curl --fail --silent "${WEB_URL}/api/status" >/dev/null 2>&1; then
     setsid ros2 launch luxi_web_control lekiwi_web_control.launch.py \
-        bind_address:=0.0.0.0 http_port:=8080 >"${WEB_LOG}" 2>&1 &
+        "bind_address:=${D1_LAN_ADDRESS}" http_port:=8080 >"${WEB_LOG}" 2>&1 &
     web_pid=$!
     echo "${web_pid}" >"${WEB_PID_FILE}"
     for _ in {1..50}; do
@@ -165,5 +180,10 @@ if [[ "${RUN_MOTION_TEST}" == true ]]; then
 fi
 
 trap - ERR INT TERM
-echo "D1 web control is enabled: http://192.168.123.51:8080"
+control_address="$(
+    ip -4 -o addr show scope global |
+        awk '$4 ~ /^192\.168\.123\./ {sub(/\/.*/, "", $4); print $4; exit}'
+)"
+control_address="${control_address:-127.0.0.1}"
+echo "D1 web control is enabled: http://${control_address}:8080"
 echo "Stop and lower the robot with: ros2 run slam_d1_bridge stop_slam_d1_bridge.sh"

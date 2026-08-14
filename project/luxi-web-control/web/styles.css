@@ -369,6 +369,20 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
 #robotControlState.unknown,
 #robotControlState.failed { border-color: #77353d; color: #ffadb1; background: var(--danger-dark); }
 
+.robot-status-panel {
+  margin-top: 14px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #101721;
+}
+.robot-status-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.robot-status-heading b { font-size: .85rem; }
+.robot-battery-detail { margin-top: 12px; color: #bfcbdb; font-size: .72rem; line-height: 1.6; }
+.body-height-row { margin-top: 18px; }
+.robot-status-panel > small { display: block; margin-top: 7px; color: var(--muted); font-size: .66rem; }
+input[type="range"]:disabled { cursor: not-allowed; opacity: .45; }
+
 .mapping-panel {
   margin: 24px 0;
   padding: 15px;

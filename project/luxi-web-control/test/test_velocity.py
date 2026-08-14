@@ -44,6 +44,8 @@ from luxi_web_control.web_control_node import localization_pose_summary
 from luxi_web_control.web_control_node import make_access_urls
 from luxi_web_control.web_control_node import mapping_graph_conflicts
 from luxi_web_control.web_control_node import NavigationController
+from luxi_web_control.web_control_node import normalize_battery_percentage
+from luxi_web_control.web_control_node import parse_body_height
 from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_terrain_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
@@ -126,9 +128,56 @@ def test_d1_control_scripts_do_not_depend_on_ros_daemon_discovery():
         "stop_slam_d1_bridge.sh",
     ):
         source = (scripts / script_name).read_text(encoding="utf-8")
-        assert "topic info --no-daemon --spin-time 5.0" in source
+        assert 'D1_DISCOVERY_SPIN_TIME="${D1_DISCOVERY_SPIN_TIME:-30.0}"' in source
+        assert 'topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}"' in source
+        assert 'D1_SERVICE_TIMEOUT="${D1_SERVICE_TIMEOUT:-30s}"' in source
+        assert 'timeout --signal=INT "${D1_SERVICE_TIMEOUT}"' in source
         assert "rcl_interfaces/srv/SetParameters" in source
         assert "successful=True" in source
+
+
+def test_d1_control_scripts_resolve_the_current_workspace():
+    bridge_scripts = WORKSPACE_ROOT / "project/slam_d1_bridge/scripts"
+    for script_name in (
+        "start_slam_d1_bridge.sh",
+        "stop_slam_d1_bridge.sh",
+    ):
+        source = (bridge_scripts / script_name).read_text(encoding="utf-8")
+        assert 'readlink -f -- "${BASH_SOURCE[0]}"' in source
+        assert "/home/nvidia/Desktop/lunar_slam" not in source
+
+    web_script = (WORKSPACE_ROOT / "scripts/start_d1_web_control.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'readlink -f -- "${BASH_SOURCE[0]}"' in web_script
+    assert 'D1_DISCOVERY_SPIN_TIME="${D1_DISCOVERY_SPIN_TIME:-30.0}"' in web_script
+    assert 'topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}"' in web_script
+    assert 'source "${D1_LAN_DDS_SETUP}"' in web_script
+    assert 'readonly WEB_URL="http://${D1_LAN_ADDRESS}:8080"' in web_script
+    assert '"bind_address:=${D1_LAN_ADDRESS}"' in web_script
+    assert "/home/nvidia/Desktop/lunar_slam" not in web_script
+
+
+def test_d1_control_is_restricted_to_the_wired_lan():
+    bridge = WORKSPACE_ROOT / "project/slam_d1_bridge"
+    setup_source = (bridge / "scripts/setup_d1_lan_dds.sh").read_text(
+        encoding="utf-8"
+    )
+    profile = (bridge / "config/fastdds_lan_only.xml.in").read_text(
+        encoding="utf-8"
+    )
+    launch_source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/launch/lekiwi_web_control.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert "^192\\.168\\.123\\.[0-9]+$" in setup_source
+    assert 'export FASTRTPS_DEFAULT_PROFILES_FILE="${d1_profile_path}"' in setup_source
+    assert "<address>127.0.0.1</address>" in profile
+    assert "<address>@D1_LAN_ADDRESS@</address>" in profile
+    assert "<useBuiltinTransports>false</useBuiltinTransports>" in profile
+    assert "FASTDDS_BUILTIN_TRANSPORTS" not in launch_source
+    assert 'DeclareLaunchArgument("bind_address", default_value="127.0.0.1")' in launch_source
 
 
 def test_d1_web_control_is_enabled_and_exposes_switch():
@@ -146,6 +195,61 @@ def test_d1_web_control_is_enabled_and_exposes_switch():
     )
     assert 'id="robotControlToggle"' in page
     assert 'api("/api/robot/control", {active: requested})' in app
+
+
+def test_d1_web_exposes_bridge_battery_and_body_height_interfaces():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )["web_control"]["ros__parameters"]
+    bridge = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/slam_d1_bridge/config/slam_d1_bridge.yaml")
+        .read_text(encoding="utf-8")
+    )["/**"]["ros__parameters"]
+    page = (WORKSPACE_ROOT / "project/luxi-web-control/web/index.html").read_text(
+        encoding="utf-8"
+    )
+    app = (WORKSPACE_ROOT / "project/luxi-web-control/web/app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert config["d1_battery1_topic"] == "/d15041873/status/battery1"
+    assert config["d1_battery2_topic"] == "/d15041873/status/battery2"
+    assert bridge["battery1_status_topic"] == "status/battery1"
+    assert bridge["battery2_status_topic"] == "status/battery2"
+    assert config["d1_body_height_command_topic"] == (
+        "/d15041873/command/body_height"
+    )
+    assert bridge["body_height_command_topic"] == "command/body_height"
+    assert config["d1_body_height_minimum"] == bridge["body_height_minimum"]
+    assert config["d1_body_height_maximum"] == bridge["body_height_maximum"]
+    assert 'id="robotBatteryState"' in page
+    assert 'id="bodyHeight"' in page
+    assert '单体双足模式·腿部高度' in page
+    assert 'max="9" step="0.1"' in page
+    assert 'api("/api/robot/height", {height: Number(bodyHeightInput.value)})' in app
+    assert "height.supported === true" in app
+    assert "heightPercentage.toFixed(0)" in app
+    assert bridge["fsm_mode"] == "loco"
+    assert bridge["height_fsm_mode"] == "loco"
+    assert bridge["body_height_maximum_rate"] == 1.0
+    assert bridge["body_height_linear_z_scale"] == 0.03
+
+
+def test_body_height_validation_and_battery_percentage_normalization():
+    assert parse_body_height({"height": 0.0}, 0.0, 9.0) == 0.0
+    assert parse_body_height({"height": 9.0}, 0.0, 9.0) == 9.0
+    with pytest.raises(ValueError, match="between"):
+        parse_body_height({"height": 10.0}, 0.0, 9.0)
+    with pytest.raises(ValueError, match="number"):
+        parse_body_height({"height": True}, 0.0, 9.0)
+    with pytest.raises(ValueError, match="finite"):
+        parse_body_height({"height": math.nan}, 0.0, 9.0)
+
+    assert normalize_battery_percentage(0.91) == 91.0
+    assert normalize_battery_percentage(91.0) == 91.0
+    assert normalize_battery_percentage(110.0) == 100.0
+    assert normalize_battery_percentage(math.nan) is None
 
 
 def test_web_imu_calibration_button_and_mapping_gate_are_present():
@@ -188,6 +292,7 @@ def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
         bridge_pid_file=pid_file,
         log_path=tmp_path / "d1.log",
     )
+    assert manager.transition_timeout == 90.0
 
     assert manager.set_active(True)[0]
     for _ in range(100):

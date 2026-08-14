@@ -1,81 +1,275 @@
-# slam_d1_bridge
+# slam_d1_bridge：D1 有线局域网控制
 
-`slam_d1_bridge` converts SLAM/navigation `geometry_msgs/msg/Twist` commands into
-the D1 robot's `ddt_msgs/msg/UserCommand` interface. It also subscribes to the
-SLAM pose for future closed-loop use, but phase one does not use pose data to
-control motion.
+`slam_d1_bridge` 把导航和网页输出的 `geometry_msgs/msg/Twist` 转换为 D1 厂家接口
+`ddt_msgs/msg/UserCommand`。当前部署只允许通过 `192.168.123.0/24` 有线局域网控制，
+不会通过 Wi-Fi、VPN、Docker 或其他网卡发送、发现 D1 控制数据。
 
-## Phase-one behavior
+## 1. 固定配置
 
-- Maps `linear.x` and `angular.z` into `UserCommand.twist`.
-- Clamps both supported axes to configurable limits.
-- Forces lateral and all other unsupported velocity components to zero.
-- Rejects non-finite input and publishes zero velocity.
-- Publishes at a fixed period and continuously publishes zero velocity after a
-  command timeout.
-- Caches and validates `/slam/pose` without republishing it or using it as a
-  motion interlock.
-- Sends a neutral D1 body pose (`orientation.w = 1.0`).
+| 项目 | 值 |
+| --- | --- |
+| D1 有线地址 | `192.168.123.49/24`，接口 `eth0` |
+| ROS Domain | `42` |
+| ROS RMW | `rmw_fastrtps_cpp` |
+| D1 namespace | `d15041873` |
+| 厂家命令话题 | `/d15041873/command/user_command` |
+| 标准速度话题 | `/cmd_vel` |
+| 网页高度命令 | `/d15041873/command/body_height` |
+| 桥接高度状态 | `/d15041873/status/body_height` |
+| 桥接电池状态 | `/d15041873/status/battery1`、`battery2` |
+| D1 SSH 用户名 | `robot` |
+| D1 SSH 密码 | `ddt` |
 
-The package does not enable D1 SDK mode or perform the `transform_up -> loco`
-sequence. Prepare and recover the robot using the separately validated
-operational procedure. Do not run `http_ros_gateway` at the same time because
-both nodes publish `command/user_command`.
+上面的密码按现场部署要求记录在仓库中，因此该仓库必须保持私有，不能上传到公开仓库、
+公开制品或外部日志。条件允许时应改为 SSH 密钥并更换默认密码。
 
-## Build
+## 2. 为什么其他设备能控制，而本机曾经不能
+
+其他控制设备通常只有一张 `192.168.123.x/24` 网卡，Fast DDS 的组播发现和单播数据
+自然都从这张有线网卡发送。本机同时存在：
+
+- `eno1`：`192.168.123.66/24`，连接 D1；
+- Wi-Fi：连接办公网络并提供默认路由；
+- `Meta` VPN/代理接口；
+- Docker 等虚拟接口。
+
+原配置只设置了 `ROS_DOMAIN_ID=42` 和 `SUBNET` 发现，没有限制 Fast DDS 使用哪张网卡。
+本机的策略路由把 `239.255.0.1` DDS 组播送到 `Meta`，所以可以 `ping`、可以 SSH，
+却看不到 D1 的控制订阅者。D1 本身也同时启用了 `eth0` 和 `wlan0`，启动服务还在等待
+`wlan0`，进一步造成发现端点不稳定。厂家控制器启动较慢时，原来的 5 秒发现和 8 秒
+服务超时还会把“正在发现”误判为“机器人离线”。
+
+本仓库现在从三个层面解决该问题：
+
+1. `setup_d1_lan_dds.sh` 根据到 `192.168.123.49` 的路由，自动选择当前设备自己的
+   `192.168.123.x/24` 地址；
+2. 生成 Fast DDS `interfaceWhiteList`，只保留回环地址和该有线地址，并关闭内置的其他
+   传输接口；
+3. D1 使用固定白名单 `127.0.0.1 + 192.168.123.49`，并用 systemd 禁用无线网卡。
+
+因此其他设备重新拉取最新代码后，只要分配一个不冲突的 `192.168.123.x/24` 地址并重新
+构建，就会自动生成适合该设备的 DDS 配置，不需要复制本机的 `.66` 地址，也不需要添加
+临时组播路由。
+
+Fast DDS 2.6 的白名单机制会同时约束发现流量和用户数据，配置依据见
+[eProsima Interface Whitelist](https://fast-dds.docs.eprosima.com/en/2.6.x/fastdds/transport/whitelist.html)。
+
+## 3. 网络拓扑和多设备规则
+
+```text
+控制机 A  192.168.123.50/24 ─┐
+控制机 B  192.168.123.51/24 ─┼─ 有线交换机 ─ D1 eth0 192.168.123.49/24
+控制机 C  192.168.123.66/24 ─┘                D1 wlan0：禁用
+```
+
+每台设备必须使用唯一地址。有线控制接口不要设置默认网关；设备可以继续使用自己的
+Wi-Fi 上网，但 D1 ROS 2 进程不会使用该 Wi-Fi。
+
+多台设备可以安装并启动网页，但同一时间只能有一台设备取得运动控制权：
+
+- 启动脚本要求厂家话题已有 D1 订阅者且没有其他发布者；
+- 已有 `slam_d1_bridge` 或 `http_ros_gateway` 发布时，新实例会拒绝启动；
+- 接管前应先在原控制机网页关闭“机器人控制”，确认机器人趴下、SDK 已释放；
+- 不允许在两台设备上同时点击开启。DDS 发布者检查可避免正常情况下的重复控制，但不能
+  替代现场操作协调和物理急停。
+
+## 4. 首次配置 D1：只允许有线控制
+
+以下操作只需执行一次。执行前确认 D1 已趴下，并保持有线 SSH 可用。
+
+在控制机仓库根目录运行：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
+scp project/slam_d1_bridge/config/fastdds_d1_robot_lan_only.xml \
+  robot@192.168.123.49:/tmp/
+scp project/slam_d1_bridge/config/d1_robot_ros2.env \
+  robot@192.168.123.49:/tmp/
+scp project/slam_d1_bridge/config/d1_bringup_lan_only.conf \
+  robot@192.168.123.49:/tmp/
+scp project/slam_d1_bridge/config/d1_disable_wifi.service \
+  robot@192.168.123.49:/tmp/
+```
+
+登录 D1 后安装配置：
+
+```bash
+ssh robot@192.168.123.49
+
+sudo install -o robot -g robot -m 0644 \
+  /tmp/fastdds_d1_robot_lan_only.xml \
+  /opt/d1_ros2/fastdds_d1_robot_lan_only.xml
+sudo install -o robot -g robot -m 0644 \
+  /tmp/d1_robot_ros2.env /opt/d1_ros2/ros2.env
+sudo install -o root -g root -m 0644 \
+  /tmp/d1_bringup_lan_only.conf \
+  /etc/systemd/system/d1_bringup.service.d/network-wait.conf
+sudo install -o root -g root -m 0644 \
+  /tmp/d1_disable_wifi.service /etc/systemd/system/d1-disable-wifi.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now d1-disable-wifi.service
+sudo systemctl restart d1_bringup.service
+```
+
+验证：
+
+```bash
+rfkill list
+ip -4 -o addr show eth0
+systemctl is-active d1-disable-wifi.service d1_bringup.service
+grep -E '^(ROS_DOMAIN_ID|RMW_IMPLEMENTATION|FASTRTPS_DEFAULT_PROFILES_FILE)=' \
+  /opt/d1_ros2/ros2.env
+```
+
+期望 Wi-Fi 显示 `Soft blocked: yes`，`eth0` 为 `192.168.123.49/24`，两个服务均为
+`active`。如需恢复 D1 Wi-Fi，只能通过有线 SSH 执行：
+
+```bash
+sudo systemctl disable --now d1-disable-wifi.service
+```
+
+## 5. 在任意控制设备上部署
+
+先给有线网卡设置一个没有冲突的地址，例如 `192.168.123.50/24`。不要照抄已经被其他
+设备使用的地址。
+
+```bash
+cd /path/to/lunar_slam
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install \
   --base-paths project 3parts/D1-ROS2-SDK-Demo/ddt_msgs \
-  --packages-up-to slam_d1_bridge
+  --packages-up-to slam_d1_bridge luxi_web_control
 source install/setup.bash
 ```
 
-## Run
-
-All three NX devices should use the field-verified D1 domain:
+检查自动选择结果：
 
 ```bash
-export ROS_DOMAIN_ID=42
-export ROS_LOCALHOST_ONLY=0
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-
-ros2 launch slam_d1_bridge slam_d1_bridge.launch.py \
-  namespace:=d15041873
+source install/slam_d1_bridge/lib/slam_d1_bridge/setup_d1_lan_dds.sh
+echo "${D1_LAN_INTERFACE} ${D1_LAN_ADDRESS}"
+echo "${FASTRTPS_DEFAULT_PROFILES_FILE}"
 ```
 
-The launch file keeps `/cmd_vel` and `/slam/pose` global while resolving the
-relative output topic to `/d15041873/command/user_command`.
+输出地址必须属于 `192.168.123.0/24`。脚本发现路由走 Wi-Fi、VPN 或其他网段时会直接
+拒绝控制，而不是退回不安全的自动网卡选择。
 
-For supervised physical testing, use the packaged start and stop procedures
-instead of launching the bridge directly:
+## 6. 网页控制
+
+推荐从仓库根目录运行一键脚本：
 
 ```bash
-ros2 run slam_d1_bridge start_slam_d1_bridge.sh
+./scripts/start_d1_web_control.sh
+```
+
+它会自动加载有线 DDS 配置、检查 D1 唯一订阅端、启动网页和速度仲裁，并按安全流程
+执行 `use_sdk=true -> transform_up -> loco`。脚本显示的 URL 使用当前设备实际的
+`192.168.123.x` 地址。
+
+如果只想先启动网页、由页面上的“机器人控制”开关决定何时站立：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+source install/slam_d1_bridge/lib/slam_d1_bridge/setup_d1_lan_dds.sh
+export ROS_DOMAIN_ID=42
+
+ros2 launch luxi_web_control lekiwi_web_control.launch.py \
+  "bind_address:=${D1_LAN_ADDRESS}" http_port:=8080
+```
+
+打开 `http://<本机192.168.123.x>:8080`。开启控制前必须清空场地并由现场人员持物理
+急停；关闭开关会先清零、停止桥、执行 `transform_down`，最后恢复 `use_sdk=false`。
+D1 专用 launch 默认只监听 `127.0.0.1`；一键脚本显式改为本机 `192.168.123.x` 地址，
+不会监听控制机的 Wi-Fi 地址。
+
+网页的“机器人状态”栏目在桥启动后显示两组电池反馈。顶部百分比取在线电池包中的较低
+值，避免一组电池偏低时被平均值掩盖；下方保留每组电池的百分比和电压。D1 驱动现场
+版本的 `percentage` 使用 `0..100`，网页也兼容标准 ROS `0..1` 表示。超过 3 秒没有新
+消息或桥断开时显示“电量离线”，不会继续展示过期数值。
+
+腿部高度滑动条针对现场 `controller_mode=biped` 的 D1 单体双足 LQR。控制
+有效刻度为 `0..9` 档，网页归一化显示为 `0..100%`；新的 100% 对应旧
+`0..30` 刻度的 30% 位置。它是可重复的时间积分档位，
+不是米制高度传感器的读数。每变化 1 档，桥以 `linear.z=0.03` 持续约 1 秒；
+`0 -> 9` 对应约 9 秒抬升，`9 -> 0` 对应约 9 秒降低。
+网页只在控制器明确返回 `biped` 时开放滑块；不会自动切换四足形态或触发
+`rl_4`，避免误触发对接/形态转换。
+
+网页显示的是桥的**单体双足高度百分比指令**，不是额外高度传感器的测量值。机器人未站立、
+SDK 未开启、桥未就绪或不是双足 LQR 模式时，请求都会被服务端拒绝。
+
+### 2026-08-14 实机高度验证
+
+先前用 `UserCommand.pose.position.z` 下发的测试只有 `0.00098 rad` 关节抖动，该字段
+不是双足 LQR 高度接口。解析当前机器实际运行的 `librl_controller.so` 和
+`libtita_mcu_controller.so` 后确认：`loco` 将 `Twist.linear.z` 以增量模式交给 LQR，
+底层执行 `height += linear.z * dt` 并应用内部限位。
+
+正确轴实测使用零平面速度、`linear.z=±0.03`，并用机器实时 TF 取四条链
+`base_link -> *_foot` 的变换，计算值为
+`mean(-T_base_to_foot.translation.z)`。得到的运动学参考距离从 `0.2901 m` 变为
+`0.4595 m`，差值 `0.1689 m`。这个数字依赖 URDF、关节反馈和轮心坐标，不是地面到
+机身的独立实测传感器高度，因此不再用它作为网页刻度。测试后确认
+`inactive / prone / SDK=false`。
+
+## 7. 桥接行为和安全限制
+
+- `linear.x` 和 `angular.z` 被转换到厂家 `UserCommand.twist`；
+- 两个轴默认限制为绝对值 `0.5`；网页现场配置进一步限制为 `0.10 m/s`；
+- `linear.y` 和其他不支持的轴强制归零；
+- 非有限输入被拒绝；
+- 输入超过 300 ms 未更新时持续发布零速度；
+- 高度滑块是 `0..9` 的单体双足目标档位，该上限对应旧范围的 30%；
+  桥将误差转成 `UserCommand.twist.linear.z`
+  速率并连续发送，双足 LQR 按持续时间积分；
+- 档位变化率为 `1 档/s`，经实机验证的 `linear.z` 幅值为 `0.03`；
+- 腿高调节全程保持 `loco`，不激活 `rl_4`，不切换机器人形态；
+- 厂家 `battery1`、`battery2` 只由桥转发到稳定的 `/status/battery*` 接口，网页不直接
+  依赖厂家内部话题；
+- 桥启动时会拒绝与其他厂家命令发布者并行运行；
+- 桥本身不会私自取得 SDK 权限，站立和趴下由启停脚本管理。
+
+首次受监护短距离验收建议使用 `0.05 m/s` 持续 2 秒，名义位移约 10 cm；随后立即
+停止并检查 300 ms 超时归零。不要在斜坡、人员附近或没有物理急停时测试。
+
+## 8. 常用检查
+
+```bash
+ping -c 3 192.168.123.49
+
+ros2 topic info --no-daemon --spin-time 30 \
+  /d15041873/command/user_command --verbose
+
+ros2 service call /d15041873/command/get_controller_status \
+  std_srvs/srv/Trigger '{}'
+
+ros2 topic echo --once /d15041873/status/battery1
+ros2 topic echo --once /d15041873/status/body_height
+```
+
+启动桥前，厂家命令话题应为 `Publisher count: 0`、`Subscription count: 1`。控制正常
+关闭后应看到 D1 `fsm_state=idle`、`posture=prone`、`sdk_active=false`。
+
+如只做不接触实机的接口回归，可使用独立 ROS Domain 启动桥，向厂家电池输入话题发布
+模拟 `BatteryState`，再验证 `/status/battery*`、`/status/body_height` 和
+`UserCommand.twist.linear.z`。仓库测试同时覆盖高度输入类型/范围、两种电量百分比
+格式、限幅、变化率、停车消息保持高度以及网页 HTTP 拒绝条件。
+
+## 9. 停止和故障恢复
+
+正常停止：
+
+```bash
 ros2 run slam_d1_bridge stop_slam_d1_bridge.sh
 ```
 
-Both scripts require an interactive safety confirmation. `--yes` is available
-for an already supervised automation environment. The start script enables SDK
-control, sends `transform_up`, switches to `loco`, and starts the bridge in the
-background. The stop script stops the bridge, publishes zero velocity, sends
-`transform_down`, and releases SDK control.
+该脚本先停止桥、发布零速度、持续发送 `transform_down`，再释放 SDK。任何无法确认的
+状态都应先使用物理急停；不要通过启动第二台控制机来“抢占”失控的发布者。
 
-## Parameters
+脚本默认等待 DDS 发现 30 秒、服务响应 30 秒，网页允许整个启停流程使用 90 秒。现场
+网络更慢时可临时覆盖脚本参数：
 
-| Parameter | Default | Meaning |
-| --- | ---: | --- |
-| `input_topic` | `cmd_vel` | Velocity input before launch remapping |
-| `slam_pose_topic` | `slam/pose` | SLAM pose input before launch remapping |
-| `output_topic` | `command/user_command` | D1 command output |
-| `publish_period_ms` | `50` | Output period (20 Hz) |
-| `command_timeout_ms` | `300` | Maximum age of a usable velocity command |
-| `max_linear_x` | `0.5` | Absolute forward/reverse limit in m/s |
-| `max_angular_z` | `0.5` | Absolute yaw-rate limit in rad/s |
-| `lateral_velocity_tolerance` | `0.001` | Warning threshold for unsupported `linear.y` |
-| `fsm_mode` | empty | Optional D1 FSM field; phase one does not manage FSM |
-
-Before commanding motion, verify the physical emergency stop, SDK control mode,
-robot state, clear operating area, and zero-velocity behavior.
+```bash
+export D1_DISCOVERY_SPIN_TIME=45.0
+export D1_SERVICE_TIMEOUT=45s
+```

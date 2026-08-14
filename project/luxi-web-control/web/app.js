@@ -15,6 +15,11 @@ const angularValue = $("#angularValue");
 const robotControlToggle = $("#robotControlToggle");
 const robotControlState = $("#robotControlState");
 const robotControlDetail = $("#robotControlDetail");
+const robotBatteryState = $("#robotBatteryState");
+const robotBatteryDetail = $("#robotBatteryDetail");
+const bodyHeightInput = $("#bodyHeight");
+const bodyHeightValue = $("#bodyHeightValue");
+const bodyHeightDetail = $("#bodyHeightDetail");
 const estopButton = $("#estopButton");
 const releaseButton = $("#releaseButton");
 const toast = $("#toast");
@@ -73,6 +78,9 @@ let toastTimer = null;
 let commandRequestPending = false;
 let robotControlReady = true;
 let robotControlRequestPending = false;
+let bodyHeightRequestPending = false;
+let bodyHeightDragging = false;
+let bodyHeightTimer = null;
 let imuCalibrationRequestPending = false;
 let currentImuCalibration = {};
 let joystickPointerId = null;
@@ -411,6 +419,54 @@ function updateRobotControl(control) {
   } else {
     robotControlDetail.textContent = actualState;
   }
+
+  const battery = control.battery || {};
+  const packs = Array.isArray(battery.packs) ? battery.packs.filter((pack) => pack.online) : [];
+  if (battery.online && battery.percentage !== null && battery.percentage !== undefined) {
+    robotBatteryState.textContent = `${Number(battery.percentage).toFixed(0)}%`;
+    robotBatteryState.className = "mapping-state active";
+    robotBatteryDetail.textContent = packs.map((pack) => {
+      const percentage = pack.percentage === null || pack.percentage === undefined
+        ? "--" : `${Number(pack.percentage).toFixed(0)}%`;
+      const voltage = pack.voltage === null || pack.voltage === undefined
+        ? "" : ` · ${Number(pack.voltage).toFixed(1)} V`;
+      return `电池 ${pack.pack}: ${percentage}${voltage}`;
+    }).join("  |  ") || "电池反馈在线";
+  } else {
+    robotBatteryState.textContent = "电量离线";
+    robotBatteryState.className = "mapping-state offline";
+    robotBatteryDetail.textContent = active
+      ? "等待 slam_d1_bridge 转发电池反馈"
+      : "开启机器人控制后显示双电池信息";
+  }
+
+  const height = control.body_height || {};
+  const heightSupported = height.supported === true;
+  if (Number.isFinite(Number(height.minimum))) bodyHeightInput.min = height.minimum;
+  if (Number.isFinite(Number(height.maximum))) bodyHeightInput.max = height.maximum;
+  const reportedHeight = height.current ?? height.target;
+  if (!bodyHeightDragging && !bodyHeightRequestPending && Number.isFinite(Number(reportedHeight))) {
+    bodyHeightInput.value = Number(reportedHeight).toFixed(0);
+  }
+  const heightLevel = Number(bodyHeightInput.value);
+  const heightMinimum = Number(height.minimum ?? bodyHeightInput.min);
+  const heightMaximum = Number(height.maximum ?? bodyHeightInput.max);
+  const heightSpan = heightMaximum - heightMinimum;
+  const heightPercentage = heightSpan > 0
+    ? Math.max(0, Math.min(100, 100 * (heightLevel - heightMinimum) / heightSpan))
+    : 0;
+  bodyHeightValue.value = `${heightPercentage.toFixed(0)}%`;
+  bodyHeightInput.disabled = !heightSupported || !managed || !robotControlReady
+    || transitioning || bodyHeightRequestPending;
+  if (!heightSupported) {
+    bodyHeightDetail.textContent = height.reason
+      || "当前形态不支持连续腿高调节";
+  } else if (height.online) {
+    bodyHeightDetail.textContent =
+      `单体双足模式 · 当前 ${heightPercentage.toFixed(0)}% · 控制档位 ${heightLevel.toFixed(1)}/9`;
+  } else {
+    bodyHeightDetail.textContent = "单体双足模式 · 0～9 档对应 0～100%（原 30% 位置为新上限）；需先开启 SDK 控制";
+  }
 }
 
 async function toggleRobotControl() {
@@ -436,6 +492,39 @@ async function toggleRobotControl() {
 }
 
 robotControlToggle.addEventListener("change", toggleRobotControl);
+
+async function sendBodyHeight() {
+  clearTimeout(bodyHeightTimer);
+  if (!robotControlReady || bodyHeightInput.disabled || bodyHeightRequestPending) return;
+  bodyHeightRequestPending = true;
+  bodyHeightInput.disabled = true;
+  stop();
+  try {
+    const result = await api("/api/robot/height", {height: Number(bodyHeightInput.value)});
+    updateRobotControl(result.robot_control);
+  } catch (error) {
+    showToast(`高度调整失败：${error.message}`);
+  } finally {
+    bodyHeightRequestPending = false;
+    refreshStatus();
+  }
+}
+
+bodyHeightInput.addEventListener("pointerdown", () => { bodyHeightDragging = true; });
+bodyHeightInput.addEventListener("pointerup", () => { bodyHeightDragging = false; });
+bodyHeightInput.addEventListener("pointercancel", () => { bodyHeightDragging = false; });
+bodyHeightInput.addEventListener("input", () => {
+  const level = Number(bodyHeightInput.value);
+  const minimum = Number(bodyHeightInput.min);
+  const span = Number(bodyHeightInput.max) - minimum;
+  const percentage = span > 0
+    ? Math.max(0, Math.min(100, 100 * (level - minimum) / span))
+    : 0;
+  bodyHeightValue.value = `${percentage.toFixed(0)}%`;
+  clearTimeout(bodyHeightTimer);
+  bodyHeightTimer = setTimeout(sendBodyHeight, 180);
+});
+bodyHeightInput.addEventListener("change", sendBodyHeight);
 
 function setConnection(isOnline) {
   online = isOnline;

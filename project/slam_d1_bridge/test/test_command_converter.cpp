@@ -32,16 +32,17 @@ TEST(CommandConverter, MapsAndClampsSupportedAxes)
     twist.angular.y = 0.2;
     twist.angular.z = -1.0;
 
-    const auto command = converter.convert(twist, "loco");
+    const auto command = converter.convert(twist, "loco", 0.03);
 
     EXPECT_DOUBLE_EQ(command.twist.linear.x, 0.5);
     EXPECT_DOUBLE_EQ(command.twist.linear.y, 0.0);
-    EXPECT_DOUBLE_EQ(command.twist.linear.z, 0.0);
+    EXPECT_DOUBLE_EQ(command.twist.linear.z, 0.03);
     EXPECT_DOUBLE_EQ(command.twist.angular.x, 0.0);
     EXPECT_DOUBLE_EQ(command.twist.angular.y, 0.0);
     EXPECT_DOUBLE_EQ(command.twist.angular.z, -0.4);
     EXPECT_EQ(command.fsm_mode, "loco");
     EXPECT_DOUBLE_EQ(command.pose.orientation.w, 1.0);
+    EXPECT_DOUBLE_EQ(command.pose.position.z, 0.0);
 }
 
 TEST(CommandConverter, RejectsNonFiniteInput)
@@ -55,12 +56,14 @@ TEST(CommandConverter, RejectsNonFiniteInput)
 
 TEST(CommandConverter, StopHasSafeDefaults)
 {
-    const auto command = CommandConverter::make_stop("");
+    const auto command = CommandConverter::make_stop("", -0.12);
 
     EXPECT_DOUBLE_EQ(command.twist.linear.x, 0.0);
     EXPECT_DOUBLE_EQ(command.twist.linear.y, 0.0);
+    EXPECT_DOUBLE_EQ(command.twist.linear.z, -0.12);
     EXPECT_DOUBLE_EQ(command.twist.angular.z, 0.0);
     EXPECT_DOUBLE_EQ(command.pose.orientation.w, 1.0);
+    EXPECT_DOUBLE_EQ(command.pose.position.z, 0.0);
 }
 
 }  // namespace slam_d1_bridge

@@ -48,7 +48,10 @@ luxi_visual_frontend:
     depth_scale_16u: 0.001
     publish_tf: true
 
-    minimum_keypoints: 80
+    # The D435i view contains large low-texture floor regions.  Sixty points
+    # preserves the downstream 50-match geometric gate while allowing the
+    # first odometry keyframe to initialize in the observed 60-79 point range.
+    minimum_keypoints: 60
     minimum_matches: 50
     minimum_depth_matches: 30
     minimum_inliers: 25

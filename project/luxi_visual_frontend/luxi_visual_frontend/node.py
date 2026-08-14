@@ -171,7 +171,7 @@ class VisualOdometryNode(Node):
             "transform_timeout": 0.5,
             "depth_scale_16u": 0.001,
             "publish_tf": True,
-            "minimum_keypoints": 80,
+            "minimum_keypoints": 60,
             "minimum_matches": 50,
             "minimum_depth_matches": 30,
             "minimum_inliers": 25,

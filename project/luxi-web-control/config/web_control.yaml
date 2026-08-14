@@ -23,7 +23,19 @@ web_control:
     d1_fsm_topic: /d15041873/rl_controller/fsm
     d1_controller_status_service: /d15041873/command/get_controller_status
     d1_parameter_service: /d15041873/teleop_command/get_parameters
+    # Stable interfaces republished/consumed by slam_d1_bridge. The web UI does
+    # not couple itself to the D1 vendor's internal battery topics.
+    d1_battery1_topic: /d15041873/status/battery1
+    d1_battery2_topic: /d15041873/status/battery2
+    d1_body_height_command_topic: /d15041873/command/body_height
+    d1_body_height_status_topic: /d15041873/status/body_height
+    # Old level 9 (30% of 0..30) is now the web's 100% endpoint.
+    d1_body_height_minimum: 0.0
+    d1_body_height_maximum: 9.0
+    d1_body_height_default: 0.0
     d1_feedback_timeout: 3.0
+    # Covers worst-case DDS discovery, SDK service response and posture change.
+    d1_transition_timeout: 90.0
 
     # C++ D435i level calibrator controlled by the web button.
     imu_level_calibration_service: /sensors/imu/calibrate_level

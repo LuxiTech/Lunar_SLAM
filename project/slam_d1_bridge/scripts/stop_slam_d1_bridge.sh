@@ -18,13 +18,17 @@ set -euo pipefail
 
 readonly DEFAULT_ROBOT_NS="d15041873"
 readonly DEFAULT_ROS_DOMAIN_ID="42"
-readonly DEFAULT_WORKSPACE="/home/nvidia/Desktop/lunar_slam"
+readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
+readonly DEFAULT_WORKSPACE="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 
 ROBOT_NS="${ROBOT_NS:-${DEFAULT_ROBOT_NS}}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-${DEFAULT_ROS_DOMAIN_ID}}"
 ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
 RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 SLAM_D1_WORKSPACE="${SLAM_D1_WORKSPACE:-${DEFAULT_WORKSPACE}}"
+D1_DISCOVERY_SPIN_TIME="${D1_DISCOVERY_SPIN_TIME:-30.0}"
+D1_SERVICE_TIMEOUT="${D1_SERVICE_TIMEOUT:-30s}"
 
 readonly PID_FILE="/tmp/slam_d1_bridge_${ROBOT_NS}.pid"
 readonly COMMAND_TOPIC="/${ROBOT_NS}/command/user_command"
@@ -55,13 +59,16 @@ source /opt/ros/humble/setup.bash
 source "${SLAM_D1_WORKSPACE}/install/setup.bash"
 set -u
 export ROS_DOMAIN_ID ROS_LOCALHOST_ONLY RMW_IMPLEMENTATION
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/setup_d1_lan_dds.sh"
 
 echo "Robot namespace : ${ROBOT_NS}"
 echo "ROS domain ID    : ${ROS_DOMAIN_ID}"
+echo "D1 LAN interface : ${D1_LAN_INTERFACE} (${D1_LAN_ADDRESS})"
 echo "Command topic    : ${COMMAND_TOPIC}"
 
 topic_info="$(
-    ros2 topic info --no-daemon --spin-time 5.0 -v \
+    ros2 topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}" -v \
         "${COMMAND_TOPIC}" 2>/dev/null || true
 )"
 if grep -Eq 'Node name: http_ros_gateway' <<<"${topic_info}"; then
@@ -122,7 +129,7 @@ set_sdk_mode()
     local enabled="$1"
     local response
     response="$(
-        timeout --signal=INT 8s ros2 service call \
+        timeout --signal=INT "${D1_SERVICE_TIMEOUT}" ros2 service call \
             "${PARAMETER_SERVICE}" \
             rcl_interfaces/srv/SetParameters \
             "{parameters: [{name: use_sdk, value: {type: 1, bool_value: ${enabled}}}]}"

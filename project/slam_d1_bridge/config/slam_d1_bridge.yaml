@@ -3,9 +3,30 @@
         input_topic: "cmd_vel"
         slam_pose_topic: "slam/pose"
         output_topic: "command/user_command"
+        body_height_command_topic: "command/body_height"
+        body_height_status_topic: "status/body_height"
+        battery1_input_topic: "system_status_broadcaster/battery1"
+        battery2_input_topic: "system_status_broadcaster/battery2"
+        battery1_status_topic: "status/battery1"
+        battery2_status_topic: "status/battery2"
         publish_period_ms: 50
         command_timeout_ms: 300
         max_linear_x: 0.5
         max_angular_z: 0.5
         lateral_velocity_tolerance: 0.001
+        # Single-unit biped height level. The previous level 9 (30% of 0..30)
+        # is the new 100% endpoint. One level takes one second.
+        body_height_minimum: 0.0
+        body_height_maximum: 9.0
+        body_height_default: 0.0
+        body_height_maximum_rate: 1.0
+        body_height_linear_z_scale: 0.03
+        # D1 only accepts an auxiliary RL skill after it has completed the
+        # transform_up -> loco transition. Keep this deterministic in the
+        # persistent bridge instead of relying on a one-shot CLI publisher.
+        startup_fsm_mode: "loco"
+        startup_fsm_duration_ms: 3000
+        # The deployed biped LQR handles height-rate input while remaining in
+        # loco. Do not switch morphology or activate a quadruped RL policy.
         fsm_mode: "loco"
+        height_fsm_mode: "loco"

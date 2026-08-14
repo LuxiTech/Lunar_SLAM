@@ -55,7 +55,6 @@ Luxi 网页、建图和相机链路，防止重复占用 8080 端口、D435i USB
 重复发布 TF/话题。
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
 bash scripts/stop_luxi_system.sh
 ```
 
@@ -76,7 +75,6 @@ bash scripts/stop_luxi_system.sh
 HIK 双目 + H30 IMU（当前推荐测试命令）：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=42
@@ -91,7 +89,6 @@ ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 D435i 使用完全相同的入口，只替换一个参数：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=42
@@ -110,7 +107,6 @@ ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 连接 LeKiwi 底盘时使用：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch luxi_web_control lekiwi_web_control.launch.py \
@@ -164,7 +160,7 @@ ros2 run luxi_web_control web_control_node --ros-args \
 
 ### 已连接的 D1 机器人（192.168.123.49）
 
-控制目标使用 Fast DDS、Domain 42 和子网发现。网页与导航先输出标准
+控制目标使用 Fast DDS、Domain 42 和仅限 `192.168.123.0/24` 的有线白名单。网页与导航先输出标准
 `geometry_msgs/msg/Twist`，再由 `slam_d1_bridge` 转换为厂家接口
 `/d15041873/command/user_command`。启动网页和速度仲裁：
 
@@ -182,18 +178,25 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py
 拒绝所有非零运动命令；关闭会先停车，再让机器人趴下并释放 SDK。出于安全考虑，刷新
 页面不会自动站立，切换时浏览器会再次要求现场确认。
 
+“机器人状态”中的腿高滑块明确标记为“单体双足模式”。有效控制档位为
+`0..9`，页面归一化显示 `0..100%`；新 100% 对应旧 `0..30` 范围的
+30% 位置。每档对应约 1 秒的
+`UserCommand.twist.linear.z=0.03`（降低时为 `-0.03`）。百分比是控制进度，
+不是高度传感器测得的绝对离地高度。
+
 实车导航操作顺序为：加载地图、自动定位、选择目标点、等待“规划完成”，再点击“出发”。
 “停止行驶”保留定位和当前路径；“停止定位”和软件急停都会先停止行驶。当前速度上限为
 0.10 m/s，控制链只使用保存的静态地图，尚未实现实时局部障碍物融合和动态绕行。
 
-它会自动设置所需 DDS 环境变量。若使用通用 launch，则应在本机设置：
+推荐使用仓库脚本，它会自动选择本机 `192.168.123.x` 地址并生成 Fast DDS 白名单。
+若手工启动 launch，必须先加载白名单：
 
 ```bash
+source install/slam_d1_bridge/lib/slam_d1_bridge/setup_d1_lan_dds.sh
 export ROS_DOMAIN_ID=42
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
 export ROS_LOCALHOST_ONLY=0
-export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 ```
 
 D1 端 `d1_bringup.service` 必须使用相同设置。建议在它加载的 ROS 环境中设置：
@@ -203,12 +206,12 @@ Environment=ROS_DOMAIN_ID=42
 Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 Environment=ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
 Environment=ROS_LOCALHOST_ONLY=0
-Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+Environment=FASTRTPS_DEFAULT_PROFILES_FILE=/opt/d1_ros2/fastdds_d1_robot_lan_only.xml
 ```
 
-修改环境后仅在机器人安全趴下且有人持急停时重启 D1 bringup。控制机地址为
-`192.168.123.51/24`，机器人地址为
-`192.168.123.49/24`；两端应允许 Fast DDS 的 UDP 发现和数据流量。
+修改环境后仅在机器人安全趴下且有人持急停时重启 D1 bringup。每台控制机使用唯一的
+`192.168.123.x/24` 地址，机器人固定为 `192.168.123.49/24`。D1 Wi-Fi 控制已禁用，
+完整安装与恢复步骤见 `slam_d1_bridge/README.md`。
 
 `/cmd_vel` 是本工程内部接口，D1 不直接订阅它。必须另启本工程中的厂家桥；完整构建、
 SDK 模式、站立、停止和测试步骤见

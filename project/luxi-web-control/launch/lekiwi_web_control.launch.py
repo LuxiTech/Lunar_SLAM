@@ -42,7 +42,7 @@ def generate_launch_description():
             "standard_cmd_vel_topic",
             default_value="/d1/cmd_vel_standard",
         ),
-        DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
+        DeclareLaunchArgument("bind_address", default_value="127.0.0.1"),
         DeclareLaunchArgument("http_port", default_value="8080"),
         DeclareLaunchArgument(
             "config",
@@ -59,7 +59,6 @@ def generate_launch_description():
             "SUBNET",
         ),
         SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "0"),
-        SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
         GroupAction(
             scoped=True,
             actions=[IncludeLaunchDescription(

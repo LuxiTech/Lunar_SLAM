@@ -87,6 +87,22 @@
         </section>
         <strong id="robotControlState" class="mapping-state">正在连接</strong>
 
+        <section class="robot-status-panel" aria-label="D1 机器人状态">
+          <div class="robot-status-heading">
+            <div>
+              <p class="eyebrow">ROBOT STATUS</p>
+              <b>机器人状态</b>
+            </div>
+            <strong id="robotBatteryState" class="mapping-state offline">电量离线</strong>
+          </div>
+          <div id="robotBatteryDetail" class="robot-battery-detail">开启机器人控制后显示双电池信息</div>
+          <label class="slider-row body-height-row">
+            <span><b>单体双足模式·腿部高度</b><output id="bodyHeightValue">0%</output></span>
+            <input id="bodyHeight" type="range" min="0" max="9" step="0.1" value="0" disabled>
+          </label>
+          <small id="bodyHeightDetail">正在确认当前控制器是否支持腿高调节</small>
+        </section>
+
         <label class="slider-row">
           <span><b>线速度</b><output id="linearValue">0.12 m/s</output></span>
           <input id="linearSpeed" type="range" min="0.01" max="0.25" step="0.01" value="0.12">

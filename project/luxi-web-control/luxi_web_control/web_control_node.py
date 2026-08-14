@@ -42,8 +42,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters
-from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
-from std_msgs.msg import Bool, Float32, String
+from sensor_msgs.msg import BatteryState, CompressedImage, PointCloud2, PointField
+from std_msgs.msg import Bool, Float32, Float64, String
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker
 
@@ -78,6 +78,31 @@ def classify_d1_posture(fsm_state: str) -> str:
     ):
         return "standing"
     return "unknown"
+
+
+def parse_body_height(
+    payload: Dict[str, Any], minimum: float, maximum: float
+) -> float:
+    """Validate a browser body-height request without silently changing it."""
+    value = payload.get("height")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("height must be a number")
+    height = float(value)
+    if not math.isfinite(height):
+        raise ValueError("height must be finite")
+    if height < minimum or height > maximum:
+        raise ValueError(
+            f"height level must be between {minimum:.0f} and {maximum:.0f}"
+        )
+    return height
+
+
+def normalize_battery_percentage(value: float) -> Optional[float]:
+    """Accept both ROS's 0..1 convention and the D1 driver's 0..100 value."""
+    if not math.isfinite(value) or value < 0.0:
+        return None
+    percentage = value * 100.0 if value <= 1.0 else value
+    return round(min(100.0, percentage), 1)
 
 
 def mapping_graph_conflicts(
@@ -863,12 +888,14 @@ class D1ControlManager:
         stop_script: Path,
         bridge_pid_file: Path,
         log_path: Path,
+        transition_timeout: float = 90.0,
     ) -> None:
         self.enabled = enabled
         self.start_script = start_script
         self.stop_script = stop_script
         self.bridge_pid_file = bridge_pid_file
         self.log_path = log_path
+        self.transition_timeout = transition_timeout
         self._lock = threading.Lock()
         self._worker: Optional[threading.Thread] = None
         self._state = "active" if self._bridge_running() else "inactive"
@@ -920,7 +947,7 @@ class D1ControlManager:
                     [str(script), "--yes"],
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
-                    timeout=30.0,
+                    timeout=self.transition_timeout,
                     check=False,
                     env=sanitized_subprocess_environment(),
                 )
@@ -1585,6 +1612,30 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/api/robot/height":
+            try:
+                height = parse_body_height(
+                    payload,
+                    node.d1_body_height_minimum,
+                    node.d1_body_height_maximum,
+                )
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            node.stop_motion()
+            accepted, message = node.set_d1_body_height(height)
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "message": message,
+                    "robot_control": node.d1_control_status(),
+                },
+            )
+            return
         if path == "/api/imu/calibrate":
             started, message = node.start_imu_level_calibration()
             if not started:
@@ -1745,6 +1796,7 @@ class WebControlNode(Node):
         self.declare_parameter("d1_stop_script", "")
         self.declare_parameter("d1_bridge_pid_file", "")
         self.declare_parameter("d1_control_log_path", "")
+        self.declare_parameter("d1_transition_timeout", 90.0)
         self.declare_parameter(
             "d1_fsm_topic", "/d15041873/rl_controller/fsm"
         )
@@ -1756,6 +1808,22 @@ class WebControlNode(Node):
             "d1_parameter_service",
             "/d15041873/teleop_command/get_parameters",
         )
+        self.declare_parameter(
+            "d1_battery1_topic", "/d15041873/status/battery1"
+        )
+        self.declare_parameter(
+            "d1_battery2_topic", "/d15041873/status/battery2"
+        )
+        self.declare_parameter(
+            "d1_body_height_command_topic",
+            "/d15041873/command/body_height",
+        )
+        self.declare_parameter(
+            "d1_body_height_status_topic", "/d15041873/status/body_height"
+        )
+        self.declare_parameter("d1_body_height_minimum", 0.0)
+        self.declare_parameter("d1_body_height_maximum", 9.0)
+        self.declare_parameter("d1_body_height_default", 0.0)
         self.declare_parameter("d1_feedback_timeout", 3.0)
         self.declare_parameter(
             "imu_level_calibration_service", "/sensors/imu/calibrate_level"
@@ -1901,6 +1969,9 @@ class WebControlNode(Node):
                 d1_control_log_path
                 or workspace_root / "log/luxi_web_control_d1.log"
             ).resolve(),
+            transition_timeout=float(
+                self.get_parameter("d1_transition_timeout").value
+            ),
         )
         self.d1_fsm_topic = str(self.get_parameter("d1_fsm_topic").value)
         self.d1_controller_status_service = str(
@@ -1909,6 +1980,33 @@ class WebControlNode(Node):
         self.d1_parameter_service = str(
             self.get_parameter("d1_parameter_service").value
         )
+        self.d1_battery_topics = (
+            str(self.get_parameter("d1_battery1_topic").value),
+            str(self.get_parameter("d1_battery2_topic").value),
+        )
+        self.d1_body_height_command_topic = str(
+            self.get_parameter("d1_body_height_command_topic").value
+        )
+        self.d1_body_height_status_topic = str(
+            self.get_parameter("d1_body_height_status_topic").value
+        )
+        self.d1_body_height_minimum = float(
+            self.get_parameter("d1_body_height_minimum").value
+        )
+        self.d1_body_height_maximum = float(
+            self.get_parameter("d1_body_height_maximum").value
+        )
+        self.d1_body_height_default = float(
+            self.get_parameter("d1_body_height_default").value
+        )
+        if not (
+            math.isfinite(self.d1_body_height_minimum)
+            and math.isfinite(self.d1_body_height_maximum)
+            and self.d1_body_height_minimum < self.d1_body_height_maximum
+            and self.d1_body_height_minimum <= self.d1_body_height_default
+            <= self.d1_body_height_maximum
+        ):
+            raise ValueError("invalid D1 body-height limits")
         self.d1_feedback_timeout = float(
             self.get_parameter("d1_feedback_timeout").value
         )
@@ -1920,6 +2018,11 @@ class WebControlNode(Node):
         self._d1_sdk_active: Optional[bool] = None
         self._d1_sdk_received_at: Optional[float] = None
         self._d1_feedback_error = ""
+        self._d1_batteries = [None, None]
+        self._d1_battery_received_at = [None, None]
+        self._d1_body_height = self.d1_body_height_default
+        self._d1_body_height_target = self.d1_body_height_default
+        self._d1_body_height_received_at: Optional[float] = None
         self._d1_controller_future = None
         self._d1_parameter_future = None
         mapping_sensor_setup = str(
@@ -2229,6 +2332,9 @@ class WebControlNode(Node):
         self.d1_fsm_subscription = None
         self.d1_controller_status_client = None
         self.d1_parameter_client = None
+        self.d1_body_height_publisher = None
+        self.d1_body_height_subscription = None
+        self.d1_battery_subscriptions = []
         self.d1_feedback_timer = None
         if self.d1_control.enabled:
             d1_feedback_qos = QoSProfile(
@@ -2240,6 +2346,26 @@ class WebControlNode(Node):
                 String,
                 self.d1_fsm_topic,
                 self._on_d1_fsm,
+                d1_feedback_qos,
+            )
+            for index, battery_topic in enumerate(self.d1_battery_topics):
+                self.d1_battery_subscriptions.append(
+                    self.create_subscription(
+                        BatteryState,
+                        battery_topic,
+                        lambda message, pack=index: self._on_d1_battery(
+                            pack, message
+                        ),
+                        d1_feedback_qos,
+                    )
+                )
+            self.d1_body_height_publisher = self.create_publisher(
+                Float64, self.d1_body_height_command_topic, qos
+            )
+            self.d1_body_height_subscription = self.create_subscription(
+                Float64,
+                self.d1_body_height_status_topic,
+                self._on_d1_body_height,
                 d1_feedback_qos,
             )
             self.d1_controller_status_client = self.create_client(
@@ -2396,6 +2522,8 @@ class WebControlNode(Node):
             raise ValueError("command_timeout must be greater than zero")
         if self.d1_feedback_timeout <= 0.0:
             raise ValueError("d1_feedback_timeout must be greater than zero")
+        if self.d1_control.transition_timeout <= 0.0:
+            raise ValueError("d1_transition_timeout must be greater than zero")
         if self.max_cloud_points != 0 and not 100 <= self.max_cloud_points <= 20000:
             raise ValueError(
                 "max_cloud_points must be zero or between 100 and 20000"
@@ -3077,6 +3205,64 @@ class WebControlNode(Node):
         force = not active and not status["bridge_active"]
         return self.d1_control.set_active(active, force=force)
 
+    def _on_d1_battery(self, pack: int, message: BatteryState) -> None:
+        def finite(value: float) -> Optional[float]:
+            return round(float(value), 2) if math.isfinite(value) else None
+
+        statuses = {
+            BatteryState.POWER_SUPPLY_STATUS_UNKNOWN: "unknown",
+            BatteryState.POWER_SUPPLY_STATUS_CHARGING: "charging",
+            BatteryState.POWER_SUPPLY_STATUS_DISCHARGING: "discharging",
+            BatteryState.POWER_SUPPLY_STATUS_NOT_CHARGING: "not_charging",
+            BatteryState.POWER_SUPPLY_STATUS_FULL: "full",
+        }
+        snapshot = {
+            "pack": pack + 1,
+            "percentage": normalize_battery_percentage(message.percentage),
+            "voltage": finite(message.voltage),
+            "current": finite(message.current),
+            "temperature": finite(message.temperature),
+            "status": statuses.get(message.power_supply_status, "unknown"),
+        }
+        with self._d1_status_lock:
+            self._d1_batteries[pack] = snapshot
+            self._d1_battery_received_at[pack] = time.monotonic()
+
+    def _on_d1_body_height(self, message: Float64) -> None:
+        if not math.isfinite(message.data):
+            return
+        with self._d1_status_lock:
+            self._d1_body_height = float(message.data)
+            self._d1_body_height_received_at = time.monotonic()
+
+    def set_d1_body_height(self, height: float) -> Tuple[bool, str]:
+        """Publish a validated height target only while D1 control is ready."""
+        status = self.d1_control_status()
+        if not status["enabled"]:
+            return False, "D1 control is disabled"
+        if not status["control_ready"]:
+            return False, "D1 must be standing with SDK control and bridge ready"
+        if str(status.get("controller_mode") or "").strip().lower() != "biped":
+            return False, (
+                "当前不是已验证的双足 LQR 模式；为避免触发四足形态策略，"
+                "拒绝腿高指令"
+            )
+        if self.d1_body_height_publisher is None:
+            return False, "D1 body-height publisher is unavailable"
+        message = Float64()
+        message.data = height
+        with self._d1_status_lock:
+            self._d1_body_height_target = height
+        self.d1_body_height_publisher.publish(message)
+        percentage = 100.0 * (
+            (height - self.d1_body_height_minimum)
+            / (self.d1_body_height_maximum - self.d1_body_height_minimum)
+        )
+        return True, (
+            f"D1 single-unit biped height set to level {height:.0f} "
+            f"({percentage:.0f}%)"
+        )
+
     def d1_control_status(self) -> Dict[str, Any]:
         """Combine actual D1 FSM/SDK feedback with the local bridge state."""
         managed = self.d1_control.status()
@@ -3089,6 +3275,11 @@ class WebControlNode(Node):
             sdk_active = self._d1_sdk_active
             sdk_received_at = self._d1_sdk_received_at
             feedback_error = self._d1_feedback_error
+            batteries = list(self._d1_batteries)
+            battery_received_at = list(self._d1_battery_received_at)
+            body_height = self._d1_body_height
+            body_height_target = self._d1_body_height_target
+            body_height_received_at = self._d1_body_height_received_at
 
         def age(received_at: Optional[float]) -> Optional[float]:
             return None if received_at is None else round(now - received_at, 2)
@@ -3113,6 +3304,45 @@ class WebControlNode(Node):
             and sdk_age <= self.d1_feedback_timeout
         )
         feedback_online = fsm_online and controller_online and sdk_online
+        battery_packs = []
+        for index, snapshot in enumerate(batteries):
+            battery_age = age(battery_received_at[index])
+            online = bool(
+                managed["enabled"]
+                and snapshot is not None
+                and battery_age is not None
+                and battery_age <= self.d1_feedback_timeout
+                and self.count_publishers(self.d1_battery_topics[index]) > 0
+            )
+            battery_packs.append({
+                **(snapshot or {"pack": index + 1}),
+                "online": online,
+                "age_seconds": battery_age,
+            })
+        online_packs = [pack for pack in battery_packs if pack["online"]]
+        percentages = [
+            pack["percentage"] for pack in online_packs
+            if pack.get("percentage") is not None
+        ]
+        height_age = age(body_height_received_at)
+        height_online = bool(
+            managed["enabled"]
+            and height_age is not None
+            and height_age <= self.d1_feedback_timeout
+            and self.count_publishers(self.d1_body_height_status_topic) > 0
+        )
+        height_supported = bool(
+            controller_online
+            and str(controller_mode).strip().lower() == "biped"
+        )
+        if not controller_online:
+            height_reason = "控制器形态状态离线，无法确认高度功能"
+        elif height_supported:
+            height_reason = "双足 LQR 腿高速率控制已验证"
+        else:
+            height_reason = (
+                "当前不是已验证的双足 LQR 模式"
+            )
         posture = classify_d1_posture(fsm_state) if fsm_online else "offline"
         bridge_active = bool(managed["active"])
         transitioning = bool(managed["transitioning"])
@@ -3165,6 +3395,21 @@ class WebControlNode(Node):
             "sdk_active": sdk_active,
             "sdk_age_seconds": sdk_age,
             "feedback_error": feedback_error or None,
+            "battery": {
+                "online": bool(online_packs),
+                "percentage": min(percentages) if percentages else None,
+                "packs": battery_packs,
+            },
+            "body_height": {
+                "supported": height_supported,
+                "reason": height_reason,
+                "online": height_online,
+                "current": round(body_height, 3) if height_online else None,
+                "target": round(body_height_target, 3),
+                "minimum": self.d1_body_height_minimum,
+                "maximum": self.d1_body_height_maximum,
+                "age_seconds": height_age,
+            },
         }
 
     def start_mapping(self) -> Tuple[bool, str]:

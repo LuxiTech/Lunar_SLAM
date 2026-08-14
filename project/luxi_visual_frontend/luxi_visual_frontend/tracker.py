@@ -40,7 +40,7 @@ class FeatureBackend(Protocol):
 class TrackerConfig:
     """Tracking thresholds expressed in metric and pixel units."""
 
-    minimum_keypoints: int = 80
+    minimum_keypoints: int = 60
     minimum_matches: int = 50
     minimum_depth_matches: int = 30
     minimum_inliers: int = 25
