@@ -37,9 +37,6 @@ const imuCalibrationButton = $("#imuCalibrationButton");
 const rgbPreview = $("#rgbPreview");
 const rgbPreviewState = $("#rgbPreviewState");
 const rgbPreviewHint = $("#rgbPreviewHint");
-const cloudPreview = $("#cloudPreview");
-const cloudPreviewState = $("#cloudPreviewState");
-const cloudPreviewHint = $("#cloudPreviewHint");
 const navigationState = $("#navigationState");
 const navigationDetail = $("#navigationDetail");
 const navigationMapSelect = $("#navigationMapSelect");
@@ -72,10 +69,16 @@ const semanticSaveButton = $("#semanticSaveButton");
 const semanticStatus = $("#semanticStatus");
 
 const held = new Set();
+const controlClientId = (() => {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+})();
 let estopActive = false;
 let online = false;
 let toastTimer = null;
 let commandRequestPending = false;
+let commandFailureToastAt = 0;
+let controlSessionActive = false;
 let robotControlReady = true;
 let robotControlRequestPending = false;
 let bodyHeightRequestPending = false;
@@ -88,7 +91,7 @@ let joystickX = 0;
 let joystickY = 0;
 let rgbRefreshPending = false;
 let rgbObjectUrl = null;
-let cloudRefreshPending = false;
+const heavyPreviewControllers = new Set();
 let navigationMapsRefreshPending = false;
 let navigationLoadPending = false;
 let navigationLocatePending = false;
@@ -136,18 +139,50 @@ function showToast(message) {
 }
 
 async function api(path, body = {}, options = {}) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body),
-    cache: "no-store",
-    keepalive: options.keepalive || false,
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(result.error || `HTTP ${response.status}`);
+  const controller = options.timeoutMs ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), options.timeoutMs)
+    : null;
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+      cache: "no-store",
+      keepalive: options.keepalive || false,
+      signal: controller?.signal,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(result.error || `HTTP ${response.status}`);
+    }
+    return result;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("控制请求超时");
+    throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
-  return result;
+}
+
+function heavyPreviewAllowed() {
+  return !controlActive() && !controlSessionActive && !document.hidden;
+}
+
+function cancelHeavyPreviewRequests() {
+  for (const controller of heavyPreviewControllers) controller.abort();
+  heavyPreviewControllers.clear();
+}
+
+async function fetchHeavyPreview(path) {
+  if (!heavyPreviewAllowed()) throw new Error("preview paused");
+  const controller = new AbortController();
+  heavyPreviewControllers.add(controller);
+  try {
+    return await fetch(path, {cache: "no-store", signal: controller.signal});
+  } finally {
+    heavyPreviewControllers.delete(controller);
+  }
 }
 
 function currentCommand() {
@@ -180,14 +215,27 @@ function controlActive() {
 }
 
 async function sendCommand() {
-  if (!controlActive() || !robotControlReady || estopActive || commandRequestPending) return;
+  if (!controlActive() || !robotControlReady || estopActive) return;
+  cancelHeavyPreviewRequests();
+  if (commandRequestPending) return;
   commandRequestPending = true;
   const command = currentCommand();
   updateReadout(command);
   try {
-    await api("/api/cmd_vel", command);
+    await api(
+      "/api/cmd_vel",
+      {...command, client_id: controlClientId},
+      {timeoutMs: 250},
+    );
   } catch (error) {
-    if (!String(error.message).includes("emergency stop")) showToast(`控制失败：${error.message}`);
+    const now = Date.now();
+    if (
+      !String(error.message).includes("emergency stop")
+      && now - commandFailureToastAt > 1500
+    ) {
+      commandFailureToastAt = now;
+      showToast(`控制链路重试：${error.message}`);
+    }
   } finally {
     commandRequestPending = false;
   }
@@ -200,7 +248,11 @@ function stop(options = {}) {
   joystickY = 0;
   updateJoystickKnob();
   updateReadout({linear_x: 0, angular_z: 0});
-  api("/api/stop", {}, {keepalive: options.keepalive}).catch(() => {});
+  api(
+    "/api/stop",
+    {client_id: controlClientId},
+    {keepalive: options.keepalive},
+  ).catch(() => {});
 }
 
 function beginAction(action) {
@@ -388,6 +440,36 @@ const robotPostureNames = {
   offline: "离线",
   unknown: "未知",
 };
+
+const hlocReasonNames = {
+  RETRIEVAL_SCORE_LOW: "当前画面与地图参考图差异过大",
+  MATCHES_LOW: "局部特征匹配不足",
+  LANDMARKS_LOW: "带深度的地图特征不足",
+  PNP_FAILED: "特征几何关系无法求出位姿",
+  PNP_INLIERS_LOW: "几何一致的特征数量不足",
+  PNP_INLIER_RATIO_LOW: "特征几何一致率过低",
+  REPROJECTION_ERROR_HIGH: "视觉重投影误差过大",
+  DEPTH_MISSING: "当前深度图不可用",
+  DEPTH_VALID_POINTS_LOW: "有效深度匹配点不足",
+  DEPTH_RESIDUAL_HIGH: "当前深度与地图深度不一致",
+  SENSOR_TIME_MISMATCH: "彩色图与深度图时间不同步",
+  CAMERA_INFO_SIZE_MISMATCH: "相机内参与图像尺寸不一致",
+  CAMERA_TF_UNAVAILABLE: "相机到机器人坐标变换不可用",
+  WAITING_FOR_SENSOR_DATA: "正在等待 RGB-D 数据",
+  PROCESSING: "正在计算粗定位",
+};
+
+function hlocFailureDetail(navigation) {
+  const diagnostics = navigation.hloc_diagnostics || {};
+  const reason = diagnostics.reason || navigation.hloc_status;
+  if (!reason || ["LOCALIZED", "ACCEPTED", "PROCESSING"].includes(reason)) return "";
+  const description = hlocReasonNames[reason] || reason;
+  const counts = Number.isFinite(Number(diagnostics.matches))
+    ? `，匹配=${Number(diagnostics.matches)}` : "";
+  const reference = diagnostics.reference
+    ? `，候选=${String(diagnostics.reference).split("/").pop()}` : "";
+  return `${description}${counts}${reference}`;
+}
 
 function updateRobotControl(control) {
   if (!control) return;
@@ -705,8 +787,11 @@ function updateNavigation(navigation) {
       navigationDetail.textContent =
         `${mapName} 已找到 HLoc 全局候选，正在进行 ICP 精配准：${poseText}。`;
     } else {
-      navigationDetail.textContent =
-        `正在 ${mapName} 中进行全局粗定位；请缓慢移动或转动机器人。`;
+      const failure = hlocFailureDetail(navigation);
+      navigationDetail.textContent = failure
+        ? `${mapName} 粗定位尚未通过：${failure}。` +
+          "请让相机看到墙角、门框、箱体等有区分度的物体，并缓慢转动；机器人保持零速度。"
+        : `正在 ${mapName} 中进行全局粗定位；请缓慢移动或转动机器人。`;
     }
     if (navigation.map_id && navigationCloud.map_id !== navigation.map_id) {
       refreshNavigationCloud();
@@ -1108,13 +1193,13 @@ function drawNavigationMap(voxels, path, cloud) {
 }
 
 async function refreshVoxelMap() {
-  if (voxelRefreshPending) return;
+  if (voxelRefreshPending || !heavyPreviewAllowed()) return;
   voxelRefreshPending = true;
   try {
     const [voxelResponse, pathResponse, terrainResponse] = await Promise.all([
-      fetch("/api/navigation/voxels", {cache: "no-store"}),
-      fetch("/api/navigation/path", {cache: "no-store"}),
-      fetch("/api/navigation/terrain", {cache: "no-store"}),
+      fetchHeavyPreview("/api/navigation/voxels"),
+      fetchHeavyPreview("/api/navigation/path"),
+      fetchHeavyPreview("/api/navigation/terrain"),
     ]);
     if (!voxelResponse.ok || !pathResponse.ok || !terrainResponse.ok) {
       throw new Error("preview unavailable");
@@ -1140,10 +1225,10 @@ async function refreshVoxelMap() {
 }
 
 async function refreshNavigationCloud() {
-  if (navigationCloudRefreshPending) return;
+  if (navigationCloudRefreshPending || !heavyPreviewAllowed()) return;
   navigationCloudRefreshPending = true;
   try {
-    const response = await fetch("/api/navigation/cloud", {cache: "no-store"});
+    const response = await fetchHeavyPreview("/api/navigation/cloud");
     if (!response.ok) throw new Error("cloud unavailable");
     navigationCloud = (await response.json()).cloud || {};
   } catch (_error) {
@@ -1778,15 +1863,10 @@ function setPreviewState(element, active, text) {
 function updatePreviewStatus(preview) {
   if (!preview || !preview.enabled) {
     setPreviewState(rgbPreviewState, false, "预览未启用");
-    setPreviewState(cloudPreviewState, false, "预览未启用");
     return;
   }
   const rgbLive = preview.rgb_age_seconds != null && preview.rgb_age_seconds < 3;
   setPreviewState(rgbPreviewState, rgbLive, rgbLive ? "实时" : "等待相机");
-  const cloud = preview.cloud || {};
-  const cloudLive = cloud.point_count > 0 && cloud.age_seconds != null && cloud.age_seconds < 5;
-  const cloudText = cloudLive ? `${cloud.point_count} 点` : "等待建图";
-  setPreviewState(cloudPreviewState, cloudLive, cloudText);
 }
 
 async function refreshRgbPreview() {
@@ -1810,68 +1890,13 @@ async function refreshRgbPreview() {
   }
 }
 
-function drawCloud(points) {
-  const rect = cloudPreview.getBoundingClientRect();
-  const width = Math.max(1, Math.round(rect.width));
-  const height = Math.max(1, Math.round(rect.height));
-  const ratio = Math.max(1, window.devicePixelRatio || 1);
-  if (cloudPreview.width !== width * ratio || cloudPreview.height !== height * ratio) {
-    cloudPreview.width = width * ratio;
-    cloudPreview.height = height * ratio;
-  }
-  const context = cloudPreview.getContext("2d");
-  context.setTransform(ratio, 0, 0, ratio, 0, 0);
-  context.fillStyle = "#080d13";
-  context.fillRect(0, 0, width, height);
-  if (!points.length) return;
-
-  const previewView = {yaw: Math.PI / 2, pitch: 1.05, zoom: 1};
-  const projected = points.map(([x, y, z, red, green, blue]) => {
-    const result = mapProjection.projectMapPoint(
-      [x, y, z],
-      [0, 0, 0],
-      previewView,
-    );
-    return {x: result.horizontal, y: result.vertical, red, green, blue};
-  });
-  const xs = projected.map((point) => point.x);
-  const ys = projected.map((point) => point.y);
-  const spanX = Math.max(0.1, Math.max(...xs) - Math.min(...xs));
-  const spanY = Math.max(0.1, Math.max(...ys) - Math.min(...ys));
-  const scale = Math.min((width - 24) / spanX, (height - 24) / spanY);
-  const centerX = (Math.min(...xs) + Math.max(...xs)) * 0.5;
-  const centerY = (Math.min(...ys) + Math.max(...ys)) * 0.5;
-  for (const point of projected) {
-    const screenX = width * 0.5 + (point.x - centerX) * scale;
-    const screenY = height * 0.5 - (point.y - centerY) * scale;
-    context.fillStyle = `rgb(${point.red}, ${point.green}, ${point.blue})`;
-    context.fillRect(screenX, screenY, 2, 2);
-  }
-}
-
-async function refreshCloudPreview() {
-  if (cloudRefreshPending) return;
-  cloudRefreshPending = true;
-  try {
-    const response = await fetch("/api/preview/cloud", {cache: "no-store"});
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const result = await response.json();
-    const cloud = result.cloud || {};
-    const points = Array.isArray(cloud.points) ? cloud.points : [];
-    drawCloud(points);
-    cloudPreviewHint.classList.toggle("hidden", points.length > 0);
-  } catch (_error) {
-    cloudPreviewHint.classList.remove("hidden");
-  } finally {
-    cloudRefreshPending = false;
-  }
-}
-
 async function refreshStatus() {
   try {
     const response = await fetch("/api/status", {cache: "no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
+    controlSessionActive = Boolean(data.control_session_active);
+    if (controlSessionActive) cancelHeavyPreviewRequests();
     setConnection(true);
     topic.textContent = data.cmd_vel_topic;
     subscribers.textContent = String(data.subscriber_count);
@@ -1905,25 +1930,27 @@ async function refreshStatus() {
 setInterval(sendCommand, 100);
 setInterval(refreshStatus, 1000);
 setInterval(refreshRgbPreview, 500);
-setInterval(refreshCloudPreview, 1200);
 setInterval(refreshNavigationMaps, 2500);
 setInterval(refreshVoxelMap, 1000);
 window.addEventListener("resize", () => {
-  refreshCloudPreview();
   refreshVoxelMap();
 });
-window.addEventListener("blur", () => stop({keepalive: true}));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stop({keepalive: true});
 });
 window.addEventListener("pagehide", () => {
   held.clear();
-  navigator.sendBeacon("/api/stop", new Blob(["{}"], {type: "application/json"}));
+  navigator.sendBeacon(
+    "/api/stop",
+    new Blob(
+      [JSON.stringify({client_id: controlClientId})],
+      {type: "application/json"},
+    ),
+  );
 });
 
 updateSpeeds();
 refreshStatus();
 refreshRgbPreview();
-refreshCloudPreview();
 refreshNavigationMaps();
 refreshVoxelMap();

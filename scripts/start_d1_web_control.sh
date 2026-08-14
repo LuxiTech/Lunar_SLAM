@@ -65,7 +65,8 @@ safe_web_stop()
 {
     curl --fail --silent --show-error \
         -X POST -H "Content-Type: application/json" \
-        -d '{}' "${WEB_URL}/api/stop" >/dev/null 2>&1 || true
+        -d '{"client_id":"startup-safety-stop","force":true}' \
+        "${WEB_URL}/api/stop" >/dev/null 2>&1 || true
 }
 
 safe_robot_stop()
@@ -154,7 +155,7 @@ send_web_command_for()
         fi
         curl --fail --silent --show-error \
             -X POST -H "Content-Type: application/json" \
-            -d "{\"linear_x\":${linear_x},\"linear_y\":0.0,\"angular_z\":${angular_z}}" \
+            -d "{\"linear_x\":${linear_x},\"linear_y\":0.0,\"angular_z\":${angular_z},\"client_id\":\"startup-motion-test\"}" \
             "${WEB_URL}/api/cmd_vel" >/dev/null
         sleep 0.1
     done

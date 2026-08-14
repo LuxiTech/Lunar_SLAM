@@ -45,6 +45,17 @@
           <span class="hint">键盘 W A S D</span>
         </div>
 
+        <div class="drive-rgb-preview">
+          <div class="drive-preview-heading">
+            <span>机器人 RGB 画面</span>
+            <span id="rgbPreviewState" class="preview-state">等待相机</span>
+          </div>
+          <div class="rgb-frame">
+            <img id="rgbPreview" alt="当前硬件 RGB 图像">
+            <span id="rgbPreviewHint" class="preview-overlay">等待统一 RGB 图像</span>
+          </div>
+        </div>
+
         <div class="joystick-panel">
           <div id="joystickPad" class="joystick-pad" role="application" aria-label="小车速度摇杆">
             <div class="joystick-ring"></div>
@@ -152,36 +163,6 @@
         </button>
         <button id="releaseButton" class="release-button" hidden>解除急停</button>
       </aside>
-    </section>
-
-    <section class="preview-grid" aria-label="建图实时预览">
-      <article class="panel preview-panel">
-        <div class="panel-title">
-          <div>
-            <p class="eyebrow">CAMERA</p>
-            <h2>当前 RGB</h2>
-          </div>
-          <span id="rgbPreviewState" class="preview-state">等待相机</span>
-        </div>
-        <div class="rgb-frame">
-          <img id="rgbPreview" alt="当前硬件 RGB 图像">
-          <span id="rgbPreviewHint" class="preview-overlay">等待统一 RGB 图像</span>
-        </div>
-      </article>
-
-      <article class="panel preview-panel">
-        <div class="panel-title">
-          <div>
-            <p class="eyebrow">RTAB-MAP</p>
-            <h2>实时点云</h2>
-          </div>
-          <span id="cloudPreviewState" class="preview-state">等待建图</span>
-        </div>
-        <div class="cloud-frame">
-          <canvas id="cloudPreview" aria-label="RTAB-Map 实时点云预览"></canvas>
-          <span id="cloudPreviewHint" class="preview-overlay">开始建图后显示点云</span>
-        </div>
-      </article>
     </section>
 
     <section class="panel navigation-panel" aria-label="体素地图与全局路径规划">

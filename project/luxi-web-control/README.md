@@ -121,16 +121,16 @@ ros2 launch luxi_web_control web_control.launch.py \
 ```
 
 用 `hostname -I` 查看主机地址；同一局域网浏览器打开日志列出的地址，例如
-`http://192.168.123.66:8080`。网页启动后应先看到 HIK RGB 预览，再点击“开始建图”。
-状态变为“建图中”后，页面点云窗口应出现 `/rtabmap/cloud_map` 的完整彩色点云。采集
-结束必须点击“停止建图”，等待 RTAB 正常保存数据库后再关闭终端。
+`http://192.168.123.66:8080`。网页启动后应先在遥控盘上方看到 HIK RGB 预览，再点击
+“开始建图”。为保证手机遥控心跳连续，建图过程不再向网页回传实时点云；这不影响
+RTAB-Map 内部建图、数据库保存或后续地图导出。采集结束必须点击“停止建图”，等待
+RTAB 正常保存数据库后再关闭终端。
 
 | 网页功能 | 前置条件 |
 |---|---|
 | 遥控、急停 | 网页运行；底盘订阅 `/cmd_vel` |
 | RGB 预览 | 任一硬件 profile 正常发布统一压缩 RGB |
 | 开始建图、停止保存 | 硬件 profile 与网页运行；同步门禁通过 |
-| 实时点云预览 | 建图运行且 `/rtabmap/cloud_map` 已发布 |
 | 加载/标注已有地图 | 网页运行且已有 `.db`；不要求相机在线 |
 | 地图定位、选择导航目标 | 硬件、网页及已导出的地图层均可用 |
 
@@ -249,11 +249,11 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 4. 点击“停止建图”。网页会向它启动的建图进程发送 `SIGINT`，RTAB-Map 正常关闭并
    保存数据库。
 
-网页下方会同时显示两块只读预览：当前硬件 profile 的 RGB 图像，以及来自
-`/rtabmap/cloud_map` 的彩色点云。RGB 在相机驱动运行后即可显示；点云需要建图
-成功启动并收到 RTAB-Map 地图数据后才会出现。当前 `max_cloud_points=0`，网页不再对
-实时点云抽样；其显示采用固定等轴视角，适合确认重建是否持续更新。大地图若导致网页
-延迟升高，可将该参数恢复为正数以限制单帧预览点数，这不会改变地图数据库或导出结果。
+网页只在遥控盘上方显示当前硬件 profile 的 RGB 图像。默认
+`enable_cloud_preview=false`，网页节点不会订阅 `/rtabmap/cloud_map`，实时点云 HTTP
+接口也不可用，避免大 JSON 响应阻塞手机控制心跳。这不会改变 RTAB-Map 内部点云、地图
+数据库、保存地图的 PLY/OctoMap 或定位精度。若在非遥控部署中显式恢复可选点云接口，
+`max_cloud_points=5000` 仍会限制单帧预览规模。
 
 每一次新建图默认写入 `/home/nvidia/Desktop/lunar_slam/maps/rtab_maps/mapNNN.db`。如果启动失败，
 网页会显示失败状态；详细日志位于
@@ -345,7 +345,7 @@ A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低�
 | `http_port` | `8080` | HTTP 端口，测试时可设为 0 自动分配 |
 | `auto_stop_existing_web_control` | `true` | 自动替换同用户、同包的旧网页控制实例 |
 | `publish_rate` | `20.0` | Twist 发布频率（Hz） |
-| `command_timeout` | `0.6` | 运动命令失效时间（秒） |
+| `command_timeout` | `0.8` | 运动命令失效时间（秒） |
 | `max_linear_x` | `0.25` | 前后最大速度（m/s） |
 | `max_linear_y` | `0.0` | 横移最大速度，差速小车保持 0 |
 | `max_angular_z` | `0.8` | 最大角速度（rad/s） |
@@ -357,10 +357,11 @@ A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低�
 | `mapping_sensor_setup` | 空 | 可选的额外设备环境；统一工作区构建时保持为空 |
 | `auto_build_hloc_index` | `true` | 加载地图时是否自动构建缺失的 GPU HLoc 索引 |
 | `hloc_index_build_timeout` | `900.0` | HLoc 导出和单个模型构建步骤的超时秒数 |
-| `enable_preview` | `true` | 是否订阅并提供 RGB、实时点云预览 |
+| `enable_preview` | `true` | 是否订阅并提供 RGB 预览 |
+| `enable_cloud_preview` | `false` | 是否额外订阅并开放实时建图点云；D1 遥控默认关闭 |
 | `rgb_preview_topic` | `/sensors/rgbd/color/image_raw/compressed` | 适配层统一的压缩 RGB 话题 |
 | `cloud_preview_topic` | `/rtabmap/cloud_map` | RTAB-Map 彩色点云话题 |
-| `max_cloud_points` | `0` | 单次浏览器点云预览的最大抽样点数；`0` 表示不抽样 |
+| `max_cloud_points` | `5000` | 显式恢复实时点云接口时的单帧抽样上限 |
 | `max_saved_cloud_points` | `30000` | 浏览器 Canvas 的保存点云显示上限；只限制预览，不改变 PLY、OctoMap 或定位精度 |
 | `max_terrain_points` | `12000` | 每类 C++ 地形图层的浏览器抽样上限，不改变规划地图 |
 | `navigation_robot_radius` | `0.10` | 网页离线地形预览使用的机器人半径（m），应与规划器一致 |
@@ -380,8 +381,10 @@ A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低�
 ## HTTP 接口
 
 - `GET /api/status`：控制器状态、限速、订阅者数量。
-- `POST /api/cmd_vel`：JSON 字段 `linear_x`、`linear_y`、`angular_z`。
-- `POST /api/stop`：立即归零。
+- `POST /api/cmd_vel`：JSON 字段 `linear_x`、`linear_y`、`angular_z`；网页还发送
+  `client_id` 取得 0.8 秒可续期控制租约，其他浏览器不能覆盖该租约。
+- `POST /api/stop`：同一 `client_id` 立即归零。系统安全停机脚本可附带
+  `"force": true`；该标志只能停车，不能产生运动。
 - `POST /api/estop`：`{"active": true}` 锁定，`false` 解除。
 - `POST /api/mapping/start`：启动受网页管理的 RTAB-Map 建图进程。
 - `POST /api/mapping/stop`：停止受网页管理的 RTAB-Map 建图进程并保存数据库。
@@ -391,7 +394,8 @@ A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低�
 - `POST /api/navigation/stop`：停止定位、规划相关进程。
 - `GET /api/navigation/terrain`：当前地图的可通行点、归一化边缘代价和障碍物点。
 - `GET /api/preview/rgb`：最新压缩 RGB 图像，未收到相机数据时返回 404。
-- `GET /api/preview/cloud`：抽样后的 XYZRGB 点云 JSON，用于网页 Canvas 预览。
+- `GET /api/preview/cloud`：仅在显式设置 `enable_cloud_preview=true` 时提供；D1 默认返回
+  404，手动控制期间返回 409。
 - `GET /api/semantic/annotations?map_id=mapNNN`：检查 OctoMap 并加载独立标注。
 - `POST /api/semantic/save`：校验并原子保存所选地图的语义标注 JSON。
 

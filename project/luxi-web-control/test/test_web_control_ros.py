@@ -135,6 +135,8 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b'api("/api/robot/control", {active: requested})' in app
             assert b'api("/api/robot/height", {height: Number(bodyHeightInput.value)})' in app
             assert b'api("/api/imu/calibrate")' in app
+            assert b"controlClientId" in app
+            assert b"MATCHES_LOW" in app
 
         imu_calibration = node.status()["imu_calibration"]
         assert imu_calibration["service_available"] is False
@@ -165,11 +167,11 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
         except HTTPError as error:
             assert error.code == 400
 
-        with urlopen(base_url + "/api/preview/cloud", timeout=2.0) as response:
-            assert response.status == 200
-            preview = json.load(response)["cloud"]
-            assert preview["point_count"] == 0
-            assert preview["points"] == []
+        try:
+            urlopen(base_url + "/api/preview/cloud", timeout=2.0)
+            assert False, "live mapping cloud must be disabled by default"
+        except HTTPError as error:
+            assert error.code == 404
 
         assert node._load_navigation_cloud("map011", str(static_cloud)) == ""
         with urlopen(base_url + "/api/navigation/cloud", timeout=2.0) as response:
@@ -249,12 +251,53 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert error.code == 423
 
         _post(base_url, "/api/estop", {"active": False})
-        _post(base_url, "/api/cmd_vel", {"linear_x": 0.1})
+        owner = "browser-owner-0001"
+        stale = "browser-stale-0002"
+        _post(
+            base_url,
+            "/api/cmd_vel",
+            {"linear_x": 0.1, "client_id": owner},
+        )
         assert _wait_for(
             lambda: any(message.linear.x == 0.1 for message in messages)
         )
-        _post(base_url, "/api/stop", {})
+        try:
+            urlopen(base_url + "/api/navigation/cloud", timeout=2.0)
+            assert False, "large previews must pause during manual control"
+        except HTTPError as error:
+            assert error.code == 409
+        _, ignored = _post(
+            base_url,
+            "/api/stop",
+            {"client_id": stale},
+        )
+        assert ignored["ignored"] is True
+        assert node.status()["state"] == "moving"
+        _, legacy_stop = _post(base_url, "/api/stop", {})
+        assert legacy_stop["ignored"] is True
+        try:
+            _post(base_url, "/api/cmd_vel", {"linear_x": 0.1})
+            assert False, "an old browser must not overwrite a modern lease"
+        except HTTPError as error:
+            assert error.code == 423
+        try:
+            _post(
+                base_url,
+                "/api/cmd_vel",
+                {"linear_x": 0.1, "client_id": stale},
+            )
+            assert False, "a second browser must not steal a live lease"
+        except HTTPError as error:
+            assert error.code == 423
+        _, stopped = _post(
+            base_url,
+            "/api/stop",
+            {"client_id": owner},
+        )
+        assert stopped["stopped"] is True
         assert _wait_for(lambda: messages and messages[-1].linear.x == 0.0)
+        with urlopen(base_url + "/api/navigation/cloud", timeout=2.0) as response:
+            assert response.status == 200
     finally:
         executor.shutdown(timeout_sec=1.0)
         spin_thread.join(timeout=1.0)

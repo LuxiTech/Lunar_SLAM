@@ -115,7 +115,7 @@ publish_for()
     local fsm_mode="$2"
     local result=0
 
-    timeout --signal=INT "${duration}" ros2 topic pub -r 20 \
+    timeout --signal=INT --kill-after=2s "${duration}" ros2 topic pub -r 20 \
         "${COMMAND_TOPIC}" \
         ddt_msgs/msg/UserCommand \
         "{fsm_mode: ${fsm_mode}, pose: {orientation: {w: 1.0}}}" || result=$?
@@ -128,16 +128,18 @@ set_sdk_mode()
 {
     local enabled="$1"
     local response
+    local result=0
     response="$(
-        timeout --signal=INT "${D1_SERVICE_TIMEOUT}" ros2 service call \
+        timeout --signal=INT --kill-after=2s "${D1_SERVICE_TIMEOUT}" ros2 service call \
             "${PARAMETER_SERVICE}" \
             rcl_interfaces/srv/SetParameters \
             "{parameters: [{name: use_sdk, value: {type: 1, bool_value: ${enabled}}}]}"
-    )"
-    if ! grep -q 'successful=True' <<<"${response}"; then
-        echo "D1 rejected use_sdk=${enabled}: ${response}" >&2
-        return 1
+    )" || result=$?
+    if grep -q 'successful=True' <<<"${response}"; then
+        return 0
     fi
+    echo "D1 use_sdk=${enabled} request failed (exit ${result}): ${response}" >&2
+    return 1
 }
 
 echo "Publishing loco with zero velocity for 1 second..."

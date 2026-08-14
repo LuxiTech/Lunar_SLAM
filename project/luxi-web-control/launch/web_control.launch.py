@@ -34,6 +34,7 @@ def generate_launch_description():
         DeclareLaunchArgument("config", default_value=default_config),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
+        DeclareLaunchArgument("restrict_http_to_d1_lan", default_value="false"),
         DeclareLaunchArgument("http_port", default_value="8080"),
         Node(
             package="luxi_web_control",
@@ -55,6 +56,10 @@ def generate_launch_description():
                     "http_port": ParameterValue(
                         LaunchConfiguration("http_port"),
                         value_type=int,
+                    ),
+                    "restrict_http_to_d1_lan": ParameterValue(
+                        LaunchConfiguration("restrict_http_to_d1_lan"),
+                        value_type=bool,
                     ),
                 },
             ],

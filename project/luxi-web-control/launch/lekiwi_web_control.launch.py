@@ -69,6 +69,7 @@ def generate_launch_description():
                     ),
                     "bind_address": LaunchConfiguration("bind_address"),
                     "http_port": LaunchConfiguration("http_port"),
+                    "restrict_http_to_d1_lan": "true",
                     "config": LaunchConfiguration("config"),
                 }.items(),
             )],

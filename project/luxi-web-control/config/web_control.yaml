@@ -10,7 +10,9 @@ web_control:
 
     # A held web control is refreshed at 10 Hz; output is published at 20 Hz.
     publish_rate: 20.0
-    command_timeout: 0.6
+    # Allow a short mobile-Wi-Fi scheduling gap without producing stop/start
+    # pulses. Emergency stop and pointer release still stop immediately.
+    command_timeout: 0.8
 
     # Server-side safety limits, independent of browser slider values.
     max_linear_x: 0.25
@@ -97,15 +99,19 @@ web_control:
     navigation_ground_normal_radius: 0.30
     navigation_ground_max_slope_degrees: 35.0
     navigation_obstacle_min_height: 0.15
+    # map018 takes about 66 s to fit normals/terrain on this CPU.
+    navigation_terrain_load_timeout: 90.0
     max_terrain_points: 12000
 
-    # Read-only RGB and RTAB-Map cloud previews for the web page.
+    # Keep only the lightweight RGB preview in the driving page. Live mapping
+    # clouds are intentionally not subscribed to or returned over HTTP.
     enable_preview: true
+    enable_cloud_preview: false
     rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
     cloud_preview_topic: /rtabmap/cloud_map
-    max_cloud_points: 0
-    # Canvas preview only: zero forwards every finite point. Set a positive cap
-    # if a large map makes JSON/Canvas expensive. Saved maps are unaffected.
+    max_cloud_points: 5000
+    # Safety cap for deployments that explicitly re-enable the optional live
+    # cloud API. Saved navigation maps are unaffected.
     max_saved_cloud_points: 30000
     semantic_annotation_timeout: 15.0
     semantic_maps_root: ""
