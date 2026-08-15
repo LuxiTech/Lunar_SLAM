@@ -434,6 +434,21 @@ def test_robot_namespace_is_forwarded_by_both_web_launches():
     assert '"ROBOT_NS", LaunchConfiguration("robot_namespace")' in d1
 
 
+def test_included_web_launch_resolves_deferred_parameters_before_scope_exit():
+    generic = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/launch/web_control.launch.py"
+    ).read_text(encoding="utf-8")
+
+    # lekiwi_web_control includes this file inside a scoped GroupAction.  The
+    # web node starts only after `ros2 daemon stop` exits, so substitutions must
+    # be resolved by an OpaqueFunction before that include scope disappears.
+    assert "OpaqueFunction(function=launch_web_control)" in generic
+    assert 'LaunchConfiguration("config").perform(context)' in generic
+    assert 'LaunchConfiguration("http_port").perform(context)' in generic
+    assert "condition=UnlessCondition" not in generic
+
+
 def test_d1_one_click_script_accepts_explicit_robot_identity():
     source = (
         WORKSPACE_ROOT / "scripts/start_d1_web_control.sh"

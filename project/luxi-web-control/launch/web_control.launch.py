@@ -19,14 +19,14 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
+    OpaqueFunction,
     RegisterEventHandler,
     Shutdown,
 )
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 import os
 
 
@@ -38,52 +38,65 @@ def generate_launch_description():
         "web_control.yaml",
     )
 
-    def web_control_node(condition=None):
-        return Node(
+    def launch_web_control(context):
+        # Resolve every launch configuration while the included launch scope is
+        # still active.  The daemon-stop process exits after that scope has
+        # returned; keeping LaunchConfiguration substitutions in its deferred
+        # OnProcessExit action would then fail with "configuration does not
+        # exist" when this file is included by lekiwi_web_control.launch.py.
+        config = LaunchConfiguration("config").perform(context)
+        web_cmd_vel_topic = LaunchConfiguration("web_cmd_vel_topic").perform(
+            context
+        )
+        robot_namespace = LaunchConfiguration("robot_namespace").perform(
+            context
+        )
+        bind_address = LaunchConfiguration("bind_address").perform(context)
+        http_port = int(LaunchConfiguration("http_port").perform(context))
+        restrict_http = IfCondition(
+            LaunchConfiguration("restrict_http_to_d1_lan")
+        ).evaluate(context)
+
+        web_node = Node(
             package="luxi_web_control",
             executable="web_control_node",
             name="web_control",
             output="screen",
-            condition=condition,
             on_exit=Shutdown(reason="web control node exited"),
             parameters=[
-                LaunchConfiguration("config"),
+                config,
                 {
-                    "cmd_vel_topic": ParameterValue(
-                        LaunchConfiguration("web_cmd_vel_topic"),
-                        value_type=str,
-                    ),
-                    "robot_namespace": ParameterValue(
-                        LaunchConfiguration("robot_namespace"),
-                        value_type=str,
-                    ),
-                    "bind_address": ParameterValue(
-                        LaunchConfiguration("bind_address"),
-                        value_type=str,
-                    ),
-                    "http_port": ParameterValue(
-                        LaunchConfiguration("http_port"),
-                        value_type=int,
-                    ),
-                    "restrict_http_to_d1_lan": ParameterValue(
-                        LaunchConfiguration("restrict_http_to_d1_lan"),
-                        value_type=bool,
-                    ),
+                    "cmd_vel_topic": web_cmd_vel_topic,
+                    "robot_namespace": robot_namespace,
+                    "bind_address": bind_address,
+                    "http_port": http_port,
+                    "restrict_http_to_d1_lan": restrict_http,
                 },
             ],
         )
 
-    # A long-lived ros2cli daemon can retain stale Fast DDS graph/SHM state
-    # after camera and RTAB-Map processes are killed.  The symptom is an
-    # endless ParticipantEntitiesInfo Fast CDR / Bad alloc loop in every new
-    # rclpy node.  The daemon is not needed by running ROS nodes, so stopping
-    # it before this appliance-style service starts is safe; ros2cli starts a
-    # fresh daemon automatically on the next graph command.
-    reset_daemon = ExecuteProcess(
-        cmd=["ros2", "daemon", "stop"],
-        output="screen",
-        condition=IfCondition(LaunchConfiguration("reset_ros_daemon")),
-    )
+        if not IfCondition(
+            LaunchConfiguration("reset_ros_daemon")
+        ).evaluate(context):
+            return [web_node]
+
+        # A long-lived ros2cli daemon can retain stale Fast DDS graph/SHM state
+        # after camera and RTAB-Map processes are killed.  Stop it before the
+        # appliance-style web service starts; the next ros2cli command starts a
+        # fresh daemon automatically.
+        reset_daemon = ExecuteProcess(
+            cmd=["ros2", "daemon", "stop"],
+            output="screen",
+        )
+        return [
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=reset_daemon,
+                    on_exit=[web_node],
+                )
+            ),
+            reset_daemon,
+        ]
 
     return LaunchDescription([
         DeclareLaunchArgument("config", default_value=default_config),
@@ -110,15 +123,5 @@ def generate_launch_description():
                 "running ROS nodes are not affected"
             ),
         ),
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=reset_daemon,
-                on_exit=[web_control_node()],
-            ),
-            condition=IfCondition(LaunchConfiguration("reset_ros_daemon")),
-        ),
-        reset_daemon,
-        web_control_node(
-            condition=UnlessCondition(LaunchConfiguration("reset_ros_daemon"))
-        ),
+        OpaqueFunction(function=launch_web_control),
     ])
