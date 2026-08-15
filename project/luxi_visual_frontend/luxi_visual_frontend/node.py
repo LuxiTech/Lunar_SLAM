@@ -189,12 +189,14 @@ class VisualOdometryNode(Node):
             "keyframe_min_inlier_ratio": 0.40,
             "maximum_frame_translation": 0.25,
             "maximum_frame_rotation_deg": 15.0,
-            "maximum_frame_angular_rate_deg": 90.0,
+            "maximum_frame_angular_rate_deg": 55.0,
             "maximum_consecutive_tracking_failures": 3,
             "minimum_depth_consistency_matches": 20,
             "maximum_depth_consistency_error": 0.08,
             "maximum_imu_rotation_error_deg": 12.0,
             "maximum_imu_gravity_error_deg": 10.0,
+            "use_imu_depth_translation": False,
+            "use_imu_reseed_rotation": False,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -264,6 +266,12 @@ class VisualOdometryNode(Node):
             ),
             maximum_imu_gravity_error=math.radians(
                 float(parameters["maximum_imu_gravity_error_deg"])
+            ),
+            use_imu_depth_translation=bool(
+                parameters["use_imu_depth_translation"]
+            ),
+            use_imu_reseed_rotation=bool(
+                parameters["use_imu_reseed_rotation"]
             ),
         )
         self.parameters = parameters

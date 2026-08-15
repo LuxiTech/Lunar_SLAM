@@ -79,8 +79,11 @@ let online = false;
 let toastTimer = null;
 let commandRequestPending = false;
 let commandFailureToastAt = 0;
+let consecutiveCommandTimeouts = 0;
 let controlSessionActive = false;
-let robotControlReady = true;
+// Do not permit motion during the one-second window before the first actual
+// D1 feedback snapshot arrives.
+let robotControlReady = false;
 let robotControlRequestPending = false;
 let bodyHeightRequestPending = false;
 let bodyHeightDragging = false;
@@ -139,6 +142,15 @@ function showToast(message) {
   toastTimer = setTimeout(() => toast.classList.remove("show"), 2200);
 }
 
+class ApiError extends Error {
+  constructor(message, status = 0, kind = "http") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.kind = kind;
+  }
+}
+
 async function api(path, body = {}, options = {}) {
   const controller = options.timeoutMs ? new AbortController() : null;
   const timer = controller
@@ -155,15 +167,31 @@ async function api(path, body = {}, options = {}) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(result.error || `HTTP ${response.status}`);
+      throw new ApiError(result.error || `HTTP ${response.status}`, response.status);
     }
     return result;
   } catch (error) {
-    if (error.name === "AbortError") throw new Error("控制请求超时");
+    if (error.name === "AbortError") {
+      throw new ApiError("控制请求超时", 0, "timeout");
+    }
     throw error;
   } finally {
     if (timer !== null) clearTimeout(timer);
   }
+}
+
+function controlFailureMessage(error) {
+  const message = String(error?.message || error);
+  if (message.includes("not standing with SDK control and bridge ready")) {
+    return "机器人未站立，或 SDK/控制桥尚未就绪；运动指令已拒绝";
+  }
+  if (message.includes("control is in use by another browser")) {
+    return "另一台手机或浏览器正在控制机器人";
+  }
+  if (message.includes("emergency stop is active")) {
+    return "急停已开启，运动指令已拒绝";
+  }
+  return message;
 }
 
 function heavyPreviewAllowed() {
@@ -226,16 +254,22 @@ async function sendCommand() {
     await api(
       "/api/cmd_vel",
       {...command, client_id: controlClientId},
-      {timeoutMs: 250},
+      {timeoutMs: 500},
     );
+    consecutiveCommandTimeouts = 0;
   } catch (error) {
+    if (error.kind === "timeout") consecutiveCommandTimeouts += 1;
+    else consecutiveCommandTimeouts = 0;
     const now = Date.now();
     if (
-      !String(error.message).includes("emergency stop")
+      (error.kind !== "timeout" || consecutiveCommandTimeouts >= 3)
       && now - commandFailureToastAt > 1500
     ) {
       commandFailureToastAt = now;
-      showToast(`控制链路重试：${error.message}`);
+      const detail = error.kind === "timeout"
+        ? "控制链路延迟，指令正在续发；持续中断时机器人会由看门狗自动停车"
+        : controlFailureMessage(error);
+      showToast(detail);
     }
   } finally {
     commandRequestPending = false;
@@ -479,6 +513,11 @@ function updateRobotControl(control) {
   const transitioning = Boolean(control.transitioning);
   robotControlReady = !managed || Boolean(control.control_ready);
   robotControlToggle.checked = managed && active;
+  robotControlToggle.setAttribute(
+    "aria-label",
+    active ? "结束机器人控制" : "开启机器人控制",
+  );
+  robotControlToggle.title = active ? "机器人控制已开启" : "机器人控制未开启";
   robotControlToggle.disabled = !managed || transitioning || robotControlRequestPending
     || (!control.feedback_online && !active);
   robotControlState.textContent = robotControlStateNames[control.state] || control.state;
@@ -493,7 +532,9 @@ function updateRobotControl(control) {
   if (!managed) {
     robotControlDetail.textContent = "当前启动配置未启用 D1 控制";
   } else if (control.last_error || control.feedback_error) {
-    robotControlDetail.textContent = `${actualState} · ${control.last_error || control.feedback_error}`;
+    robotControlDetail.textContent = `${actualState} · ${controlFailureMessage(
+      control.last_error || control.feedback_error
+    )}`;
   } else if (transitioning) {
     const action = control.state === "enabling"
       ? "正在启用 SDK 并让机器人站立"
@@ -637,6 +678,7 @@ const imuCalibrationStateNames = {
   waiting_stationary: "等待静止",
   collecting: "采集中",
   calibrated: "校准完成",
+  stale: "姿态已变化",
   failed: "校准失败",
 };
 

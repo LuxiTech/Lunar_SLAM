@@ -427,10 +427,27 @@ std::optional<GridCell3D> TerrainModel::snapToTerrainAtXY(const GridCell3D & see
 std::vector<GridCell3D> TerrainModel::plan(
   const GridCell3D & start, const GridCell3D & goal) const
 {
+  return planAvoidingColumns(start, goal, {});
+}
+
+std::vector<GridCell3D> TerrainModel::planAvoidingColumns(
+  const GridCell3D & start, const GridCell3D & goal,
+  const GridColumnSet & blocked_columns,
+  std::optional<GridPlanningBounds> bounds) const
+{
   return planAstar3D(
     start, goal,
-    [this](const auto & cell) {
-      return surface_cells_.find(cell) != surface_cells_.end();
+    [this, &blocked_columns, &bounds, &start, &goal](const auto & cell) {
+      if (bounds &&
+        (cell.x < bounds->min_x || cell.x > bounds->max_x ||
+        cell.y < bounds->min_y || cell.y > bounds->max_y))
+      {
+        return false;
+      }
+      const GridCell3D column{cell.x, cell.y, 0};
+      const bool endpoint = cell == start || cell == goal;
+      return surface_cells_.find(cell) != surface_cells_.end() &&
+             (endpoint || blocked_columns.find(column) == blocked_columns.end());
     },
     [this](const auto & from, const auto & to) {return transitionAllowed(from, to);},
     [this](const auto & cell) {

@@ -58,12 +58,17 @@ class TrackerConfig:
     keyframe_min_inlier_ratio: float = 0.40
     maximum_frame_translation: float = 1.0
     maximum_frame_rotation: float = math.radians(60.0)
-    maximum_frame_angular_rate: float = math.radians(90.0)
+    maximum_frame_angular_rate: float = math.radians(55.0)
     maximum_consecutive_tracking_failures: int = 3
     minimum_depth_consistency_matches: int = 20
     maximum_depth_consistency_error: float = 0.08
     maximum_imu_rotation_error: float = math.radians(12.0)
     maximum_imu_gravity_error: float = math.radians(10.0)
+    # D435i has no magnetometer. Its AHRS yaw may assist diagnostics, but must
+    # not silently replace visually verified yaw or become the new keyframe
+    # orientation after tracking loss.
+    use_imu_depth_translation: bool = False
+    use_imu_reseed_rotation: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,8 +216,10 @@ class VisualOdometryTracker:
             if self._last_accepted_pose is not None
             else self._last_pose.copy()
         )
-        predicted_rotation = self._predicted_odom_rotation(
-            world_from_camera_rotation, stamp
+        predicted_rotation = (
+            self._predicted_odom_rotation(world_from_camera_rotation, stamp)
+            if self.config.use_imu_reseed_rotation
+            else None
         )
         if predicted_rotation is not None:
             pose[:3, :3] = predicted_rotation
@@ -401,7 +408,8 @@ class VisualOdometryTracker:
             current_depth_mask = valid_depth[pnp_current_indices]
             consistent_match_positions = np.flatnonzero(current_depth_mask)
             if (
-                len(consistent_match_positions)
+                self.config.use_imu_depth_translation
+                and len(consistent_match_positions)
                 >= self.config.minimum_depth_consistency_matches
             ):
                 fixed_rotation_pose = estimate_translation_with_rotation(

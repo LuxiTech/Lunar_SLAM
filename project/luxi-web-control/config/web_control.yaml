@@ -51,6 +51,10 @@ web_control:
     # Current validation surface is flat. This constrains only robot poses;
     # RGB-D points, obstacles and pits remain full 3D.
     mapping_planar_motion: true
+    # Mapping is refused unless each canonical input has exactly one publisher.
+    # Duplicate IMU/filter pipelines caused map024 trajectory deformation.
+    mapping_rgbd_topic: /sensors/rgbd/rgbd_image
+    mapping_imu_topic: /sensors/imu/data
     # The mapping child uses the same RMW as the sensor pipeline.
     mapping_rmw_implementation: rmw_fastrtps_cpp
 

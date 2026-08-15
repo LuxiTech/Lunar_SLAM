@@ -127,7 +127,9 @@ def test_drive_page_prioritizes_control_over_large_previews():
     assert 'id="cloudPreview"' not in page
     assert "refreshCloudPreview" not in app
     assert "cancelHeavyPreviewRequests" in app
-    assert "{timeoutMs: 250}" in app
+    assert "{timeoutMs: 500}" in app
+    assert "let robotControlReady = false" in app
+    assert "consecutiveCommandTimeouts >= 3" in app
     assert "const RGB_PREVIEW_INTERVAL_MS = 100" in app
     assert "setInterval(refreshRgbPreview, RGB_PREVIEW_INTERVAL_MS)" in app
     assert 'window.addEventListener("blur"' not in app

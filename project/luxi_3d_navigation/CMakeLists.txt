@@ -20,6 +20,7 @@ find_package(octomap CONFIG REQUIRED)
 find_package(octomap_msgs REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common features filters io search)
 find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -47,6 +48,10 @@ target_include_directories(terrain_cloud_classifier PUBLIC include ${PCL_INCLUDE
 target_link_directories(terrain_cloud_classifier PUBLIC ${PCL_LIBRARY_DIRS})
 target_link_libraries(terrain_cloud_classifier PUBLIC terrain_planning ${PCL_LIBRARIES})
 target_compile_definitions(terrain_cloud_classifier PUBLIC ${PCL_DEFINITIONS})
+
+add_library(rolling_voxel_grid src/rolling_voxel_grid.cpp)
+target_compile_features(rolling_voxel_grid PUBLIC cxx_std_17)
+target_include_directories(rolling_voxel_grid PUBLIC include)
 
 add_executable(octomap_3d_astar_planner_node src/octomap_3d_astar_planner_node.cpp)
 target_compile_features(octomap_3d_astar_planner_node PUBLIC cxx_std_17)
@@ -80,6 +85,32 @@ target_include_directories(terrain_path_follower_node PRIVATE include)
 ament_target_dependencies(terrain_path_follower_node
   geometry_msgs nav_msgs rclcpp std_msgs tf2 tf2_geometry_msgs tf2_ros)
 
+add_executable(local_obstacle_map_node src/local_obstacle_map_node.cpp)
+target_compile_features(local_obstacle_map_node PUBLIC cxx_std_17)
+target_include_directories(local_obstacle_map_node PRIVATE include)
+ament_target_dependencies(local_obstacle_map_node
+  geometry_msgs rclcpp sensor_msgs std_msgs tf2 tf2_geometry_msgs tf2_ros)
+target_link_libraries(local_obstacle_map_node rolling_voxel_grid)
+
+add_executable(local_path_replanner_node src/local_path_replanner_node.cpp)
+target_compile_features(local_path_replanner_node PUBLIC cxx_std_17)
+target_include_directories(local_path_replanner_node PRIVATE include ${PCL_INCLUDE_DIRS})
+ament_target_dependencies(local_path_replanner_node
+  geometry_msgs nav_msgs octomap_msgs rclcpp sensor_msgs std_msgs tf2 tf2_geometry_msgs tf2_ros)
+target_link_libraries(
+  local_path_replanner_node terrain_cloud_classifier terrain_planning
+  nlohmann_json::nlohmann_json ${PCL_LIBRARIES})
+set_target_properties(
+  local_path_replanner_node PROPERTIES
+  BUILD_RPATH "/lib/aarch64-linux-gnu;${OCTOMAP_ROOT}/lib"
+  INSTALL_RPATH "/lib/aarch64-linux-gnu;${OCTOMAP_ROOT}/lib")
+target_link_options(local_path_replanner_node PRIVATE "-Wl,--disable-new-dtags")
+
+add_executable(navigation_safety_gate_node src/navigation_safety_gate_node.cpp)
+target_compile_features(navigation_safety_gate_node PUBLIC cxx_std_17)
+target_include_directories(navigation_safety_gate_node PRIVATE include)
+ament_target_dependencies(navigation_safety_gate_node geometry_msgs rclcpp std_msgs)
+
 add_executable(twist_direction_adapter_node src/twist_direction_adapter_node.cpp)
 target_compile_features(twist_direction_adapter_node PUBLIC cxx_std_17)
 target_include_directories(twist_direction_adapter_node PRIVATE include)
@@ -104,6 +135,9 @@ target_link_options(terrain_plan_check PRIVATE "-Wl,--disable-new-dtags")
 install(TARGETS
   octomap_3d_astar_planner_node
   terrain_path_follower_node
+  local_obstacle_map_node
+  local_path_replanner_node
+  navigation_safety_gate_node
   twist_direction_adapter_node
   velocity_command_mux_node
   terrain_plan_check
@@ -133,6 +167,12 @@ if(BUILD_TESTING)
   target_include_directories(test_localization_health_monitor PRIVATE include)
   ament_add_gtest(test_path_follower_control test/test_path_follower_control.cpp)
   target_include_directories(test_path_follower_control PRIVATE include)
+  ament_add_gtest(test_rolling_voxel_grid test/test_rolling_voxel_grid.cpp)
+  target_link_libraries(test_rolling_voxel_grid rolling_voxel_grid)
+  target_include_directories(test_rolling_voxel_grid PRIVATE include)
+  ament_add_gtest(test_navigation_safety_gate test/test_navigation_safety_gate.cpp)
+  target_include_directories(test_navigation_safety_gate PRIVATE include)
+  ament_target_dependencies(test_navigation_safety_gate geometry_msgs)
   set_target_properties(
     test_terrain_cloud_classifier PROPERTIES BUILD_RPATH "/lib/aarch64-linux-gnu")
   target_link_options(test_terrain_cloud_classifier PRIVATE "-Wl,--disable-new-dtags")

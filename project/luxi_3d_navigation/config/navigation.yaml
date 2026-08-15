@@ -18,9 +18,93 @@ octomap_3d_astar_planner:
     ground_max_slope_degrees: 35.0
     obstacle_min_height: 0.15
 
+local_path_replanner:
+  ros__parameters:
+    robot_radius: 0.10
+    robot_height: 0.35
+    body_reference_height: 0.35
+    max_step_height: 0.15
+    max_slope_degrees: 50.0
+    strict_direct_ground_support: false
+    ground_support_xy_radius_cells: 1
+    ground_support_depth_cells: 2
+    snap_search_radius_cells: 12
+    max_iterations: 500000
+    costmap_margin: 0.60
+    costmap_weight: 8.0
+    ground_normal_radius: 0.30
+    ground_max_slope_degrees: 35.0
+    obstacle_min_height: 0.15
+    dynamic_inflation_radius: 0.25
+    # Plan 5 cm farther out than the hard clearance used to validate an active
+    # path, avoiding stop/replan oscillation from normal depth-point jitter.
+    dynamic_replan_hysteresis: 0.05
+    # Ignore one-frame path intersections while the forward safety corridor is
+    # not blocked; at 0.1 m/s this hold permits at most 5 cm of travel.
+    active_path_blocked_hold: 0.50
+    rejoin_min_distance: 0.80
+    planning_horizon: 3.0
+    local_window_margin: 1.0
+    replan_rate: 2.0
+
+local_obstacle_map:
+  ros__parameters:
+    target_frame: map
+    base_frame: base_link
+    resolution: 0.05
+    # Stored in map axes, so a 6 m square covers a 3 m radius at every yaw.
+    size_x: 6.0
+    size_y: 6.0
+    size_z: 1.5
+    minimum_depth: 0.25
+    maximum_depth: 2.5
+    # A 12-pixel stride is still about 1 cm at 0.5 m range and keeps the
+    # obstacle callback near 10 Hz on this CPU instead of saturating one core.
+    skip_pixel: 12
+    # Every endpoint can add an obstacle; only a subset needs expensive free-space rays.
+    raycast_stride: 4
+    hit_increment: 1
+    miss_decrement: 1
+    occupied_threshold: 2
+    minimum_score: -3
+    maximum_score: 5
+    # Keep an unobserved obstacle long enough for this slow robot to pass it
+    # after turning it out of the D435i field of view. Explicit free-space rays
+    # still clear an object immediately when the camera sees that it moved.
+    occupied_ttl: 30.0
+    stale_entry_ttl: 35.0
+    minimum_obstacle_z: -0.32
+    maximum_obstacle_z: 0.30
+    self_filter_x_min: -0.25
+    self_filter_x_max: 0.20
+    self_filter_half_width: 0.20
+    corridor_half_width: 0.25
+    stop_distance: 0.45
+    slow_distance: 0.70
+    # At D1's 0.10 m/s minimum gait speed, 0.6 s permits at most 6 cm of travel.
+    sensor_timeout: 0.60
+    tf_timeout: 0.05
+    # More dangerous transitions are immediate; clearing must remain stable.
+    state_clear_hold: 0.50
+    publish_rate: 10.0
+
+navigation_safety_gate:
+  ros__parameters:
+    monitor_only: false
+    command_timeout: 0.20
+    obstacle_timeout: 0.60
+    planner_timeout: 1.0
+    slow_scale: 0.50
+    # D1's walking controller does not execute smaller translational commands.
+    # Slow mode remains flagged/limited but preserves this hardware floor.
+    minimum_linear_speed: 0.10
+    healthy_resume_hold: 0.50
+    publish_rate: 20.0
+
 terrain_path_follower:
   ros__parameters:
     max_linear_speed: 0.10
+    minimum_linear_speed: 0.10
     max_angular_speed: 0.35
     # Ignore small heading errors so uncalibrated camera lever-arm motion does
     # not make short paths oscillate. Rotate in place only for larger errors.

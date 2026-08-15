@@ -372,6 +372,39 @@ def test_d1_battery_status_and_height_request_reach_ros():
         assert status["percentage"] == 76.0
         assert status["packs"][0]["voltage"] == 48.2
 
+        # Feature availability must never make the browser switch look active.
+        # The switch represents feedback-verified SDK control, not merely a
+        # configured manager or a latched physical posture.
+        now = time.monotonic()
+        node.count_publishers = lambda _topic: 1
+        node.d1_control.status = lambda: {
+            "enabled": True,
+            "state": "inactive",
+            "active": False,
+            "transitioning": False,
+            "last_error": "",
+            "log_path": "",
+        }
+        with node._d1_status_lock:
+            node._d1_fsm_state = "idle"
+            node._d1_fsm_received_at = now
+            node._d1_controller_mode = "biped"
+            node._d1_controller_received_at = now
+            node._d1_sdk_active = False
+            node._d1_sdk_received_at = now
+        prone = node.d1_control_status()
+        assert prone["state"] == "inactive"
+        assert prone["posture"] == "prone"
+        assert prone["active"] is False
+        assert prone["control_ready"] is False
+
+        with node._d1_status_lock:
+            node._d1_fsm_state = "loco"
+            node._d1_fsm_received_at = time.monotonic()
+        standing = node.d1_control_status()
+        assert standing["state"] == "standing_uncontrolled"
+        assert standing["active"] is False
+
         node.d1_control_status = lambda: {
             "enabled": True,
             "control_ready": True,

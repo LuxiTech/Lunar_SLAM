@@ -1969,6 +1969,8 @@ class WebControlNode(Node):
         self.declare_parameter("mapping_workspace_setup", "")
         self.declare_parameter("mapping_log_path", "")
         self.declare_parameter("mapping_planar_motion", True)
+        self.declare_parameter("mapping_rgbd_topic", "/sensors/rgbd/rgbd_image")
+        self.declare_parameter("mapping_imu_topic", "/sensors/imu/data")
         self.declare_parameter("enable_navigation_control", True)
         self.declare_parameter("navigation_launch_package", "luxi_3d_navigation")
         self.declare_parameter("navigation_launch_file", "saved_map_navigation.launch.py")
@@ -2192,6 +2194,12 @@ class WebControlNode(Node):
             planar_motion=bool(
                 self.get_parameter("mapping_planar_motion").value
             ),
+        )
+        self.mapping_rgbd_topic = str(
+            self.get_parameter("mapping_rgbd_topic").value
+        )
+        self.mapping_imu_topic = str(
+            self.get_parameter("mapping_imu_topic").value
         )
         navigation_sensor_setup = str(
             self.get_parameter("navigation_sensor_setup").value
@@ -2769,10 +2777,27 @@ class WebControlNode(Node):
 
     def _on_d1_fsm(self, message: String) -> None:
         """Cache the robot controller's transient-local FSM feedback."""
+        new_state = message.data.strip()
         with self._d1_status_lock:
-            self._d1_fsm_state = message.data.strip()
+            old_posture = classify_d1_posture(self._d1_fsm_state)
+            new_posture = classify_d1_posture(new_state)
+            self._d1_fsm_state = new_state
             self._d1_fsm_received_at = time.monotonic()
             self._d1_feedback_error = ""
+        posture_changed = (
+            old_posture != "unknown"
+            and new_posture != "unknown"
+            and old_posture != new_posture
+        )
+        if posture_changed:
+            with self._imu_calibration_lock:
+                if self._imu_calibration.get("state") == "calibrated":
+                    self._imu_calibration = {
+                        **self._imu_calibration,
+                        "state": "stale",
+                        "calibrated": False,
+                        "message": "机器人姿态已变化，请在站立静止后重新校准 IMU",
+                    }
 
     def _on_imu_calibration_status(self, message: String) -> None:
         """Cache the C++ level calibrator's transient-local status."""
@@ -2815,11 +2840,16 @@ class WebControlNode(Node):
         status["busy"] = status.get("state") in {
             "waiting_stationary", "collecting"
         }
+        d1_status = self.d1_control_status()
+        status["robot_standing"] = bool(
+            not d1_status["enabled"] or d1_status["posture"] == "standing"
+        )
         mapping_running = self.mapping.status()["state"] == "running"
         navigation_status = self.navigation.status()
         navigation_running = navigation_status["state"] == "running"
         status["can_start"] = (
             status["service_available"] and not status["busy"]
+            and status["robot_standing"]
             and not mapping_running and not navigation_running
         )
         return status
@@ -2833,6 +2863,9 @@ class WebControlNode(Node):
             return False, "请先停止定位和导航，再校准 IMU"
         if not self.imu_calibration_client.service_is_ready():
             return False, "IMU 校准服务未连接，请先启动 D435i 硬件"
+        d1_status = self.d1_control_status()
+        if d1_status["enabled"] and d1_status["posture"] != "standing":
+            return False, "请先让机器人站立并保持静止，再校准 IMU"
         if self.imu_calibration_status()["busy"]:
             return False, "IMU 正在校准，请保持机器人静止"
         self.stop_motion()
@@ -3617,9 +3650,10 @@ class WebControlNode(Node):
             and bridge_active
             and not transitioning
         )
-        switch_active = bool(
-            bridge_active or posture in {"standing", "standing_up"}
-        )
+        # `enabled` means the feature is configured; `active` is reserved for
+        # actual, feedback-verified web control. Keeping these distinct stops a
+        # prone or merely standing robot from appearing "on" in the browser.
+        switch_active = control_ready
 
         if not managed["enabled"]:
             state = "disabled"
@@ -3627,12 +3661,12 @@ class WebControlNode(Node):
             state = managed["state"]
         elif managed["state"] == "failed":
             state = "failed"
-        elif not feedback_online:
-            state = "offline"
         elif control_ready:
             state = "active"
-        elif posture == "prone" and not bridge_active and sdk_active is False:
+        elif fsm_online and posture == "prone" and not bridge_active:
             state = "inactive"
+        elif not feedback_online:
+            state = "offline"
         elif posture == "standing_up":
             state = "standing_up"
         elif posture == "standing":
@@ -3677,11 +3711,29 @@ class WebControlNode(Node):
 
     def start_mapping(self) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
+        d1_status = self.d1_control_status()
+        if d1_status["enabled"] and d1_status["posture"] != "standing":
+            return False, "请先让机器人站立，再校准 IMU 并开始建图"
         calibration = self.imu_calibration_status()
         if calibration["service_available"] and (
             calibration.get("state") != "calibrated" or calibration["busy"]
         ):
             return False, "请先在水平面完成 IMU 一键校准"
+        publisher_counts = {
+            self.mapping_rgbd_topic: self.count_publishers(self.mapping_rgbd_topic),
+            self.mapping_imu_topic: self.count_publishers(self.mapping_imu_topic),
+        }
+        invalid_inputs = [
+            f"{topic}={count}个发布者"
+            for topic, count in publisher_counts.items()
+            if count != 1
+        ]
+        if invalid_inputs:
+            return False, (
+                "建图传感器链路必须各有且只有一个发布者："
+                + "，".join(invalid_inputs)
+                + "；请停止重复或残留的 D435i/IMU 进程"
+            )
         if self.mapping.status()["state"] != "running":
             conflicts = mapping_graph_conflicts(
                 self.get_node_names_and_namespaces()

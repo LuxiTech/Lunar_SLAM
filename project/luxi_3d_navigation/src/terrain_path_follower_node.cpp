@@ -42,6 +42,7 @@ public:
     declare_parameter<double>("linear_gain", 0.6);
     declare_parameter<double>("angular_gain", 1.2);
     declare_parameter<double>("max_linear_speed", 0.10);
+    declare_parameter<double>("minimum_linear_speed", 0.10);
     declare_parameter<double>("max_angular_speed", 0.35);
     declare_parameter<double>("angular_deadband", 0.15);
     declare_parameter<double>("linear_heading_tolerance", 0.35);
@@ -71,8 +72,18 @@ public:
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local(),
       [this](const nav_msgs::msg::Path::SharedPtr message) {
         path_ = message->poses;
-        setState(false, path_.empty() ? "waiting_path" : "plan_ready");
-        RCLCPP_INFO(get_logger(), "Received %zu terrain path poses; waiting for explicit start", path_.size());
+        if (path_.empty()) {
+          setState(false, "waiting_path");
+        } else if (active_) {
+          publishState(state_);
+          RCLCPP_INFO(
+            get_logger(), "Updated active terrain path with %zu poses", path_.size());
+        } else {
+          setState(false, "plan_ready");
+          RCLCPP_INFO(
+            get_logger(), "Received %zu terrain path poses; waiting for explicit start",
+            path_.size());
+        }
       });
     start_sub_ = create_subscription<std_msgs::msg::Bool>(
       get_parameter("start_topic").as_string(), 10,
@@ -216,7 +227,8 @@ private:
       get_parameter("max_linear_speed").as_double(),
       get_parameter("max_angular_speed").as_double(),
       get_parameter("angular_deadband").as_double(),
-      get_parameter("linear_heading_tolerance").as_double());
+      get_parameter("linear_heading_tolerance").as_double(),
+      get_parameter("minimum_linear_speed").as_double());
     geometry_msgs::msg::Twist command;
     command.linear.x = control.linear_x;
     command.angular.z = control.angular_z;

@@ -72,7 +72,10 @@ luxi_visual_frontend:
     # Allow fast turns across a longer accepted-frame gap, while rejecting an
     # impossible orientation jump hidden behind an internal IMU reseed.
     maximum_frame_rotation_deg: 15.0
-    maximum_frame_angular_rate_deg: 90.0
+    # The web/D1 control path is limited to 0.8 rad/s (45.8 deg/s). Leave a
+    # small margin for timestamp jitter, but reject the 90-110 degree/s jumps
+    # that produced the stretched map024 trajectory.
+    maximum_frame_angular_rate_deg: 55.0
     # A fast turn can invalidate the old keyframe. Reseed locally after three
     # rejected updates so RTAB-Map is not starved indefinitely.
     maximum_consecutive_tracking_failures: 3
@@ -84,3 +87,7 @@ luxi_visual_frontend:
     # it agrees with PnP. Gravity is checked independently so visual yaw wins.
     maximum_imu_rotation_error_deg: 12.0
     maximum_imu_gravity_error_deg: 10.0
+    # D435i has no magnetometer: retain IMU gravity validation, but never let
+    # drifting AHRS yaw replace PnP yaw or seed a new keyframe after loss.
+    use_imu_depth_translation: false
+    use_imu_reseed_rotation: false

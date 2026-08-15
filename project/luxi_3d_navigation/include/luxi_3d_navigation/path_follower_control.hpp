@@ -60,7 +60,7 @@ inline PathFollowerCommand pathFollowerCommand(
   const double distance, const double heading_error, const double linear_gain,
   const double angular_gain, const double maximum_linear_speed,
   const double maximum_angular_speed, const double angular_deadband,
-  const double linear_heading_tolerance)
+  const double linear_heading_tolerance, const double minimum_linear_speed = 0.0)
 {
   PathFollowerCommand command;
   const double absolute_heading = std::abs(heading_error);
@@ -71,6 +71,13 @@ inline PathFollowerCommand pathFollowerCommand(
   if (absolute_heading <= linear_heading_tolerance) {
     command.linear_x = std::clamp(
       distance * linear_gain, -maximum_linear_speed, maximum_linear_speed);
+    const double effective_minimum = std::clamp(
+      minimum_linear_speed, 0.0, maximum_linear_speed);
+    if (std::abs(command.linear_x) > 0.0 &&
+      std::abs(command.linear_x) < effective_minimum)
+    {
+      command.linear_x = std::copysign(effective_minimum, command.linear_x);
+    }
   }
   return command;
 }

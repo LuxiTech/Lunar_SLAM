@@ -1,5 +1,6 @@
 """Start exactly one configured hardware profile and its project adapter."""
 
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -18,6 +19,31 @@ class HardwareSelection(NamedTuple):
     profile: str
     launch_path: Path
     config_path: Path
+
+
+SENSOR_PROCESS_SIGNATURES = (
+    "luxi_adapter/lib/luxi_adapter/sensor_adapter_node",
+    "imu_filter_madgwick_node",
+    "luxi_adapter/lib/luxi_adapter/imu_level_calibrator_node",
+)
+
+
+def find_residual_sensor_processes(proc_root: Path = Path("/proc")) -> list[tuple[int, str]]:
+    """Find live project sensor components before launching a second pipeline."""
+    residual = []
+    current_pid = os.getpid()
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit() or int(entry.name) == current_pid:
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            ).strip()
+        except OSError:
+            continue
+        if any(signature in command for signature in SENSOR_PROCESS_SIGNATURES):
+            residual.append((int(entry.name), command))
+    return sorted(residual)
 
 
 def _profile_from_config(config_path: str) -> str:
@@ -70,6 +96,13 @@ def resolve_hik_stereo_proc_params(requested_path: str, hik_bringup_share: Path)
 
 
 def _start_profile(context):
+    residual = find_residual_sensor_processes()
+    if residual:
+        details = ", ".join(f"PID {pid}" for pid, _command in residual)
+        raise RuntimeError(
+            "A sensor pipeline is already running or left residual components: "
+            f"{details}. Stop the old pipeline before starting another one."
+        )
     package_share = Path(get_package_share_directory("luxi_adapter"))
     selection = resolve_hardware_selection(
         LaunchConfiguration("hardware").perform(context),

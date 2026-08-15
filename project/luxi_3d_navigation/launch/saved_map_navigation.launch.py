@@ -46,6 +46,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("hloc_map_directory", default_value=""),
         DeclareLaunchArgument("semantic_path", default_value=""),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/navigation/cmd_vel"),
+        DeclareLaunchArgument("dynamic_monitor_only", default_value="false"),
         SetEnvironmentVariable("LD_LIBRARY_PATH", library_path),
         Node(
             package="rtabmap_odom",
@@ -92,6 +93,27 @@ def generate_launch_description() -> LaunchDescription:
             name="octomap_3d_astar_planner",
             parameters=[config_path, {
                 "octomap_topic": "/navigation/octomap",
+                "path_topic": "/navigation/global_path",
+                "cloud_path": LaunchConfiguration("cloud_path"),
+                "semantic_path": LaunchConfiguration("semantic_path"),
+            }],
+            output="screen",
+        ),
+        Node(
+            package="luxi_3d_navigation",
+            executable="local_obstacle_map_node",
+            name="local_obstacle_map",
+            parameters=[config_path],
+            output="screen",
+        ),
+        Node(
+            package="luxi_3d_navigation",
+            executable="local_path_replanner_node",
+            name="local_path_replanner",
+            parameters=[config_path, {
+                "octomap_topic": "/navigation/octomap",
+                "global_path_topic": "/navigation/global_path",
+                "output_path_topic": "/navigation/planned_path",
                 "cloud_path": LaunchConfiguration("cloud_path"),
                 "semantic_path": LaunchConfiguration("semantic_path"),
             }],
@@ -101,7 +123,18 @@ def generate_launch_description() -> LaunchDescription:
             package="luxi_3d_navigation",
             executable="terrain_path_follower_node",
             name="terrain_path_follower",
-            parameters=[config_path, {"cmd_vel_topic": LaunchConfiguration("cmd_vel_topic")}],
+            parameters=[config_path, {"cmd_vel_topic": "/navigation/cmd_vel_raw"}],
+            output="screen",
+        ),
+        Node(
+            package="luxi_3d_navigation",
+            executable="navigation_safety_gate_node",
+            name="navigation_safety_gate",
+            parameters=[config_path, {
+                "monitor_only": LaunchConfiguration("dynamic_monitor_only"),
+                "input_topic": "/navigation/cmd_vel_raw",
+                "output_topic": LaunchConfiguration("cmd_vel_topic"),
+            }],
             output="screen",
         ),
     ])

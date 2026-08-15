@@ -30,6 +30,15 @@ struct TerrainParameters
 };
 
 using Polygon2D = std::vector<std::pair<double, double>>;
+using GridColumnSet = std::unordered_set<GridCell3D, GridCell3DHash>;
+
+struct GridPlanningBounds
+{
+  int min_x{};
+  int max_x{};
+  int min_y{};
+  int max_y{};
+};
 
 struct TerrainCellCost
 {
@@ -65,6 +74,10 @@ public:
   std::optional<GridCell3D> snapToTerrainAtXY(const GridCell3D & seed) const;
   std::optional<GridCell3D> snapGoalToTerrain(const GridCell3D & seed) const;
   std::vector<GridCell3D> plan(const GridCell3D & start, const GridCell3D & goal) const;
+  std::vector<GridCell3D> planAvoidingColumns(
+    const GridCell3D & start, const GridCell3D & goal,
+    const GridColumnSet & blocked_columns,
+    std::optional<GridPlanningBounds> bounds = std::nullopt) const;
   double traversalCost(const GridCell3D & cell) const;
   const TerrainLayers & layers() const;
   double resolution() const;
