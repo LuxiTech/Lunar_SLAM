@@ -96,8 +96,8 @@ web_control:
     # Retained for the device-independent launch; the USB launch continues to
     # use mapping_launch_arguments/planar_mode and is not changed by this value.
     mapping_planar_motion: true
-    # Mapping is refused unless each canonical input has exactly one publisher.
-    # Duplicate IMU/filter pipelines caused map024 trajectory deformation.
+    # The managed launch owns these topics. They must have zero publishers
+    # before startup; any existing publisher indicates a duplicate pipeline.
     mapping_rgbd_topic: /sensors/rgbd/rgbd_image
     mapping_imu_topic: /sensors/imu/data
     # Match the USB camera profile and LeKiwi web launch on the NX. The mapping

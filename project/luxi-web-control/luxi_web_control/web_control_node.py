@@ -332,6 +332,15 @@ def mapping_graph_conflicts(
     return sorted(paths.intersection(MAPPING_NODE_PATHS))
 
 
+def mapping_topic_conflicts(publisher_counts: Dict[str, int]) -> list[str]:
+    """Return sensor topics already owned before the managed launch starts."""
+    return [
+        f"{topic}={count}个发布者"
+        for topic, count in publisher_counts.items()
+        if count > 0
+    ]
+
+
 def sanitized_subprocess_environment(
     prepend_library_paths: Tuple[str, ...] = (),
 ) -> Dict[str, str]:
@@ -4576,22 +4585,25 @@ class WebControlNode(Node):
             calibration.get("state") != "calibrated" or calibration["busy"]
         ):
             return False, "请先在水平面完成 IMU 一键校准"
-        publisher_counts = {
-            self.mapping_rgbd_topic: self.count_publishers(self.mapping_rgbd_topic),
-            self.mapping_imu_topic: self.count_publishers(self.mapping_imu_topic),
-        }
-        invalid_inputs = [
-            f"{topic}={count}个发布者"
-            for topic, count in publisher_counts.items()
-            if count != 1
-        ]
-        if invalid_inputs:
-            return False, (
-                "建图传感器链路必须各有且只有一个发布者："
-                + "，".join(invalid_inputs)
-                + "；请停止重复或残留的 D435i/IMU 进程"
-            )
         if self.mapping.status()["state"] != "running":
+            # The managed USB launch owns both canonical publishers.  Their
+            # correct stopped-state count is therefore zero; requiring one
+            # here prevents the very process that creates them from starting.
+            publisher_counts = {
+                self.mapping_rgbd_topic: self.count_publishers(
+                    self.mapping_rgbd_topic
+                ),
+                self.mapping_imu_topic: self.count_publishers(
+                    self.mapping_imu_topic
+                ),
+            }
+            active_inputs = mapping_topic_conflicts(publisher_counts)
+            if active_inputs:
+                return False, (
+                    "建图启动前检测到传感器话题已被占用："
+                    + "，".join(active_inputs)
+                    + "；请停止重复或残留的 D435i/USB/IMU 进程"
+                )
             conflicts = mapping_graph_conflicts(
                 self.get_node_names_and_namespaces()
             )

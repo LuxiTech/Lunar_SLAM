@@ -47,6 +47,7 @@ from luxi_web_control.web_control_node import localization_covariance_ready
 from luxi_web_control.web_control_node import localization_pose_summary
 from luxi_web_control.web_control_node import make_access_urls
 from luxi_web_control.web_control_node import mapping_graph_conflicts
+from luxi_web_control.web_control_node import mapping_topic_conflicts
 from luxi_web_control.web_control_node import rtabmap_database_conversion_error
 from luxi_web_control.web_control_node import NavigationController
 from luxi_web_control.web_control_node import normalize_battery_percentage
@@ -1002,6 +1003,17 @@ def test_mapping_graph_conflicts_detects_external_slam_nodes():
         ("web_control", "/"),
         ("stereo_depth_node", "/"),
     ]) == []
+
+
+def test_mapping_topic_conflicts_allow_empty_managed_inputs_before_start():
+    assert mapping_topic_conflicts({
+        "/sensors/rgbd/rgbd_image": 0,
+        "/sensors/imu/data": 0,
+    }) == []
+    assert mapping_topic_conflicts({
+        "/sensors/rgbd/rgbd_image": 1,
+        "/sensors/imu/data": 0,
+    }) == ["/sensors/rgbd/rgbd_image=1个发布者"]
 
 
 def test_mapping_status_extracts_error_from_launch_log(tmp_path):
