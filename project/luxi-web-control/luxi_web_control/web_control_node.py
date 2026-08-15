@@ -3054,6 +3054,16 @@ class WebControlNode(Node):
         """Expose the bounded C++ follower state to the browser."""
         with self._navigation_lock:
             self._navigation_follower_state = message.data[:80]
+            if self._navigation_follower_state == "goal_reached":
+                # The planner's Path publisher is transient-local, so the
+                # original global path otherwise remains visible after motion
+                # has ended. Remove both active and stale-preview copies.
+                self._planned_path_points = []
+                self._last_valid_path_points = []
+                self._path_received_at = None
+                self._last_valid_path_received_at = None
+                self._planning_state = "goal_reached"
+                self._planning_error = ""
 
     def _on_navigation_localization_pose(
         self, message: PoseWithCovarianceStamped
@@ -3394,9 +3404,13 @@ class WebControlNode(Node):
     def path_preview(self) -> Dict[str, Any]:
         """Return the latest A* global path for Canvas rendering."""
         with self._navigation_lock:
-            valid = bool(self._planned_path_points)
+            goal_reached = getattr(
+                self, "_navigation_follower_state", "stopped"
+            ) == "goal_reached"
+            valid = bool(self._planned_path_points) and not goal_reached
             points = (
-                self._planned_path_points if valid else self._last_valid_path_points
+                self._planned_path_points if valid else
+                ([] if goal_reached else self._last_valid_path_points)
             )
             received_at = (
                 self._path_received_at if valid else self._last_valid_path_received_at
@@ -3406,7 +3420,8 @@ class WebControlNode(Node):
                     self._path_frame_id if valid else self._last_valid_path_frame_id
                 ),
                 "point_count": len(points),
-                "active_point_count": len(self._planned_path_points),
+                "active_point_count": 0 if goal_reached else
+                len(self._planned_path_points),
                 "valid": valid,
                 "stale": bool(points) and not valid,
                 "planning_state": self._planning_state,
@@ -4178,10 +4193,13 @@ class WebControlNode(Node):
                 and icp_verification_age <= self.navigation_icp_verification_timeout
             )
             running = status["state"] == "running"
-            status["path_ready"] = running and bool(
+            goal_reached = self._navigation_follower_state == "goal_reached"
+            status["path_ready"] = running and not goal_reached and bool(
                 self._planned_path_points
             )
-            status["path_point_count"] = len(self._planned_path_points)
+            status["path_point_count"] = (
+                0 if goal_reached else len(self._planned_path_points)
+            )
             status["planning_state"] = self._planning_state
             status["planning_error"] = self._planning_error or None
             status["planner_map_ready"] = running and self._planner_map_ready

@@ -733,6 +733,11 @@ const navigationStateNames = {
 function updateNavigation(navigation) {
   if (!navigation) return;
   navigationStatus = navigation;
+  if (navigation.follower_state === "goal_reached") {
+    // Clear the already-fetched path immediately; the backend also clears its
+    // transient/stale copies so later preview refreshes cannot restore it.
+    navigationPath = {};
+  }
   if (!navigationLoadPending && ["original", "filtered"].includes(navigation.map_variant)) {
     navigationUseFiltered = navigation.map_variant === "filtered";
   }
@@ -743,10 +748,10 @@ function updateNavigation(navigation) {
     name = "正沿原路径朝向持续旋转定位";
   } else if (navigation.follower_state?.startsWith("localization_recovery_")) {
     name = "定位恢复中（已停车验证）";
+  } else if (navigation.follower_state === "goal_reached") {
+    name = "导航结束：已到达目标点";
   } else if (navigation.active) {
     name = "行驶中";
-  } else if (navigation.follower_state === "goal_reached") {
-    name = "已到达";
   } else if (navigation.path_ready) {
     name = "规划完成";
   } else if (navigation.planning_state === "loading_map") {
@@ -828,7 +833,7 @@ function updateNavigation(navigation) {
             ? "当前扫描与地图没有有效重叠（常见于地图边缘或视野被遮挡），正在重新启动 HLoc；可先选择目标，但恢复前不会提交规划。"
             : "近期 ICP 未通过地图匹配验证，已暂停新的规划请求；可先选择目标，并调整相机视野等待定位恢复。"
         : navigation.follower_state === "goal_reached"
-          ? "已到达目标点。"
+          ? "已到达目标点，导航已结束。"
           : navigation.planning_state === "loading_map"
             ? "正在构建三维地形图；完成前不会接受目标，以免请求长时间排队。"
           : navigation.planning_state === "pending"

@@ -1053,6 +1053,43 @@ def test_failed_replan_keeps_only_a_stale_preview():
     assert "可通行地形" in preview["error"]
 
 
+def test_goal_reached_clears_global_path_and_suppresses_late_preview():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._navigation_follower_state = "active"
+    node._planned_path_points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+    node._last_valid_path_points = list(node._planned_path_points)
+    node._path_frame_id = "map"
+    node._last_valid_path_frame_id = "map"
+    node._path_received_at = 1.0
+    node._last_valid_path_received_at = node._path_received_at
+    node._planning_state = "ready"
+    node._planning_error = ""
+
+    reached = String()
+    reached.data = "goal_reached"
+    node._on_navigation_follower_state(reached)
+
+    assert node._planned_path_points == []
+    assert node._last_valid_path_points == []
+    assert node._planning_state == "goal_reached"
+    assert node.path_preview()["points"] == []
+    assert node.path_preview()["active_point_count"] == 0
+
+    # A delayed/transient ROS path must remain hidden while the follower still
+    # reports completion. It becomes available normally for the next plan.
+    delayed = NavigationPath()
+    delayed.poses.append(PoseStamped())
+    delayed.poses[0].pose.position.x = 2.0
+    node._on_navigation_path(delayed)
+    assert node.path_preview()["points"] == []
+
+    ready = String()
+    ready.data = "plan_ready"
+    node._on_navigation_follower_state(ready)
+    assert node.path_preview()["points"] == [(2.0, 0.0, 0.0)]
+
+
 def test_icp_fitness_refreshes_map_verification():
     node = WebControlNode.__new__(WebControlNode)
     node._navigation_lock = threading.Lock()
