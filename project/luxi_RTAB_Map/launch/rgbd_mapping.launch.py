@@ -360,6 +360,28 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration("visual_frontend_upstream_rate_limited"),
                     value_type=bool,
                 ),
+                "sensor_poll_rate_multiplier": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_sensor_poll_rate_multiplier"
+                    ),
+                    value_type=float,
+                ),
+                "max_keypoints": ParameterValue(
+                    LaunchConfiguration("visual_frontend_max_keypoints"),
+                    value_type=int,
+                ),
+                "lightglue_cuda_graph_layers": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_lightglue_cuda_graph_layers"
+                    ),
+                    value_type=int,
+                ),
+                "lightglue_cuda_graph_keypoints": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_lightglue_cuda_graph_keypoints"
+                    ),
+                    value_type=int,
+                ),
                 "minimum_depth": ParameterValue(
                     LaunchConfiguration("visual_frontend_minimum_depth"),
                     value_type=float,
@@ -383,6 +405,43 @@ def generate_launch_description() -> LaunchDescription:
                         "visual_frontend_use_depth_translation_refinement"
                     ),
                     value_type=bool,
+                ),
+                "stationary_maximum_median_pixel_motion": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_stationary_maximum_median_pixel_motion"
+                    ),
+                    value_type=float,
+                ),
+                "stationary_maximum_rotation_deg": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_stationary_maximum_rotation_deg"
+                    ),
+                    value_type=float,
+                ),
+                "motion_hint_topic": LaunchConfiguration(
+                    "visual_frontend_motion_hint_topic"
+                ),
+                "stationary_hint_maximum_median_pixel_motion": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_stationary_hint_maximum_median_pixel_motion"
+                    ),
+                    value_type=float,
+                ),
+                "stationary_hint_maximum_translation": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_stationary_hint_maximum_translation"
+                    ),
+                    value_type=float,
+                ),
+                "constrain_vertical_translation": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_constrain_vertical_translation"
+                    ),
+                    value_type=bool,
+                ),
+                "keyframe_max_age": ParameterValue(
+                    LaunchConfiguration("visual_frontend_keyframe_max_age"),
+                    value_type=float,
                 ),
                 "rgbd_features_rate": ParameterValue(
                     LaunchConfiguration(
@@ -438,6 +497,60 @@ def generate_launch_description() -> LaunchDescription:
                         "visual_frontend_mapping_depth_far_sparse_pixel_step"
                     ),
                     value_type=int,
+                ),
+                "mapping_ground_prior_enabled": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_prior_enabled"
+                    ),
+                    value_type=bool,
+                ),
+                "mapping_ground_camera_height": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_camera_height"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_ground_below_tolerance": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_below_tolerance"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_ground_surface_tolerance": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_surface_tolerance"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_ground_maximum_correction": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_maximum_correction"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_ground_minimum_up_alignment": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_minimum_up_alignment"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_ground_minimum_row_ratio": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_minimum_row_ratio"
+                    ),
+                    value_type=float,
+                ),
+                "mapping_ground_reject_unverified_below_plane": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_reject_unverified_below_plane"
+                    ),
+                    value_type=bool,
+                ),
+                "mapping_ground_repair_all_below_plane": ParameterValue(
+                    LaunchConfiguration(
+                        "visual_frontend_mapping_ground_repair_all_below_plane"
+                    ),
+                    value_type=bool,
                 ),
             },
         ],
@@ -561,6 +674,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "visual_frontend_upstream_rate_limited", default_value="false"),
             DeclareLaunchArgument(
+                "visual_frontend_sensor_poll_rate_multiplier", default_value="2.0"),
+            DeclareLaunchArgument(
+                "visual_frontend_max_keypoints", default_value="1024"),
+            DeclareLaunchArgument(
+                "visual_frontend_lightglue_cuda_graph_layers", default_value="3"),
+            DeclareLaunchArgument(
+                "visual_frontend_lightglue_cuda_graph_keypoints", default_value="512"),
+            DeclareLaunchArgument(
                 "visual_frontend_minimum_depth", default_value="0.2"),
             DeclareLaunchArgument(
                 "visual_frontend_maximum_depth", default_value="6.0"),
@@ -573,6 +694,29 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="false",
             ),
             DeclareLaunchArgument(
+                "visual_frontend_stationary_maximum_median_pixel_motion",
+                default_value="0.75",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_stationary_maximum_rotation_deg",
+                default_value="0.30",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_motion_hint_topic", default_value=""
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_stationary_hint_maximum_median_pixel_motion",
+                default_value="2.0",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_stationary_hint_maximum_translation",
+                default_value="0.05",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_constrain_vertical_translation",
+                default_value="false",
+            ),
+            DeclareLaunchArgument(
                 "visual_frontend_rgbd_features_rate", default_value="1.0"),
             DeclareLaunchArgument(
                 "visual_frontend_publish_tf", default_value="true"),
@@ -580,6 +724,8 @@ def generate_launch_description() -> LaunchDescription:
                 "visual_frontend_camera_to_imu_time_offset", default_value="0.0"),
             DeclareLaunchArgument(
                 "visual_frontend_superpoint_cuda_graph", default_value="true"),
+            DeclareLaunchArgument(
+                "visual_frontend_keyframe_max_age", default_value="1.0"),
             DeclareLaunchArgument(
                 "visual_frontend_mapping_depth_minimum", default_value="0.0"),
             DeclareLaunchArgument(
@@ -595,6 +741,42 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "visual_frontend_mapping_depth_far_sparse_pixel_step",
                 default_value="1",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_prior_enabled",
+                default_value="false",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_camera_height",
+                default_value="0.0",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_below_tolerance",
+                default_value="0.12",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_surface_tolerance",
+                default_value="0.0",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_maximum_correction",
+                default_value="0.0",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_minimum_up_alignment",
+                default_value="0.0",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_minimum_row_ratio",
+                default_value="0.0",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_reject_unverified_below_plane",
+                default_value="false",
+            ),
+            DeclareLaunchArgument(
+                "visual_frontend_mapping_ground_repair_all_below_plane",
+                default_value="false",
             ),
             DeclareLaunchArgument("visual_odometry", default_value="true"),
             DeclareLaunchArgument("icp_odometry", default_value="false"),

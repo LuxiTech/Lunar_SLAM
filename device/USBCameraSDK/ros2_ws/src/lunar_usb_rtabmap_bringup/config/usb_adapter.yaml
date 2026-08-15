@@ -19,8 +19,10 @@ luxi_adapter:
     imu_output_topic: /sensors/imu/data_raw
     imu_orientation_output_topic: /sensors/imu/data
     reliable_image_output: true
-    generate_compressed_color_from_raw: false
-    enable_compressed_color: false
+    # Browser preview is generated from the same rectified CRE RGB-D packet
+    # used by odometry, not from a separately restarting 1080p UVC topic.
+    generate_compressed_color_from_raw: true
+    enable_compressed_color: true
     compressed_color_rate: 5.0
     compressed_color_jpeg_quality: 80
     enable_imu: false

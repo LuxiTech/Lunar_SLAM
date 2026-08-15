@@ -9,6 +9,7 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
   <exec_depend>luxi_adapter</exec_depend>
   <exec_depend>luxi_rtab_map</exec_depend>
   <exec_depend>luxi_visual_frontend</exec_depend>

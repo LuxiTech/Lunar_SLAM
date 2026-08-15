@@ -247,7 +247,12 @@ def main() -> None:
             f"inliers_mean={statistics.mean(numeric('inliers')):.1f} "
             f"ratio_mean={statistics.mean(numeric('inlier_ratio')):.5f} "
             f"rmse_mean_px={statistics.mean(numeric('reprojection_rmse')):.3f} "
-            f"elapsed_mean_ms={statistics.mean(numeric('elapsed_seconds')) * 1000.0:.1f}"
+            f"elapsed_mean_ms={statistics.mean(numeric('elapsed_seconds')) * 1000.0:.1f} "
+            f"extract_mean_ms={statistics.mean(numeric('extract_seconds')) * 1000.0:.1f} "
+            f"match_mean_ms={statistics.mean(numeric('match_seconds')) * 1000.0:.1f} "
+            f"match_layers_mean={statistics.mean(numeric('match_layers')):.1f} "
+            f"keypoints_mean={statistics.mean(numeric('keypoints')):.1f} "
+            f"matches_mean={statistics.mean(numeric('matches')):.1f}"
         )
     else:
         print("tracking_diagnostics=not_available_for_profile")

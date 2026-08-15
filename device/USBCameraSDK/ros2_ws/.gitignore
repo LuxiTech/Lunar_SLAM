@@ -8,8 +8,9 @@ calibration/data/*_ros2/
 calibration/data/*.bag
 calibration/data/*-report-imucam.pdf
 
-# Keep only the NX production weight in Git. The large source archive and
-# optional full-precision/quality profiles are local A/B-test assets.
+# Keep only the NX production weights in Git. The large source archive and
+# optional full-precision/debug profiles are local A/B-test assets.
 models/crestereo/
 src/usb_camera_driver/models/*.onnx
 !src/usb_camera_driver/models/crestereo_init_iter2_180x320_fp16.onnx
+!src/usb_camera_driver/models/crestereo_combined_iter2_360x640.onnx

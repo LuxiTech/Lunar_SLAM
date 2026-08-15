@@ -69,6 +69,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
         Parameter("http_port", value=0),
         Parameter("bind_address", value="127.0.0.1"),
         Parameter("cmd_vel_topic", value="/web_control_test/cmd_vel"),
+        Parameter("robot_namespace", value="d15042176"),
         Parameter("command_timeout", value=0.25),
         Parameter("max_linear_x", value=0.2),
         Parameter("max_angular_z", value=0.5),
@@ -115,6 +116,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b'id="mappingMode"' in page
             assert b'CREStereo' in page
             assert b"imuCalibrationButton" in page
+            assert b'value="crestereo_max"' in page
 
         with _LOCAL_OPENER.open(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -136,6 +138,8 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert "地表z=".encode("utf-8") in app
             assert b'api("/api/robot/control", {active: requested})' in app
             assert b'const mappingMode = $("#mappingMode")' in app
+            assert b"let mappingModeInitialized = false" in app
+            assert b"!mappingModeInitialized && mapping.default_mode" in app
             assert b'api("/api/mapping/start", {mode: mappingMode.value})' in app
             assert b'api("/api/imu/calibrate")' in app
 
@@ -148,6 +152,15 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert error.code == 409
 
         robot_control = node.status()["robot_control"]
+        assert node.status()["robot_namespace"] == "d15042176"
+        assert robot_control["robot_namespace"] == "d15042176"
+        assert node.d1_fsm_topic == "/d15042176/rl_controller/fsm"
+        assert node.d1_controller_status_service == (
+            "/d15042176/command/get_controller_status"
+        )
+        assert node.d1_parameter_service == (
+            "/d15042176/teleop_command/get_parameters"
+        )
         assert robot_control["state"] == "disabled"
         assert robot_control["posture"] == "offline"
         assert robot_control["control_ready"] is False

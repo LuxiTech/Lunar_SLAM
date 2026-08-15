@@ -26,8 +26,6 @@ dependencies = [
 gpu_runtime = WORKSPACE / "3parts/hloc_gpu_python"
 if RUNTIME != "cpu" and gpu_runtime.is_dir():
     dependencies.insert(0, gpu_runtime)
-elif RUNTIME == "gpu":
-    raise RuntimeError(f"GPU runtime not found: {gpu_runtime}")
 sys.path[:0] = [str(dependency) for dependency in dependencies]
 os.environ.setdefault("TORCH_HOME", str(WORKSPACE / "3parts/hloc_models"))
 
@@ -40,6 +38,12 @@ from luxi_hloc.geometry import transform_points  # noqa: E402
 from luxi_hloc.inference import HlocFeatureBackend  # noqa: E402
 from luxi_hloc.map_io import read_frames, sha256_file, validate_export  # noqa: E402
 from luxi_hloc.pose_estimator import sample_depth_meters  # noqa: E402
+
+if RUNTIME == "gpu" and not torch.cuda.is_available():
+    raise RuntimeError(
+        "LUXI_HLOC_RUNTIME=gpu requested but the installed PyTorch runtime "
+        "cannot access CUDA"
+    )
 
 
 def parse_arguments() -> argparse.Namespace:

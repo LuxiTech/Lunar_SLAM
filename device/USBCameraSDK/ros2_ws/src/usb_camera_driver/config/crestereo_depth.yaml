@@ -30,6 +30,11 @@ usb_crestereo_depth_node:
     output_width: 480
     output_height: 270
     opencv_num_threads: 2
+    # The stable profile keeps the original single-stage scheduler. The
+    # independent max-performance profile enables CPU/GPU pipelining.
+    preprocess_threads: 1
+    pipeline_preprocessing: false
+    use_fixed_point_remap: false
     # Visual odometry is capped at 5 Hz. One extra fresh depth slot absorbs
     # scheduling jitter without spending GPU/power on unused 9-10 Hz frames.
     target_rate: 6.0
@@ -38,15 +43,26 @@ usb_crestereo_depth_node:
 
     # CREStereo estimates 2-D optical flow internally. Rectified stereo should
     # have almost no vertical component, so this rejects obvious mismatches at
-    # negligible CPU cost. Photometric filtering stays disabled because lunar
-    # illumination and independent sensor gains can differ strongly.
+    # negligible CPU cost. The photometric gate estimates and removes the
+    # global left/right brightness offset before rejecting bad matches.
     max_vertical_flow_px: 2.0
-    photometric_threshold: 0.0
+    photometric_threshold: 35.0
     far_artifact_depth_m: 4.0
     far_artifact_support_size: 3
     far_artifact_minimum_support: 3
     output_median_filter_size: 3
     output_median_max_difference_m: 0.12
+    guided_upsampling_radius: 4
+    guided_upsampling_epsilon: 100.0
+    guided_upsampling_width: 480
+
+    # Latest on-robot measurement puts the optical center about 0.35 m above
+    # level ground. A walking D1 pitches and rolls, so the learned frontend
+    # applies this repair to RTAB depth with synchronized H30 gravity instead.
+    ground_plane_prior_enabled: false
+    ground_plane_camera_height_m: 0.35
+    ground_plane_below_tolerance_m: 0.12
+    ground_plane_minimum_row_ratio: 0.56
 
     # RTAB-Map consumes the full RGB-D image. The separate RViz cloud remains
     # in the metrically reliable near field and does not determine map range.

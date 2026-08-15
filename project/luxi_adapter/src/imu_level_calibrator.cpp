@@ -25,6 +25,16 @@ MountAngles estimate_mount_angles(const tf2::Vector3 & measured_up_in_camera)
     std::atan2(-up.x(), std::hypot(up.y(), up.z()))};
 }
 
+double mount_tilt_from_nominal(
+  const MountAngles & mount, double nominal_roll, double nominal_pitch)
+{
+  const double roll_offset = std::remainder(
+    mount.roll - nominal_roll, 2.0 * M_PI);
+  const double pitch_offset = std::remainder(
+    mount.pitch - nominal_pitch, 2.0 * M_PI);
+  return std::hypot(roll_offset, pitch_offset);
+}
+
 bool is_stationary_imu_sample(
   const tf2::Vector3 & angular_velocity,
   const tf2::Vector3 & acceleration,
@@ -48,6 +58,8 @@ ImuLevelCalibrator::ImuLevelCalibrator(const rclcpp::NodeOptions & options)
   camera_y_ = declare_parameter<double>("camera_y", 0.0);
   camera_z_ = declare_parameter<double>("camera_z", 0.0);
   camera_yaw_ = declare_parameter<double>("camera_yaw", 0.0);
+  nominal_roll_ = declare_parameter<double>("nominal_roll", 0.0);
+  nominal_pitch_ = declare_parameter<double>("nominal_pitch", 0.0);
   const auto sample_count = declare_parameter<int>("calibration_samples", 200);
   gravity_ = declare_parameter<double>("gravity", 9.80665);
   gravity_tolerance_ = declare_parameter<double>("gravity_tolerance", 0.8);
@@ -136,9 +148,17 @@ void ImuLevelCalibrator::publish_status(
          << ",\"calibrated\":" << (calibrated_ ? "true" : "false");
   if (calibrated_) {
     stream << ",\"roll_degrees\":" << calibrated_roll_ * 180.0 / M_PI
-           << ",\"pitch_degrees\":" << calibrated_pitch_ * 180.0 / M_PI;
+           << ",\"pitch_degrees\":" << calibrated_pitch_ * 180.0 / M_PI
+           << ",\"installation_roll_degrees\":"
+           << std::remainder(calibrated_roll_ - nominal_roll_, 2.0 * M_PI)
+             * 180.0 / M_PI
+           << ",\"installation_pitch_degrees\":"
+           << std::remainder(calibrated_pitch_ - nominal_pitch_, 2.0 * M_PI)
+             * 180.0 / M_PI;
   } else {
-    stream << ",\"roll_degrees\":null,\"pitch_degrees\":null";
+    stream << ",\"roll_degrees\":null,\"pitch_degrees\":null"
+           << ",\"installation_roll_degrees\":null"
+           << ",\"installation_pitch_degrees\":null";
   }
   stream << "}";
   std_msgs::msg::String status;
@@ -199,7 +219,8 @@ void ImuLevelCalibrator::imu_callback(const sensor_msgs::msg::Imu::SharedPtr mes
 void ImuLevelCalibrator::publish_calibrated_transform()
 {
   const MountAngles mount = estimate_mount_angles(measured_up_sum_);
-  const double tilt = std::hypot(mount.roll, mount.pitch);
+  const double tilt = mount_tilt_from_nominal(
+    mount, nominal_roll_, nominal_pitch_);
   if (tilt > maximum_tilt_) {
     RCLCPP_ERROR(
       get_logger(),

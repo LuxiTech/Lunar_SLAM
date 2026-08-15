@@ -62,6 +62,111 @@ MAPPING_NODE_PATHS = frozenset({
     "/luxi_visual_frontend",
     "/rtabmap/rtabmap",
 })
+ROBOT_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CAMERA_QUATERNION_ARGUMENTS = ("camera_qx", "camera_qy", "camera_qz", "camera_qw")
+
+
+def quaternion_from_rpy(roll: float, pitch: float, yaw: float) -> Tuple[float, ...]:
+    """Return a normalized ROS quaternion for intrinsic roll/pitch/yaw."""
+    half_roll = roll * 0.5
+    half_pitch = pitch * 0.5
+    half_yaw = yaw * 0.5
+    cr, sr = math.cos(half_roll), math.sin(half_roll)
+    cp, sp = math.cos(half_pitch), math.sin(half_pitch)
+    cy, sy = math.cos(half_yaw), math.sin(half_yaw)
+    quaternion = (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+    norm = math.sqrt(sum(value * value for value in quaternion))
+    if not math.isfinite(norm) or norm < 1.0e-9:
+        raise ValueError("camera calibration produced an invalid quaternion")
+    return tuple(value / norm for value in quaternion)
+
+
+def camera_calibration_overrides(
+    calibration: Dict[str, Any], camera_yaw_degrees: float
+) -> Dict[str, str]:
+    """Convert a completed gravity calibration into ROS launch arguments."""
+    if not calibration.get("calibrated"):
+        return {}
+    try:
+        roll = math.radians(float(calibration["roll_degrees"]))
+        pitch = math.radians(float(calibration["pitch_degrees"]))
+        yaw = math.radians(float(camera_yaw_degrees))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("saved camera calibration is incomplete") from exc
+    if not all(math.isfinite(value) for value in (roll, pitch, yaw)):
+        raise ValueError("saved camera calibration contains non-finite angles")
+    quaternion = quaternion_from_rpy(roll, pitch, yaw)
+    return {
+        name: format(value, ".12g")
+        for name, value in zip(CAMERA_QUATERNION_ARGUMENTS, quaternion)
+    }
+
+
+def replace_launch_arguments(
+    arguments: list[str], overrides: Dict[str, str]
+) -> list[str]:
+    """Replace named ``name:=value`` arguments without duplicating them."""
+    names = set(overrides)
+    result = [
+        argument for argument in arguments
+        if argument.partition(":=")[0] not in names
+    ]
+    result.extend(f"{name}:={value}" for name, value in overrides.items())
+    return result
+
+
+def launch_argument_value(
+    arguments: list[str], name: str, default: str
+) -> str:
+    """Read the last value of a ROS launch argument from a sequence."""
+    prefix = f"{name}:="
+    for argument in reversed(arguments):
+        if argument.startswith(prefix):
+            return argument[len(prefix):]
+    return default
+
+
+def load_camera_calibration(path: Path, robot_namespace: str) -> Dict[str, Any]:
+    """Load and validate one robot-specific persisted mount calibration."""
+    if not path.is_file():
+        return {}
+    try:
+        calibration = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read camera calibration {path}: {exc}") from exc
+    if not isinstance(calibration, dict):
+        raise ValueError(f"camera calibration {path} must contain a JSON object")
+    saved_namespace = str(calibration.get("robot_namespace", ""))
+    if saved_namespace and saved_namespace != robot_namespace:
+        raise ValueError(
+            f"camera calibration belongs to {saved_namespace}, not {robot_namespace}"
+        )
+    camera_calibration_overrides(
+        calibration, float(calibration.get("camera_yaw_degrees", -90.0))
+    )
+    return calibration
+
+
+def normalize_robot_namespace(value: str) -> str:
+    """Return one safe ROS namespace token for the selected robot."""
+    namespace = str(value).strip().strip("/")
+    if not ROBOT_NAMESPACE_PATTERN.fullmatch(namespace):
+        raise ValueError(
+            "robot_namespace must be one ROS name token using only letters, "
+            "digits and underscores"
+        )
+    return namespace
+
+
+def robot_resource_name(robot_namespace: str, relative_name: str) -> str:
+    """Build an absolute topic or service name below a robot namespace."""
+    namespace = normalize_robot_namespace(robot_namespace)
+    return f"/{namespace}/{relative_name.strip('/')}"
 
 
 def classify_d1_posture(fsm_state: str) -> str:
@@ -79,6 +184,28 @@ def classify_d1_posture(fsm_state: str) -> str:
     ):
         return "standing"
     return "unknown"
+
+
+def d1_feedback_request_timed_out(
+    future: Any,
+    requested_at: Optional[float],
+    now: float,
+    timeout: float,
+) -> bool:
+    """
+    Return whether an unanswered D1 service request must be retried.
+
+    A ROS service future can remain pending indefinitely when the remote DDS
+    participant is restarted. Treating that future as permanently in flight
+    prevents every later controller/SDK status poll and leaves web control
+    stuck offline even after the robot services recover.
+    """
+    return bool(
+        future is not None
+        and not future.done()
+        and requested_at is not None
+        and now - requested_at >= timeout
+    )
 
 
 def mapping_graph_conflicts(
@@ -901,12 +1028,16 @@ class D1ControlManager:
         stop_script: Path,
         bridge_pid_file: Path,
         log_path: Path,
+        robot_namespace: str = "d15041873",
+        workspace_root: Optional[Path] = None,
     ) -> None:
         self.enabled = enabled
         self.start_script = start_script
         self.stop_script = stop_script
         self.bridge_pid_file = bridge_pid_file
         self.log_path = log_path
+        self.robot_namespace = normalize_robot_namespace(robot_namespace)
+        self.workspace_root = workspace_root
         self._lock = threading.Lock()
         self._worker: Optional[threading.Thread] = None
         self._state = "active" if self._bridge_running() else "inactive"
@@ -936,13 +1067,13 @@ class D1ControlManager:
             self._last_error = ""
             self._worker = threading.Thread(
                 target=self._run_transition,
-                args=(active,),
+                args=(active, force),
                 daemon=True,
             )
             self._worker.start()
         return True, "D1 control transition started"
 
-    def _run_transition(self, active: bool) -> None:
+    def _run_transition(self, active: bool, force: bool = False) -> None:
         script = self.start_script if active else self.stop_script
         try:
             if not script.is_file():
@@ -954,13 +1085,23 @@ class D1ControlManager:
                     + ("enable" if active else "disable")
                     + " requested by luxi_web_control =====\n"
                 )
+                environment = sanitized_subprocess_environment()
+                environment["ROBOT_NS"] = self.robot_namespace
+                if active and force:
+                    # A forced web shutdown can leave the local bridge alive
+                    # while the remote SDK is disabled and the robot is prone.
+                    # Tell the start script to recycle that bridge instead of
+                    # treating its PID as proof that control is ready.
+                    environment["SLAM_D1_RECOVER_EXISTING"] = "true"
+                if self.workspace_root is not None:
+                    environment["SLAM_D1_WORKSPACE"] = str(self.workspace_root)
                 result = subprocess.run(
                     [str(script), "--yes"],
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
                     timeout=30.0,
                     check=False,
-                    env=sanitized_subprocess_environment(),
+                    env=environment,
                 )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -990,6 +1131,7 @@ class D1ControlManager:
             state = "active" if bridge_running else "inactive"
         return {
             "enabled": self.enabled,
+            "robot_namespace": self.robot_namespace,
             "state": state,
             "active": bridge_running,
             "transitioning": transitioning,
@@ -999,15 +1141,20 @@ class D1ControlManager:
 
 
 class MappingController:
-    """Own the primary CREStereo and fallback VPI USB RTAB-Map launch."""
+    """Own the stable, maximum-performance and fallback USB map launches."""
 
     MODES = {
         "crestereo": (
             "usb_crestereo_rtabmap.launch.py",
             "crestereo_cuda_graph+luxi_direct_odom",
         ),
+        "crestereo_max": (
+            "usb_crestereo_max_performance_rtabmap.launch.py",
+            "crestereo_10hz+superpoint_trt+lightglue_graph",
+        ),
         "vpi": ("usb_rtabmap.launch.py", "vpi_ofa_pva_vic+luxi"),
     }
+    MODE_ERROR = "mapping mode must be 'crestereo', 'crestereo_max' or 'vpi'"
 
     def __init__(
         self,
@@ -1046,11 +1193,20 @@ class MappingController:
         self._stop_requested = False
         self._mode = "crestereo"
 
+    def set_camera_calibration(self, overrides: Dict[str, str]) -> None:
+        """Apply persisted mount rotation to all subsequent map launches."""
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError("cannot change camera calibration while mapping")
+            self.launch_arguments = tuple(replace_launch_arguments(
+                list(self.launch_arguments), overrides
+            ))
+
     def _command(self, mode: Optional[str] = None) -> list:
         """Build a shell-free, source-aware RTAB-Map launch command."""
         selected_mode = mode or self._mode
         if selected_mode not in self.MODES:
-            raise ValueError("mapping mode must be 'vpi' or 'crestereo'")
+            raise ValueError(self.MODE_ERROR)
         launch_file, _ = self.MODES[selected_mode]
         if self.package != "lunar_usb_rtabmap_bringup":
             launch_file = self.launch_file
@@ -1076,7 +1232,10 @@ class MappingController:
             launch_arguments.append(
                 f"planar_motion:={'true' if self.planar_motion else 'false'}"
             )
-        if selected_mode == "crestereo" and self.crestereo_use_imu is not None:
+        if (
+            selected_mode.startswith("crestereo")
+            and self.crestereo_use_imu is not None
+        ):
             launch_arguments = [
                 argument for argument in launch_arguments
                 if not argument.startswith("use_imu:=")
@@ -1099,7 +1258,7 @@ class MappingController:
         """Start a fresh managed RTAB-Map process when prerequisites exist."""
         with self._lock:
             if mode not in self.MODES:
-                return False, "mapping mode must be 'vpi' or 'crestereo'"
+                return False, self.MODE_ERROR
             if not self.enabled:
                 return False, "mapping control is disabled"
             if self._process is not None and self._process.poll() is None:
@@ -1135,7 +1294,12 @@ class MappingController:
             self._last_error = ""
             self._stop_requested = False
             self._mode = mode
-            label = "VPI" if mode == "vpi" else "CREStereo"
+            labels = {
+                "crestereo": "CREStereo",
+                "crestereo_max": "CREStereo MAX",
+                "vpi": "VPI",
+            }
+            label = labels[mode]
             return True, f"RTAB-Map {label}/Luxi launch process started"
 
     def stop(self) -> Tuple[bool, str]:
@@ -1256,6 +1420,7 @@ class NavigationController:
         workspace_setup: Path,
         octomap_library_path: Path,
         log_path: Path,
+        launch_arguments: Tuple[str, ...] = (),
     ) -> None:
         self.enabled = enabled
         self.package = package
@@ -1265,6 +1430,7 @@ class NavigationController:
         self.workspace_setup = workspace_setup
         self.octomap_library_path = octomap_library_path
         self.log_path = log_path
+        self.launch_arguments = launch_arguments
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
         self._started_at: Optional[float] = None
@@ -1272,6 +1438,15 @@ class NavigationController:
         self._last_error = ""
         self._stop_requested = False
         self._map_id = ""
+
+    def set_camera_calibration(self, overrides: Dict[str, str]) -> None:
+        """Apply persisted mount rotation to subsequent localization runs."""
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError("cannot change camera calibration during navigation")
+            self.launch_arguments = tuple(replace_launch_arguments(
+                list(self.launch_arguments), overrides
+            ))
 
     def _command(
         self,
@@ -1281,13 +1456,17 @@ class NavigationController:
         hloc_map_directory: Path,
         semantic_path: Path,
     ) -> list:
-        source_commands = []
+        # Source the algorithm workspace first, then the camera workspace as
+        # the overlay.  Both workspaces may contain lunar_usb_rtabmap_bringup;
+        # the device workspace owns the current USB launch files and must win.
+        source_commands = [
+            f"source {shlex.quote(str(self.workspace_setup))}",
+        ]
         if self.sensor_setup is not None:
             source_commands.append(
                 f"source {shlex.quote(str(self.sensor_setup))}"
             )
         source_commands.extend([
-            f"source {shlex.quote(str(self.workspace_setup))}",
             "export ROS_LOCALHOST_ONLY=0",
             "export RMW_IMPLEMENTATION=" + shlex.quote(self.rmw_implementation),
             "export LD_LIBRARY_PATH=" + shlex.quote(str(self.octomap_library_path))
@@ -1301,6 +1480,7 @@ class NavigationController:
             f"hloc_map_directory:={hloc_map_directory}",
             f"semantic_path:={semantic_path}",
             "cmd_vel_topic:=/navigation/cmd_vel",
+            *self.launch_arguments,
         ])
         script = "set -e; " + "; ".join(source_commands)
         return ["/bin/bash", "-c", script + f"; exec {launch_command}"]
@@ -1702,7 +1882,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(mode, str) or mode not in MappingController.MODES:
                 self._send_error_json(
                     HTTPStatus.BAD_REQUEST,
-                    "mapping mode must be 'vpi' or 'crestereo'",
+                    MappingController.MODE_ERROR,
                 )
                 return
             started, message = node.start_mapping(mode)
@@ -1769,6 +1949,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.ACCEPTED, {
                 "ok": True,
                 "message": message,
+                "maps": node.navigation_maps(),
                 "navigation": node.navigation_status(),
             })
             return
@@ -1845,22 +2026,17 @@ class WebControlNode(Node):
         self.declare_parameter("max_angular_z", 0.8)
         self.declare_parameter("enable_output", True)
         self.declare_parameter("web_root", "")
+        self.declare_parameter("robot_namespace", "d15041873")
         self.declare_parameter("enable_d1_control", False)
         self.declare_parameter("d1_start_script", "")
         self.declare_parameter("d1_stop_script", "")
         self.declare_parameter("d1_bridge_pid_file", "")
         self.declare_parameter("d1_control_log_path", "")
-        self.declare_parameter(
-            "d1_fsm_topic", "/d15041873/rl_controller/fsm"
-        )
-        self.declare_parameter(
-            "d1_controller_status_service",
-            "/d15041873/command/get_controller_status",
-        )
-        self.declare_parameter(
-            "d1_parameter_service",
-            "/d15041873/teleop_command/get_parameters",
-        )
+        # Empty values follow robot_namespace. Explicit absolute names remain
+        # available for unusual vendor deployments.
+        self.declare_parameter("d1_fsm_topic", "")
+        self.declare_parameter("d1_controller_status_service", "")
+        self.declare_parameter("d1_parameter_service", "")
         self.declare_parameter("d1_feedback_timeout", 3.0)
         self.declare_parameter(
             "imu_level_calibration_service", "/sensors/imu/calibrate_level"
@@ -1868,6 +2044,26 @@ class WebControlNode(Node):
         self.declare_parameter(
             "imu_level_status_topic", "/sensors/imu/level_calibration_status"
         )
+        # USB/H30 calibration is started on demand because the mapping process
+        # normally owns the H30 serial device.  Keeping it short-lived avoids
+        # two yesense drivers competing for /dev/imu-H30.
+        self.declare_parameter("imu_level_standalone_enabled", False)
+        self.declare_parameter(
+            "imu_level_calibration_launch_package",
+            "lunar_usb_rtabmap_bringup",
+        )
+        self.declare_parameter(
+            "imu_level_calibration_launch_file",
+            "usb_imu_level_calibration.launch.py",
+        )
+        self.declare_parameter("imu_level_calibration_sensor_setup", "")
+        self.declare_parameter("imu_level_calibration_workspace_setup", "")
+        self.declare_parameter("imu_level_calibration_log_path", "")
+        self.declare_parameter("imu_level_calibration_store_path", "")
+        self.declare_parameter("imu_level_calibration_start_timeout", 12.0)
+        self.declare_parameter("imu_level_calibration_result_timeout", 20.0)
+        self.declare_parameter("imu_level_calibration_samples", 200)
+        self.declare_parameter("imu_level_camera_yaw_degrees", -90.0)
         self.declare_parameter("enable_mapping_control", True)
         self.declare_parameter(
             "mapping_launch_package", "lunar_usb_rtabmap_bringup"
@@ -1880,6 +2076,7 @@ class WebControlNode(Node):
             "use_imu:=true",
             "planar_mode:=false",
         ])
+        self.declare_parameter("mapping_robot_camera_profiles", [""])
         # H30 rotation is the default for both model and VPI mapping. The
         # launch health gate rejects silent or invalid IMU streams.
         self.declare_parameter("mapping_crestereo_use_imu", True)
@@ -1895,6 +2092,7 @@ class WebControlNode(Node):
         self.declare_parameter("enable_navigation_control", True)
         self.declare_parameter("navigation_launch_package", "luxi_3d_navigation")
         self.declare_parameter("navigation_launch_file", "saved_map_navigation.launch.py")
+        self.declare_parameter("navigation_launch_arguments", [""])
         self.declare_parameter("navigation_rmw_implementation", "rmw_cyclonedds_cpp")
         self.declare_parameter("navigation_sensor_setup", "")
         self.declare_parameter("navigation_d435_setup", "")
@@ -1990,6 +2188,69 @@ class WebControlNode(Node):
         self.web_root = Path(web_root).resolve()
 
         workspace_root = package_share.parents[3]
+        self.robot_namespace = normalize_robot_namespace(
+            str(self.get_parameter("robot_namespace").value)
+        )
+        robot_pid_token = self.robot_namespace.replace("/", "_")
+        self.imu_level_standalone_enabled = bool(
+            self.get_parameter("imu_level_standalone_enabled").value
+        )
+        self.imu_level_calibration_launch_package = str(
+            self.get_parameter("imu_level_calibration_launch_package").value
+        ).strip()
+        self.imu_level_calibration_launch_file = str(
+            self.get_parameter("imu_level_calibration_launch_file").value
+        ).strip()
+
+        def resolve_calibration_path(parameter_name: str, fallback: Path) -> Path:
+            configured = str(self.get_parameter(parameter_name).value).strip()
+            if configured:
+                configured = configured.replace(
+                    "{robot_namespace}", self.robot_namespace
+                )
+                path = Path(os.path.expandvars(configured)).expanduser()
+                if not path.is_absolute():
+                    path = workspace_root / path
+                return path.resolve()
+            return fallback.resolve()
+
+        self.imu_level_calibration_sensor_setup = resolve_calibration_path(
+            "imu_level_calibration_sensor_setup",
+            workspace_root / "device/USBCameraSDK/ros2_ws/install/setup.bash",
+        )
+        self.imu_level_calibration_workspace_setup = resolve_calibration_path(
+            "imu_level_calibration_workspace_setup",
+            workspace_root / "install/setup.bash",
+        )
+        self.imu_level_calibration_log_path = resolve_calibration_path(
+            "imu_level_calibration_log_path",
+            workspace_root / "log/luxi_web_control_imu_calibration.log",
+        )
+        self.imu_level_calibration_store_path = resolve_calibration_path(
+            "imu_level_calibration_store_path",
+            workspace_root / "maps/calibration"
+            / f"{self.robot_namespace}_camera_mount.json",
+        )
+        self.imu_level_calibration_start_timeout = float(
+            self.get_parameter("imu_level_calibration_start_timeout").value
+        )
+        self.imu_level_calibration_result_timeout = float(
+            self.get_parameter("imu_level_calibration_result_timeout").value
+        )
+        self.imu_level_calibration_samples = int(
+            self.get_parameter("imu_level_calibration_samples").value
+        )
+        self.imu_level_camera_yaw_degrees = float(
+            self.get_parameter("imu_level_camera_yaw_degrees").value
+        )
+        try:
+            self._persisted_imu_calibration = load_camera_calibration(
+                self.imu_level_calibration_store_path,
+                self.robot_namespace,
+            )
+        except ValueError as exc:
+            self.get_logger().error(str(exc))
+            self._persisted_imu_calibration = {}
         d1_start_script = str(self.get_parameter("d1_start_script").value)
         d1_stop_script = str(self.get_parameter("d1_stop_script").value)
         d1_bridge_pid_file = str(
@@ -2012,19 +2273,39 @@ class WebControlNode(Node):
             ).resolve(),
             bridge_pid_file=Path(
                 d1_bridge_pid_file
-                or "/tmp/slam_d1_bridge_d15041873.pid"
+                or f"/tmp/slam_d1_bridge_{robot_pid_token}.pid"
             ).resolve(),
             log_path=Path(
                 d1_control_log_path
-                or workspace_root / "log/luxi_web_control_d1.log"
+                or workspace_root
+                / f"log/luxi_web_control_d1_{robot_pid_token}.log"
             ).resolve(),
+            robot_namespace=self.robot_namespace,
+            workspace_root=workspace_root,
         )
-        self.d1_fsm_topic = str(self.get_parameter("d1_fsm_topic").value)
-        self.d1_controller_status_service = str(
+        configured_fsm_topic = str(
+            self.get_parameter("d1_fsm_topic").value
+        ).strip()
+        configured_status_service = str(
             self.get_parameter("d1_controller_status_service").value
-        )
-        self.d1_parameter_service = str(
+        ).strip()
+        configured_parameter_service = str(
             self.get_parameter("d1_parameter_service").value
+        ).strip()
+        self.d1_fsm_topic = configured_fsm_topic or robot_resource_name(
+            self.robot_namespace, "rl_controller/fsm"
+        )
+        self.d1_controller_status_service = (
+            configured_status_service
+            or robot_resource_name(
+                self.robot_namespace, "command/get_controller_status"
+            )
+        )
+        self.d1_parameter_service = (
+            configured_parameter_service
+            or robot_resource_name(
+                self.robot_namespace, "teleop_command/get_parameters"
+            )
         )
         self.d1_feedback_timeout = float(
             self.get_parameter("d1_feedback_timeout").value
@@ -2038,7 +2319,9 @@ class WebControlNode(Node):
         self._d1_sdk_received_at: Optional[float] = None
         self._d1_feedback_error = ""
         self._d1_controller_future = None
+        self._d1_controller_requested_at: Optional[float] = None
         self._d1_parameter_future = None
+        self._d1_parameter_requested_at: Optional[float] = None
         mapping_sensor_setup = str(
             self.get_parameter("mapping_sensor_setup").value
         )
@@ -2057,6 +2340,58 @@ class WebControlNode(Node):
             self.get_parameter("mapping_workspace_setup").value
         )
         mapping_log_path = str(self.get_parameter("mapping_log_path").value)
+        mapping_launch_arguments = [
+            str(argument) for argument in
+            self.get_parameter("mapping_launch_arguments").value
+        ]
+        selected_camera_profile: Optional[Path] = None
+        for profile_entry in self.get_parameter(
+            "mapping_robot_camera_profiles"
+        ).value:
+            profile_entry = str(profile_entry).strip()
+            if not profile_entry:
+                continue
+            namespace, separator, configured_path = profile_entry.partition("=")
+            if not separator or not configured_path.strip():
+                raise ValueError(
+                    "mapping_robot_camera_profiles entries must be NAMESPACE=PATH"
+                )
+            if normalize_robot_namespace(namespace) != self.robot_namespace:
+                continue
+            camera_profile = Path(
+                os.path.expandvars(configured_path.strip())
+            ).expanduser()
+            if not camera_profile.is_absolute():
+                camera_profile = workspace_root / camera_profile
+            camera_profile = camera_profile.resolve()
+            if not camera_profile.is_file():
+                raise FileNotFoundError(
+                    f"camera profile for {self.robot_namespace} is missing: "
+                    f"{camera_profile}"
+                )
+            mapping_launch_arguments = [
+                argument for argument in mapping_launch_arguments
+                if not argument.startswith("camera_params:=")
+            ]
+            mapping_launch_arguments.append(f"camera_params:={camera_profile}")
+            selected_camera_profile = camera_profile
+            break
+        self._imu_level_camera_translation = tuple(
+            launch_argument_value(mapping_launch_arguments, name, default)
+            for name, default in (
+                ("camera_x", "0.20"),
+                ("camera_y", "0.044982"),
+                ("camera_z", "0.20"),
+            )
+        )
+        if self._persisted_imu_calibration:
+            mapping_launch_arguments = replace_launch_arguments(
+                mapping_launch_arguments,
+                camera_calibration_overrides(
+                    self._persisted_imu_calibration,
+                    self.imu_level_camera_yaw_degrees,
+                ),
+            )
         self.mapping = MappingController(
             enabled=bool(self.get_parameter("enable_mapping_control").value),
             package=str(self.get_parameter("mapping_launch_package").value),
@@ -2075,10 +2410,7 @@ class WebControlNode(Node):
                 mapping_log_path
                 or workspace_root / "log/luxi_web_control_rtabmap.log"
             ).resolve(),
-            launch_arguments=tuple(
-                str(argument) for argument in
-                self.get_parameter("mapping_launch_arguments").value
-            ),
+            launch_arguments=tuple(mapping_launch_arguments),
             crestereo_use_imu=bool(
                 self.get_parameter("mapping_crestereo_use_imu").value
             ),
@@ -2095,10 +2427,42 @@ class WebControlNode(Node):
         navigation_sensor_setup = (
             navigation_sensor_setup or legacy_navigation_setup
         )
+        if navigation_sensor_setup:
+            expanded_navigation_setup = Path(
+                os.path.expandvars(navigation_sensor_setup)
+            ).expanduser()
+            if not expanded_navigation_setup.is_absolute():
+                expanded_navigation_setup = (
+                    workspace_root / expanded_navigation_setup
+                )
+            navigation_sensor_setup = str(
+                expanded_navigation_setup.resolve()
+            )
         navigation_workspace_setup = str(
             self.get_parameter("navigation_workspace_setup").value
         )
         navigation_log_path = str(self.get_parameter("navigation_log_path").value)
+        navigation_launch_arguments = [
+            str(argument).strip()
+            for argument in self.get_parameter("navigation_launch_arguments").value
+            if str(argument).strip()
+        ]
+        if selected_camera_profile is not None:
+            navigation_launch_arguments = [
+                argument for argument in navigation_launch_arguments
+                if not argument.startswith("camera_params:=")
+            ]
+            navigation_launch_arguments.append(
+                f"camera_params:={selected_camera_profile}"
+            )
+        if self._persisted_imu_calibration:
+            navigation_launch_arguments = replace_launch_arguments(
+                navigation_launch_arguments,
+                camera_calibration_overrides(
+                    self._persisted_imu_calibration,
+                    self.imu_level_camera_yaw_degrees,
+                ),
+            )
         maps_root = str(self.get_parameter("maps_root").value)
         self.maps_root = Path(maps_root or workspace_root / "maps").resolve()
         self.map_export_executable = (
@@ -2247,6 +2611,7 @@ class WebControlNode(Node):
                 navigation_log_path
                 or workspace_root / "log/luxi_web_control_navigation.log"
             ).resolve(),
+            launch_arguments=tuple(navigation_launch_arguments),
         )
         self.preview_enabled = bool(self.get_parameter("enable_preview").value)
         self.rgb_preview_topic = str(
@@ -2325,17 +2690,33 @@ class WebControlNode(Node):
         self._navigation_active = False
         self._navigation_follower_state = "stopped"
         self._imu_calibration_lock = threading.Lock()
-        self._imu_calibration = {
-            "state": "offline",
-            "message": "IMU 校准服务未连接",
-            "sample_count": 0,
-            "required_samples": 0,
-            "calibrated": False,
-            "roll_degrees": None,
-            "pitch_degrees": None,
-        }
+        if self._persisted_imu_calibration:
+            self._imu_calibration = {
+                **self._persisted_imu_calibration,
+                "state": "calibrated",
+                "message": "已加载此机器人的安装角度校准",
+                "calibrated": True,
+                "sample_count": 0,
+                "required_samples": self.imu_level_calibration_samples,
+                "persisted": True,
+            }
+        else:
+            self._imu_calibration = {
+                "state": "offline",
+                "message": "点击校准后将自动启动 USB/H30 校准链路",
+                "sample_count": 0,
+                "required_samples": self.imu_level_calibration_samples,
+                "calibrated": False,
+                "roll_degrees": None,
+                "pitch_degrees": None,
+                "persisted": False,
+            }
         self._imu_calibration_received_at: Optional[float] = None
         self._imu_calibration_future = None
+        self._imu_calibration_process: Optional[subprocess.Popen] = None
+        self._imu_calibration_started_at: Optional[float] = None
+        self._imu_calibration_worker: Optional[threading.Thread] = None
+        self._imu_calibration_stop_requested = False
 
         qos = QoSProfile(
             depth=10,
@@ -2356,6 +2737,9 @@ class WebControlNode(Node):
             self.imu_level_status_topic,
             self._on_imu_calibration_status,
             imu_calibration_qos,
+        )
+        self.imu_calibration_timer = self.create_timer(
+            0.25, self._poll_imu_calibration_process
         )
         self.d1_fsm_subscription = None
         self.d1_controller_status_client = None
@@ -2527,6 +2911,14 @@ class WebControlNode(Node):
             raise ValueError("command_timeout must be greater than zero")
         if self.d1_feedback_timeout <= 0.0:
             raise ValueError("d1_feedback_timeout must be greater than zero")
+        if self.imu_level_calibration_start_timeout <= 0.0:
+            raise ValueError("imu_level_calibration_start_timeout must be positive")
+        if self.imu_level_calibration_result_timeout <= 0.0:
+            raise ValueError("imu_level_calibration_result_timeout must be positive")
+        if self.imu_level_calibration_samples <= 0:
+            raise ValueError("imu_level_calibration_samples must be positive")
+        if not math.isfinite(self.imu_level_camera_yaw_degrees):
+            raise ValueError("imu_level_camera_yaw_degrees must be finite")
         if self.max_cloud_points != 0 and not 100 <= self.max_cloud_points <= 20000:
             raise ValueError(
                 "max_cloud_points must be zero or between 100 and 20000"
@@ -2597,8 +2989,297 @@ class WebControlNode(Node):
             self.get_logger().warning("Ignoring invalid IMU calibration status")
             return
         with self._imu_calibration_lock:
-            self._imu_calibration = status
+            self._imu_calibration = {
+                **status,
+                "persisted": False,
+            }
             self._imu_calibration_received_at = time.monotonic()
+        if status.get("state") == "calibrated" and status.get("calibrated"):
+            try:
+                self._persist_imu_calibration(status)
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.get_logger().error(f"Cannot save IMU calibration: {exc}")
+                with self._imu_calibration_lock:
+                    self._imu_calibration = {
+                        **self._imu_calibration,
+                        "state": "failed",
+                        "message": f"校准结果保存失败：{exc}",
+                        "persisted": False,
+                    }
+            finally:
+                self._stop_standalone_imu_calibration_async()
+
+    def _standalone_imu_calibration_error(self) -> str:
+        """Return an actionable reason why the temporary USB/H30 launch cannot run."""
+        if not self.imu_level_standalone_enabled:
+            return "USB/H30 独立校准未启用"
+        if not self.imu_level_calibration_launch_package:
+            return "校准 launch package 未配置"
+        if not self.imu_level_calibration_launch_file:
+            return "校准 launch file 未配置"
+        missing = [
+            path for path in (
+                self.imu_level_calibration_workspace_setup,
+                self.imu_level_calibration_sensor_setup,
+            )
+            if not path.is_file()
+        ]
+        if missing:
+            return "校准工作空间未构建：" + ", ".join(str(path) for path in missing)
+        return ""
+
+    def _imu_calibration_command(self) -> list[str]:
+        """Build the short-lived H30-only level calibration launch command."""
+        camera_x, camera_y, camera_z = self._imu_level_camera_translation
+        source_commands = [
+            f"source {shlex.quote(str(self.imu_level_calibration_workspace_setup))}",
+            f"source {shlex.quote(str(self.imu_level_calibration_sensor_setup))}",
+            "export ROS_LOCALHOST_ONLY=0",
+        ]
+        if self.mapping.rmw_implementation:
+            source_commands.append(
+                "export RMW_IMPLEMENTATION="
+                + shlex.quote(self.mapping.rmw_implementation)
+            )
+        launch_command = shlex.join([
+            "ros2", "launch",
+            self.imu_level_calibration_launch_package,
+            self.imu_level_calibration_launch_file,
+            f"calibration_service:={self.imu_level_calibration_service}",
+            f"status_topic:={self.imu_level_status_topic}",
+            f"calibration_samples:={self.imu_level_calibration_samples}",
+            f"camera_x:={camera_x}",
+            f"camera_y:={camera_y}",
+            f"camera_z:={camera_z}",
+            "camera_yaw:=" + format(
+                math.radians(self.imu_level_camera_yaw_degrees), ".12g"
+            ),
+        ])
+        return [
+            "/bin/bash", "-c",
+            "set -e; " + "; ".join(source_commands)
+            + f"; exec {launch_command}",
+        ]
+
+    def _request_imu_calibration_service(self) -> None:
+        """Issue Trigger after either an existing or temporary service is ready."""
+        with self._imu_calibration_lock:
+            self._imu_calibration = {
+                **self._imu_calibration,
+                "state": "waiting_stationary",
+                "message": "等待机器人在水平面保持静止",
+                "sample_count": 0,
+                "required_samples": self.imu_level_calibration_samples,
+                "persisted": False,
+            }
+        future = self.imu_calibration_client.call_async(Trigger.Request())
+        self._imu_calibration_future = future
+        future.add_done_callback(self._on_imu_calibration_response)
+
+    def _wait_for_standalone_imu_calibrator(self) -> None:
+        deadline = time.monotonic() + self.imu_level_calibration_start_timeout
+        while time.monotonic() < deadline:
+            with self._imu_calibration_lock:
+                process = self._imu_calibration_process
+            if process is None:
+                return
+            exit_code = process.poll()
+            if exit_code is not None:
+                with self._imu_calibration_lock:
+                    self._imu_calibration = {
+                        **self._imu_calibration,
+                        "state": "failed",
+                        "message": f"H30 校准进程提前退出（code={exit_code}），请检查校准日志",
+                    }
+                return
+            if self.imu_calibration_client.wait_for_service(timeout_sec=0.2):
+                self._request_imu_calibration_service()
+                return
+        with self._imu_calibration_lock:
+            self._imu_calibration = {
+                **self._imu_calibration,
+                "state": "failed",
+                "message": "H30 校准服务启动超时，请检查串口和校准日志",
+            }
+        self._stop_standalone_imu_calibration_async()
+
+    def _start_standalone_imu_calibration(self) -> Tuple[bool, str]:
+        error = self._standalone_imu_calibration_error()
+        if error:
+            return False, error
+        with self._imu_calibration_lock:
+            process = self._imu_calibration_process
+            if process is not None and process.poll() is None:
+                return False, "H30 安装角度校准已经在启动或采集中"
+            self._imu_calibration = {
+                **self._imu_calibration,
+                "state": "starting",
+                "message": "正在独立启动 H30，请保持机器人静止",
+                "sample_count": 0,
+                "required_samples": self.imu_level_calibration_samples,
+                "persisted": False,
+            }
+            self._imu_calibration_started_at = time.monotonic()
+            self._imu_calibration_stop_requested = False
+        try:
+            self.imu_level_calibration_log_path.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            with self.imu_level_calibration_log_path.open(
+                "a", encoding="utf-8"
+            ) as log_file:
+                log_file.write(
+                    "\n===== USB/H30 mount calibration started by "
+                    "luxi_web_control =====\n"
+                )
+                process = subprocess.Popen(
+                    self._imu_calibration_command(),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    env=sanitized_subprocess_environment(),
+                )
+        except OSError as exc:
+            with self._imu_calibration_lock:
+                self._imu_calibration = {
+                    **self._imu_calibration,
+                    "state": "failed",
+                    "message": f"无法启动 H30 校准：{exc}",
+                }
+            return False, f"无法启动 H30 校准：{exc}"
+        with self._imu_calibration_lock:
+            self._imu_calibration_process = process
+            self._imu_calibration_worker = threading.Thread(
+                target=self._wait_for_standalone_imu_calibrator,
+                name="luxi-imu-calibration-start",
+                daemon=True,
+            )
+            worker = self._imu_calibration_worker
+        worker.start()
+        return True, "USB/H30 安装角度校准正在启动，请勿移动机器人"
+
+    def _stop_standalone_imu_calibration(self) -> None:
+        with self._imu_calibration_lock:
+            process = self._imu_calibration_process
+            if process is None:
+                return
+            self._imu_calibration_stop_requested = True
+        if process.poll() is None:
+            try:
+                process.send_signal(signal.SIGINT)
+                process.wait(timeout=5.0)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait(timeout=2.0)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+        with self._imu_calibration_lock:
+            if self._imu_calibration_process is process:
+                self._imu_calibration_process = None
+                self._imu_calibration_started_at = None
+
+    def _stop_standalone_imu_calibration_async(self) -> None:
+        with self._imu_calibration_lock:
+            process = self._imu_calibration_process
+            already_stopping = self._imu_calibration_stop_requested
+            if process is None or already_stopping:
+                return
+            self._imu_calibration_stop_requested = True
+        threading.Thread(
+            target=self._stop_standalone_imu_calibration,
+            name="luxi-imu-calibration-stop",
+            daemon=True,
+        ).start()
+
+    def _persist_imu_calibration(self, status: Dict[str, Any]) -> None:
+        """Atomically save the mount and update future map/navigation launches."""
+        overrides = camera_calibration_overrides(
+            status, self.imu_level_camera_yaw_degrees
+        )
+        saved = {
+            "version": 1,
+            "robot_namespace": self.robot_namespace,
+            "calibrated": True,
+            "roll_degrees": float(status["roll_degrees"]),
+            "pitch_degrees": float(status["pitch_degrees"]),
+            "installation_roll_degrees": float(status.get(
+                "installation_roll_degrees",
+                float(status["roll_degrees"]) + 90.0,
+            )),
+            "installation_pitch_degrees": float(status.get(
+                "installation_pitch_degrees", status["pitch_degrees"]
+            )),
+            "camera_yaw_degrees": self.imu_level_camera_yaw_degrees,
+            "camera_quaternion": {
+                name.removeprefix("camera_"): float(value)
+                for name, value in overrides.items()
+            },
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        self.imu_level_calibration_store_path.parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        temporary_path = self.imu_level_calibration_store_path.with_suffix(
+            self.imu_level_calibration_store_path.suffix + ".tmp"
+        )
+        temporary_path.write_text(
+            json.dumps(saved, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, self.imu_level_calibration_store_path)
+        self.mapping.set_camera_calibration(overrides)
+        self.navigation.set_camera_calibration(overrides)
+        self._persisted_imu_calibration = saved
+        with self._imu_calibration_lock:
+            self._imu_calibration = {
+                **saved,
+                "state": "calibrated",
+                "message": "安装角度已保存，后续建图和定位会自动使用",
+                "sample_count": int(status.get("sample_count", 0)),
+                "required_samples": int(status.get(
+                    "required_samples", self.imu_level_calibration_samples
+                )),
+                "persisted": True,
+            }
+            self._imu_calibration_received_at = time.monotonic()
+
+    def _poll_imu_calibration_process(self) -> None:
+        with self._imu_calibration_lock:
+            process = self._imu_calibration_process
+            started_at = self._imu_calibration_started_at
+            state = self._imu_calibration.get("state")
+            stop_requested = self._imu_calibration_stop_requested
+        if process is None:
+            return
+        exit_code = process.poll()
+        if exit_code is not None:
+            with self._imu_calibration_lock:
+                self._imu_calibration_process = None
+                self._imu_calibration_started_at = None
+                if not stop_requested and state not in {"calibrated", "failed"}:
+                    self._imu_calibration = {
+                        **self._imu_calibration,
+                        "state": "failed",
+                        "message": f"H30 校准进程退出（code={exit_code}）",
+                    }
+            return
+        if (
+            started_at is not None
+            and state in {"starting", "waiting_stationary", "collecting"}
+            and time.monotonic() - started_at
+            > self.imu_level_calibration_result_timeout
+        ):
+            with self._imu_calibration_lock:
+                self._imu_calibration = {
+                    **self._imu_calibration,
+                    "state": "failed",
+                    "message": "安装角度校准超时；请确认 H30 出流且机器人完全静止",
+                }
+            self._stop_standalone_imu_calibration_async()
 
     def _on_imu_calibration_response(self, future) -> None:
         try:
@@ -2614,6 +3295,7 @@ class WebControlNode(Node):
                     "state": "failed",
                     "message": f"IMU 校准请求失败：{exc}",
                 }
+            self._stop_standalone_imu_calibration_async()
 
     def imu_calibration_status(self) -> Dict[str, Any]:
         """Return the latest C++ calibrator state for the web page."""
@@ -2626,13 +3308,19 @@ class WebControlNode(Node):
             else round(max(0.0, time.monotonic() - received_at), 2)
         )
         status["busy"] = status.get("state") in {
-            "waiting_stationary", "collecting"
+            "starting", "waiting_stationary", "collecting"
         }
+        standalone_error = self._standalone_imu_calibration_error()
+        status["standalone_available"] = not bool(standalone_error)
+        status["standalone_error"] = standalone_error or None
+        status["store_path"] = str(self.imu_level_calibration_store_path)
+        status["log_path"] = str(self.imu_level_calibration_log_path)
         mapping_running = self.mapping.status()["state"] == "running"
         navigation_status = self.navigation.status()
         navigation_running = navigation_status["state"] == "running"
         status["can_start"] = (
-            status["service_available"] and not status["busy"]
+            (status["service_available"] or status["standalone_available"])
+            and not status["busy"]
             and not mapping_running and not navigation_running
         )
         return status
@@ -2644,53 +3332,73 @@ class WebControlNode(Node):
         navigation = self.navigation_status()
         if navigation["state"] == "running" or navigation["active"]:
             return False, "请先停止定位和导航，再校准 IMU"
-        if not self.imu_calibration_client.service_is_ready():
-            return False, "IMU 校准服务未连接，请先启动 D435i 硬件"
         if self.imu_calibration_status()["busy"]:
             return False, "IMU 正在校准，请保持机器人静止"
         self.stop_motion()
-        with self._imu_calibration_lock:
-            self._imu_calibration = {
-                **self._imu_calibration,
-                "state": "waiting_stationary",
-                "message": "等待机器人在水平面保持静止",
-                "sample_count": 0,
-            }
-        future = self.imu_calibration_client.call_async(Trigger.Request())
-        self._imu_calibration_future = future
-        future.add_done_callback(self._on_imu_calibration_response)
-        return True, "IMU 水平校准已启动，请勿移动机器人"
+        if self.imu_calibration_client.service_is_ready():
+            self._request_imu_calibration_service()
+            return True, "IMU 水平校准已启动，请勿移动机器人"
+        return self._start_standalone_imu_calibration()
 
     def _poll_d1_feedback(self) -> None:
         """Poll the vendor's morphology and SDK-mode services at 1 Hz."""
+        now = time.monotonic()
+        request_timeout = max(1.0, self.d1_feedback_timeout)
+        if d1_feedback_request_timed_out(
+            self._d1_controller_future,
+            self._d1_controller_requested_at,
+            now,
+            request_timeout,
+        ):
+            stale_future = self._d1_controller_future
+            self._d1_controller_future = None
+            self._d1_controller_requested_at = None
+            stale_future.cancel()
+            with self._d1_status_lock:
+                self._d1_feedback_error = (
+                    "D1 controller feedback timed out; retrying"
+                )
+        if d1_feedback_request_timed_out(
+            self._d1_parameter_future,
+            self._d1_parameter_requested_at,
+            now,
+            request_timeout,
+        ):
+            stale_future = self._d1_parameter_future
+            self._d1_parameter_future = None
+            self._d1_parameter_requested_at = None
+            stale_future.cancel()
+            with self._d1_status_lock:
+                self._d1_feedback_error = "D1 SDK feedback timed out; retrying"
+
         if (
             self.d1_controller_status_client is not None
             and self.d1_controller_status_client.service_is_ready()
-            and (
-                self._d1_controller_future is None
-                or self._d1_controller_future.done()
-            )
+            and self._d1_controller_future is None
         ):
             future = self.d1_controller_status_client.call_async(
                 Trigger.Request()
             )
             self._d1_controller_future = future
+            self._d1_controller_requested_at = now
             future.add_done_callback(self._on_d1_controller_status)
         if (
             self.d1_parameter_client is not None
             and self.d1_parameter_client.service_is_ready()
-            and (
-                self._d1_parameter_future is None
-                or self._d1_parameter_future.done()
-            )
+            and self._d1_parameter_future is None
         ):
             request = GetParameters.Request()
             request.names = ["use_sdk"]
             future = self.d1_parameter_client.call_async(request)
             self._d1_parameter_future = future
+            self._d1_parameter_requested_at = now
             future.add_done_callback(self._on_d1_parameters)
 
     def _on_d1_controller_status(self, future) -> None:
+        if future is not self._d1_controller_future:
+            return
+        self._d1_controller_future = None
+        self._d1_controller_requested_at = None
         try:
             response = future.result()
             if response is None or not response.success:
@@ -2707,6 +3415,10 @@ class WebControlNode(Node):
                 self._d1_feedback_error = str(exc)
 
     def _on_d1_parameters(self, future) -> None:
+        if future is not self._d1_parameter_future:
+            return
+        self._d1_parameter_future = None
+        self._d1_parameter_requested_at = None
         try:
             response = future.result()
             if (
@@ -3205,7 +3917,10 @@ class WebControlNode(Node):
             return True, "D1 is already standing and ready"
         if not active and status["posture"] == "prone" and not status["bridge_active"]:
             return True, "D1 is already prone with control released"
-        force = not active and not status["bridge_active"]
+        force = bool(
+            (active and status["bridge_active"] and not status["control_ready"])
+            or (not active and not status["bridge_active"])
+        )
         return self.d1_control.set_active(active, force=force)
 
     def d1_control_status(self) -> Dict[str, Any]:
@@ -3269,8 +3984,8 @@ class WebControlNode(Node):
             state = "offline"
         elif control_ready:
             state = "active"
-        elif posture == "prone" and not bridge_active and sdk_active is False:
-            state = "inactive"
+        elif posture == "prone" and sdk_active is False:
+            state = "recovery_required" if bridge_active else "inactive"
         elif posture == "standing_up":
             state = "standing_up"
         elif posture == "standing":
@@ -3301,7 +4016,7 @@ class WebControlNode(Node):
     def start_mapping(self, mode: str = "crestereo") -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
         calibration = self.imu_calibration_status()
-        if calibration["service_available"] and (
+        if (calibration["service_available"] or calibration["standalone_available"]) and (
             calibration.get("state") != "calibrated" or calibration["busy"]
         ):
             return False, "请先在水平面完成 IMU 一键校准"
@@ -3430,7 +4145,14 @@ class WebControlNode(Node):
     def load_navigation_map(
         self, map_id: str, filtered: bool = False
     ) -> Tuple[bool, str]:
-        """Build missing display/HLoc assets, then load browser map layers."""
+        """
+        Build missing display assets, then load browser map layers.
+
+        HLoc feature construction is deliberately not part of this synchronous
+        request. Large maps can contain hundreds of reference images, and
+        loading NetVLAD/SuperPoint while the web/ROS stack is resident can
+        exhaust an NX before the already-exported cloud is displayed.
+        """
         if not MAP_IDENTIFIER.fullmatch(map_id):
             return False, "map_id must use the mapNNN format"
         if not self._navigation_map_operation_lock.acquire(blocking=False):
@@ -3471,29 +4193,10 @@ class WebControlNode(Node):
 
             hloc_warning = ""
             if not record.get("hloc_map_directory"):
-                hloc_directory = (
-                    self.maps_root / "hloc_maps" / map_id
-                ).resolve()
-                built, message = self.hloc_index_builder.build(
-                    map_id,
-                    Path(record["database_path"]),
-                    hloc_directory,
+                hloc_warning = (
+                    "HLoc: index not built; map display is available, "
+                    "automatic localization remains disabled"
                 )
-                if built:
-                    operation_messages.append(message)
-                    record = next(
-                        (
-                            item for item in self.navigation_maps()
-                            if item["id"] == map_id
-                        ),
-                        None,
-                    )
-                    if record is None:
-                        return False, (
-                            f"map {map_id} disappeared after HLoc construction"
-                        )
-                else:
-                    hloc_warning = "HLoc: " + message
 
             self._clear_navigation_preview()
             variant = "filtered" if filtered else "original"
@@ -3523,7 +4226,7 @@ class WebControlNode(Node):
     def start_navigation_localization(self, map_id: str) -> Tuple[bool, str]:
         """Start HLoc coarse localization followed by ICP refinement."""
         calibration = self.imu_calibration_status()
-        if calibration["service_available"] and (
+        if (calibration["service_available"] or calibration["standalone_available"]) and (
             calibration.get("state") != "calibrated" or calibration["busy"]
         ):
             return False, "请先在水平面完成 IMU 一键校准"
@@ -3547,6 +4250,35 @@ class WebControlNode(Node):
         filtered = loaded_variant == "filtered"
         octomap_key = "filtered_octomap_path" if filtered else "octomap_path"
         cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+        if not record.get("hloc_map_directory"):
+            if self.mapping_status()["state"] == "running":
+                return False, "请先停止建图，再构建定位索引"
+            if not self._navigation_map_operation_lock.acquire(blocking=False):
+                return False, "another map is already being converted or prepared"
+            try:
+                hloc_directory = (
+                    self.maps_root / "hloc_maps" / map_id
+                ).resolve()
+                built, message = self.hloc_index_builder.build(
+                    map_id,
+                    Path(record["database_path"]),
+                    hloc_directory,
+                )
+                if not built:
+                    return False, message
+                record = next(
+                    (
+                        item for item in self.navigation_maps()
+                        if item["id"] == map_id
+                    ),
+                    None,
+                )
+                if record is None or not record.get("hloc_map_directory"):
+                    return False, (
+                        f"map {map_id} HLoc builder produced no usable index"
+                    )
+            finally:
+                self._navigation_map_operation_lock.release()
         required = ("database_path", octomap_key, cloud_key, "hloc_map_directory")
         if any(not record.get(name) for name in required):
             return False, (
@@ -3610,10 +4342,13 @@ class WebControlNode(Node):
     def start_navigation_motion(self) -> Tuple[bool, str]:
         """Start low-speed path following only after localization and planning."""
         navigation = self.navigation_status()
+        robot_control = self.d1_control_status()
         with self._lock:
             estop_active = self._estop_active
         if estop_active:
             return False, "release emergency stop before starting navigation"
+        if robot_control["enabled"] and not robot_control["control_ready"]:
+            return False, "请先开启机器人控制并等待状态变为站立且可控制"
         if navigation["state"] != "running":
             return False, "start map localization before navigation"
         if not navigation["planning_localization_ready"]:
@@ -3784,6 +4519,7 @@ class WebControlNode(Node):
         return {
             "ok": True,
             "node": self.get_name(),
+            "robot_namespace": self.robot_namespace,
             "state": state,
             "cmd_vel_topic": self.cmd_vel_topic,
             "http_port": self.http_port,
@@ -3809,6 +4545,7 @@ class WebControlNode(Node):
             return
         self._closed = True
         try:
+            self._stop_standalone_imu_calibration()
             self.stop_mapping()
             self.stop_navigation()
             if rclpy.ok():

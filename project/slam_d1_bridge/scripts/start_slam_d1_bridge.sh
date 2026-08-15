@@ -18,19 +18,35 @@ set -euo pipefail
 
 readonly DEFAULT_ROBOT_NS="d15041873"
 readonly DEFAULT_ROS_DOMAIN_ID="42"
-readonly DEFAULT_WORKSPACE="/home/nvidia/Desktop/lunar_slam"
+readonly DEFAULT_WORKSPACE="/home/nvidia/Desktop/lunar_-slam"
 
 ROBOT_NS="${ROBOT_NS:-${DEFAULT_ROBOT_NS}}"
+if [[ ! "${ROBOT_NS}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "Invalid ROBOT_NS '${ROBOT_NS}'; use one ROS name token." >&2
+    exit 2
+fi
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-${DEFAULT_ROS_DOMAIN_ID}}"
 ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
 RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 SLAM_D1_WORKSPACE="${SLAM_D1_WORKSPACE:-${DEFAULT_WORKSPACE}}"
+SLAM_D1_RECOVER_EXISTING="${SLAM_D1_RECOVER_EXISTING:-false}"
 
 readonly PID_FILE="/tmp/slam_d1_bridge_${ROBOT_NS}.pid"
 readonly LOG_FILE="/tmp/slam_d1_bridge_${ROBOT_NS}.log"
 readonly COMMAND_TOPIC="/${ROBOT_NS}/command/user_command"
 readonly TELEOP_NODE="/${ROBOT_NS}/teleop_command"
 readonly PARAMETER_SERVICE="${TELEOP_NODE}/set_parameters"
+
+is_managed_bridge_pid()
+{
+    local pid="$1"
+    local command_line
+    if [[ ! -r "/proc/${pid}/cmdline" ]]; then
+        return 1
+    fi
+    command_line="$(tr '\0' ' ' <"/proc/${pid}/cmdline")"
+    [[ "${command_line}" == *"ros2 launch slam_d1_bridge slam_d1_bridge.launch.py"* ]]
+}
 
 ASSUME_YES=false
 if [[ "${1:-}" == "--yes" ]]; then
@@ -60,8 +76,41 @@ export ROS_DOMAIN_ID ROS_LOCALHOST_ONLY RMW_IMPLEMENTATION
 if [[ -f "${PID_FILE}" ]]; then
     existing_pid="$(<"${PID_FILE}")"
     if [[ "${existing_pid}" =~ ^[0-9]+$ ]] && kill -0 "${existing_pid}" 2>/dev/null; then
-        echo "slam_d1_bridge is already running with PID ${existing_pid}." >&2
-        exit 1
+        if is_managed_bridge_pid "${existing_pid}"; then
+            if [[ "${SLAM_D1_RECOVER_EXISTING}" != true ]]; then
+                echo "slam_d1_bridge is already active with managed PID ${existing_pid}."
+                exit 0
+            fi
+            echo "Recycling managed bridge PID ${existing_pid} because SDK/control is not ready."
+            kill -INT -- "-${existing_pid}" 2>/dev/null || \
+                kill -INT "${existing_pid}" 2>/dev/null || true
+            for _ in {1..50}; do
+                if ! kill -0 "${existing_pid}" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.1
+            done
+            if kill -0 "${existing_pid}" 2>/dev/null; then
+                echo "Existing bridge did not stop after 5 seconds; refusing recovery." >&2
+                exit 1
+            fi
+            rm -f "${PID_FILE}"
+            # Wait for Fast DDS to remove the old UserCommand publisher before
+            # the direct transform_up sequence performs its single-publisher check.
+            for _ in {1..20}; do
+                old_topic_info="$(
+                    ros2 topic info --no-daemon --spin-time 1.0 \
+                        "${COMMAND_TOPIC}" 2>/dev/null || true
+                )"
+                if ! grep -Eq 'Publisher count: [1-9][0-9]*' <<<"${old_topic_info}"; then
+                    break
+                fi
+                sleep 0.25
+            done
+        else
+            echo "Bridge PID file points to an unrelated live process ${existing_pid}; refusing to continue." >&2
+            exit 1
+        fi
     fi
     rm -f "${PID_FILE}"
 fi

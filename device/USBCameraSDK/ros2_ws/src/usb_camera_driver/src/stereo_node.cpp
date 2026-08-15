@@ -14,6 +14,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -145,6 +146,20 @@ struct CaptureMetadata {
   uint32_t sequence = 0;
   uint32_t flags = 0;
 };
+
+bool hasMonotonicTimestamp(const CaptureMetadata &metadata) {
+  return (metadata.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) ==
+         V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+}
+
+int64_t pairingTimestamp(const CaptureMetadata &metadata) {
+  // V4L2 timestamps are recorded by the kernel for the captured buffer.  A
+  // userspace dequeue timestamp also includes USB scheduling and select/DQBUF
+  // latency, which is different for two independent UVC devices and can pair
+  // adjacent frames while the rig is moving.
+  return hasMonotonicTimestamp(metadata) ? metadata.v4l2_timestamp_ns
+                                         : metadata.host_dequeue_timestamp_ns;
+}
 
 int64_t realtimeNowNanoseconds() {
   timespec timestamp {};
@@ -327,6 +342,12 @@ class V4l2Camera {
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
 
+  void setManualExposureGain(int exposure_absolute, int gain) {
+    setControl(V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
+    setControl(V4L2_CID_EXPOSURE_ABSOLUTE, exposure_absolute);
+    setControl(V4L2_CID_GAIN, gain);
+  }
+
   void close() {
     if (fd_ < 0) {
       return;
@@ -418,11 +439,49 @@ class StereoNode : public rclcpp::Node {
     const auto auto_exposure = declare_parameter<bool>("auto_exposure", true);
     const auto exposure_absolute = declare_parameter<int>("exposure_absolute", -1);
     const auto gain = declare_parameter<int>("gain", -1);
+    synchronized_auto_exposure_ =
+        declare_parameter<bool>("synchronized_auto_exposure", false);
+    auto_exposure_target_luma_ =
+        declare_parameter<int>("auto_exposure_target_luma", 85);
+    auto_exposure_luma_deadband_ =
+        declare_parameter<int>("auto_exposure_luma_deadband", 8);
+    auto_exposure_update_interval_frames_ =
+        declare_parameter<int>("auto_exposure_update_interval_frames", 5);
+    auto_exposure_min_exposure_ =
+        declare_parameter<int>("auto_exposure_min_exposure_absolute", 20);
+    auto_exposure_max_exposure_ =
+        declare_parameter<int>("auto_exposure_max_exposure_absolute", 150);
+    auto_exposure_min_gain_ =
+        declare_parameter<int>("auto_exposure_min_gain", 0);
+    auto_exposure_max_gain_ =
+        declare_parameter<int>("auto_exposure_max_gain", 68);
+    auto_exposure_max_exposure_step_ =
+        declare_parameter<int>("auto_exposure_max_exposure_step", 10);
+    auto_exposure_max_gain_step_ =
+        declare_parameter<int>("auto_exposure_max_gain_step", 4);
     left_frame_id_ = declare_parameter<std::string>("left_frame_id", "left_camera_optical_frame");
     right_frame_id_ = declare_parameter<std::string>("right_frame_id", "right_camera_optical_frame");
     if (frame_rate <= 0.0 || (trigger_mode != "hardware" && trigger_mode != "video")) {
       throw std::runtime_error("frame_rate_hz must be positive and trigger_mode must be hardware or video");
     }
+    if (synchronized_auto_exposure_ && auto_exposure) {
+      throw std::runtime_error(
+          "synchronized_auto_exposure requires native auto_exposure=false");
+    }
+    if (synchronized_auto_exposure_ &&
+        (exposure_absolute < auto_exposure_min_exposure_ ||
+         exposure_absolute > auto_exposure_max_exposure_ ||
+         gain < auto_exposure_min_gain_ || gain > auto_exposure_max_gain_ ||
+         auto_exposure_target_luma_ < 1 || auto_exposure_target_luma_ > 254 ||
+         auto_exposure_luma_deadband_ < 0 ||
+         auto_exposure_update_interval_frames_ < 1 ||
+         auto_exposure_max_exposure_step_ < 1 ||
+         auto_exposure_max_gain_step_ < 1)) {
+      throw std::runtime_error(
+          "invalid synchronized auto-exposure bounds or initial controls");
+    }
+    current_exposure_ = exposure_absolute;
+    current_gain_ = gain;
     max_pair_interval_ns_ =
         static_cast<int64_t>(500000000.0 / frame_rate);
     timestamp_offset_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -453,6 +512,16 @@ class StereoNode : public rclcpp::Node {
                 "opened stereo UVC cameras: %s and %s, trigger_mode=%s, output=%s",
                 left_device.c_str(), right_device.c_str(), trigger_mode.c_str(),
                 output_encoding_.c_str());
+    if (synchronized_auto_exposure_) {
+      RCLCPP_INFO(
+          get_logger(),
+          "bounded stereo auto exposure: target=%d+-%d, exposure=%d [%d,%d] "
+          "(100 us), gain=%d [%d,%d], update every %d paired frames",
+          auto_exposure_target_luma_, auto_exposure_luma_deadband_,
+          current_exposure_, auto_exposure_min_exposure_,
+          auto_exposure_max_exposure_, current_gain_, auto_exposure_min_gain_,
+          auto_exposure_max_gain_, auto_exposure_update_interval_frames_);
+    }
 
     capture_thread_ = std::thread(&StereoNode::captureLoop, this);
   }
@@ -465,6 +534,123 @@ class StereoNode : public rclcpp::Node {
   }
 
  private:
+  static cv::Mat reducedGrayscale(const cv::Mat &image) {
+    if (image.empty()) {
+      return {};
+    }
+    cv::Mat grayscale;
+    if (image.channels() == 1) {
+      grayscale = image;
+    } else {
+      cv::cvtColor(image, grayscale, cv::COLOR_BGR2GRAY);
+    }
+    cv::Mat reduced;
+    cv::resize(grayscale, reduced, cv::Size(), 0.125, 0.125, cv::INTER_AREA);
+    return reduced;
+  }
+
+  static cv::Mat reducedJpegGrayscale(const std::vector<uint8_t> &jpeg) {
+    if (jpeg.empty()) {
+      return {};
+    }
+    const cv::Mat encoded(1, static_cast<int>(jpeg.size()), CV_8UC1,
+                          const_cast<uint8_t *>(jpeg.data()));
+    return cv::imdecode(encoded, cv::IMREAD_REDUCED_GRAYSCALE_8);
+  }
+
+  static int centralMedianLuma(const cv::Mat &grayscale) {
+    if (grayscale.empty() || grayscale.type() != CV_8UC1) {
+      return -1;
+    }
+    const int border_x = grayscale.cols / 8;
+    const int border_y = grayscale.rows / 8;
+    const cv::Rect region(
+        border_x, border_y, std::max(1, grayscale.cols - 2 * border_x),
+        std::max(1, grayscale.rows - 2 * border_y));
+    const cv::Mat roi = grayscale(region);
+    std::array<int, 256> histogram {};
+    int samples = 0;
+    for (int row = 0; row < roi.rows; ++row) {
+      const uint8_t *pixels = roi.ptr<uint8_t>(row);
+      for (int column = 0; column < roi.cols; ++column) {
+        ++histogram[pixels[column]];
+        ++samples;
+      }
+    }
+    const int middle = samples / 2;
+    int cumulative = 0;
+    for (int value = 0; value < 256; ++value) {
+      cumulative += histogram[value];
+      if (cumulative >= middle) {
+        return value;
+      }
+    }
+    return 255;
+  }
+
+  void updateSynchronizedAutoExposure() {
+    if (!synchronized_auto_exposure_ ||
+        (++auto_exposure_frame_counter_ %
+         static_cast<uint64_t>(auto_exposure_update_interval_frames_)) != 0U) {
+      return;
+    }
+    const cv::Mat left_gray = compressed_output_
+                                  ? reducedJpegGrayscale(left_jpeg_pending_)
+                                  : reducedGrayscale(left_pending_);
+    const cv::Mat right_gray = compressed_output_
+                                   ? reducedJpegGrayscale(right_jpeg_pending_)
+                                   : reducedGrayscale(right_pending_);
+    const int left_luma = centralMedianLuma(left_gray);
+    const int right_luma = centralMedianLuma(right_gray);
+    if (left_luma < 0 || right_luma < 0) {
+      return;
+    }
+    const int luma = (left_luma + right_luma) / 2;
+    const int error = auto_exposure_target_luma_ - luma;
+    if (std::abs(error) <= auto_exposure_luma_deadband_) {
+      return;
+    }
+
+    const int old_exposure = current_exposure_;
+    const int old_gain = current_gain_;
+    if (error > 0) {
+      if (current_exposure_ < auto_exposure_max_exposure_) {
+        current_exposure_ = std::min(
+            auto_exposure_max_exposure_, current_exposure_ +
+            std::clamp(error / 3, 1, auto_exposure_max_exposure_step_));
+      } else {
+        current_gain_ = std::min(
+            auto_exposure_max_gain_, current_gain_ +
+            std::clamp(error / 8, 1, auto_exposure_max_gain_step_));
+      }
+    } else {
+      if (current_gain_ > auto_exposure_min_gain_) {
+        current_gain_ = std::max(
+            auto_exposure_min_gain_, current_gain_ -
+            std::clamp((-error) / 8, 1, auto_exposure_max_gain_step_));
+      } else {
+        current_exposure_ = std::max(
+            auto_exposure_min_exposure_, current_exposure_ -
+            std::clamp((-error) / 3, 1, auto_exposure_max_exposure_step_));
+      }
+    }
+    if (current_exposure_ == old_exposure && current_gain_ == old_gain) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "stereo auto exposure reached bounds: luma=%d target=%d exposure=%d gain=%d",
+          luma, auto_exposure_target_luma_, current_exposure_, current_gain_);
+      return;
+    }
+    // Apply one shared control decision to both sensors. Native UVC AE is kept
+    // disabled so the left and right images cannot wander independently.
+    left_.setManualExposureGain(current_exposure_, current_gain_);
+    right_.setManualExposureGain(current_exposure_, current_gain_);
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "stereo auto exposure: luma L/R=%d/%d, exposure=%d, gain=%d",
+        left_luma, right_luma, current_exposure_, current_gain_);
+  }
+
   void captureLoop() {
     while (running_ && rclcpp::ok()) {
       try {
@@ -496,9 +682,8 @@ class StereoNode : public rclcpp::Node {
         const bool right_ready = compressed_output_ ? !right_jpeg_pending_.empty()
                                                     : !right_pending_.empty();
         if (left_ready && right_ready) {
-          const int64_t timestamp_delta_ns =
-              left_metadata_.host_dequeue_timestamp_ns -
-              right_metadata_.host_dequeue_timestamp_ns;
+          const int64_t timestamp_delta_ns = pairingTimestamp(left_metadata_) -
+                                             pairingTimestamp(right_metadata_);
           if (timestamp_delta_ns < -max_pair_interval_ns_) {
             left_pending_.release();
             left_jpeg_pending_.clear();
@@ -523,6 +708,7 @@ class StereoNode : public rclcpp::Node {
   }
 
   void publishPair() {
+    updateSynchronizedAutoExposure();
     const int64_t pair_timestamp_ns =
         left_metadata_.host_dequeue_timestamp_ns +
         (right_metadata_.host_dequeue_timestamp_ns -
@@ -530,24 +716,28 @@ class StereoNode : public rclcpp::Node {
             2 +
         timestamp_offset_ns_;
     const auto stamp = rclcpp::Time(pair_timestamp_ns, RCL_SYSTEM_TIME);
-    const bool left_monotonic =
-        (left_metadata_.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) ==
-        V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-    const bool right_monotonic =
-        (right_metadata_.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) ==
-        V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+    const bool left_monotonic = hasMonotonicTimestamp(left_metadata_);
+    const bool right_monotonic = hasMonotonicTimestamp(right_metadata_);
     if (!timestamp_source_logged_) {
-      const double delta_ms = static_cast<double>(
-                                  left_metadata_.host_dequeue_timestamp_ns -
-                                  right_metadata_.host_dequeue_timestamp_ns) /
-                              1e6;
+      const double dequeue_delta_ms = static_cast<double>(
+                                          left_metadata_.host_dequeue_timestamp_ns -
+                                          right_metadata_.host_dequeue_timestamp_ns) /
+                                      1e6;
+      const double frame_delta_ms = static_cast<double>(
+                                        left_metadata_.v4l2_timestamp_ns -
+                                        right_metadata_.v4l2_timestamp_ns) /
+                                    1e6;
       RCLCPP_INFO(get_logger(),
-                  "capture timestamps: left_seq=%u right_seq=%u dequeue_delta=%.3f ms "
-                  "left_flags=0x%x right_flags=0x%x source=host dequeue "
+                  "capture timestamps: left_seq=%u right_seq=%u frame_delta=%.3f ms "
+                  "dequeue_delta=%.3f ms "
+                  "left_flags=0x%x right_flags=0x%x pair_source=%s "
+                  "stamp_source=host_dequeue "
                   "timestamp_offset=%.3f ms "
                   "(V4L2 monotonic flags=%s)",
-                  left_metadata_.sequence, right_metadata_.sequence, delta_ms,
+                  left_metadata_.sequence, right_metadata_.sequence, frame_delta_ms,
+                  dequeue_delta_ms,
                   left_metadata_.flags, right_metadata_.flags,
+                  left_monotonic && right_monotonic ? "V4L2" : "host_dequeue",
                   static_cast<double>(timestamp_offset_ns_) / 1e6,
                   left_monotonic && right_monotonic ? "yes" : "no");
       timestamp_source_logged_ = true;
@@ -631,6 +821,19 @@ class StereoNode : public rclcpp::Node {
   std::string output_encoding_;
   bool compressed_output_ = false;
   bool timestamp_source_logged_ = false;
+  bool synchronized_auto_exposure_ = false;
+  int auto_exposure_target_luma_ = 85;
+  int auto_exposure_luma_deadband_ = 8;
+  int auto_exposure_update_interval_frames_ = 5;
+  int auto_exposure_min_exposure_ = 20;
+  int auto_exposure_max_exposure_ = 150;
+  int auto_exposure_min_gain_ = 0;
+  int auto_exposure_max_gain_ = 68;
+  int auto_exposure_max_exposure_step_ = 10;
+  int auto_exposure_max_gain_step_ = 4;
+  int current_exposure_ = -1;
+  int current_gain_ = -1;
+  uint64_t auto_exposure_frame_counter_ = 0;
   int64_t max_pair_interval_ns_ = 0;
   int64_t timestamp_offset_ns_ = 0;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_pub_;

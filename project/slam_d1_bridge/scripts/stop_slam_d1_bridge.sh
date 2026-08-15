@@ -18,9 +18,13 @@ set -euo pipefail
 
 readonly DEFAULT_ROBOT_NS="d15041873"
 readonly DEFAULT_ROS_DOMAIN_ID="42"
-readonly DEFAULT_WORKSPACE="/home/nvidia/Desktop/lunar_slam"
+readonly DEFAULT_WORKSPACE="/home/nvidia/Desktop/lunar_-slam"
 
 ROBOT_NS="${ROBOT_NS:-${DEFAULT_ROBOT_NS}}"
+if [[ ! "${ROBOT_NS}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "Invalid ROBOT_NS '${ROBOT_NS}'; use one ROS name token." >&2
+    exit 2
+fi
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-${DEFAULT_ROS_DOMAIN_ID}}"
 ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
 RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"

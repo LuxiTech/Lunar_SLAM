@@ -126,11 +126,12 @@
           <label class="mapping-mode-row" for="mappingMode">
             <span>深度链路</span>
             <select id="mappingMode">
-              <option value="crestereo" selected>CREStereo 模型（主链路）</option>
+              <option value="crestereo" selected>CREStereo 高质量（主链路，640×360）</option>
+              <option value="crestereo_max">CREStereo 高帧率（10 Hz / 320×180）</option>
               <option value="vpi">VPI 实时（备用）</option>
             </select>
           </label>
-          <p id="mappingDetail" class="mapping-detail">CREStereo 模型深度与学习里程计为主链路；VPI 保留为低资源备用链路。</p>
+          <p id="mappingDetail" class="mapping-detail">CREStereo 主链路使用原生 640×360 深度；高帧率模式以 320×180 模型冲刺 10 Hz；VPI 为备用链路。</p>
           <div class="mapping-actions">
             <button id="mappingStartButton" class="mapping-start">开始建图</button>
             <button id="mappingStopButton" class="mapping-stop" disabled>停止建图</button>

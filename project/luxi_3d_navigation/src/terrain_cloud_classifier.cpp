@@ -114,7 +114,6 @@ TerrainObservation classifyTerrainPoints(
   const double minimum_vertical_normal = std::cos(
     parameters.maximum_ground_slope_degrees * kPi / 180.0);
   std::vector<bool> ground_candidates(downsampled->size(), false);
-  std::size_t ground_candidate_count = 0U;
   for (std::size_t index = 0; index < downsampled->size(); ++index) {
     const auto & normal = (*normals)[index];
     const double norm = std::sqrt(
@@ -129,34 +128,100 @@ TerrainObservation classifyTerrainPoints(
       continue;
     }
     ground_candidates[index] = true;
-    ++ground_candidate_count;
   }
-  if (ground_candidate_count == 0U) {
+
+  // A 3-D cloud often contains several near-horizontal returns in one XY
+  // column: floor, object tops, shelves and ceiling.  Feeding every return to
+  // region growing lets a dense stereo cloud climb from the floor through
+  // small depth-noise steps until an obstacle top becomes "ground".  A legged
+  // robot needs the lowest support surface in each observed column instead.
+  std::unordered_map<GridCell3D, std::size_t, GridCell3DHash> candidate_surfaces;
+  for (std::size_t index = 0; index < downsampled->size(); ++index) {
+    if (!ground_candidates[index]) {
+      continue;
+    }
+    const auto cell = worldToGrid((*downsampled)[index], parameters.resolution);
+    const GridCell3D column{cell.x, cell.y, 0};
+    const auto found = candidate_surfaces.find(column);
+    if (found == candidate_surfaces.end() ||
+      (*downsampled)[index].z < (*downsampled)[found->second].z)
+    {
+      candidate_surfaces[column] = index;
+    }
+  }
+  if (candidate_surfaces.empty()) {
     throw std::runtime_error("terrain point cloud has no ground-like surface");
+  }
+  std::fill(ground_candidates.begin(), ground_candidates.end(), false);
+  for (const auto & entry : candidate_surfaces) {
+    ground_candidates[entry.second] = true;
+  }
+
+  // Anchor segmentation to the floor under/around the mapping origin.  The
+  // lower quartile is robust to the robot body and nearby furniture while not
+  // depending on an absolute map Z value or camera mounting height.
+  constexpr double kGroundSeedRadius = 1.0;
+  std::vector<double> seed_heights;
+  for (const auto & entry : candidate_surfaces) {
+    const auto & point = (*downsampled)[entry.second];
+    if (std::hypot(static_cast<double>(point.x), static_cast<double>(point.y)) <=
+      kGroundSeedRadius)
+    {
+      seed_heights.push_back(point.z);
+    }
+  }
+  double seed_height = std::numeric_limits<double>::quiet_NaN();
+  if (!seed_heights.empty()) {
+    const std::size_t quartile_index = (seed_heights.size() - 1U) / 4U;
+    std::nth_element(
+      seed_heights.begin(), seed_heights.begin() + quartile_index, seed_heights.end());
+    seed_height = seed_heights[quartile_index];
+  }
+  const double seed_height_tolerance = std::max(
+    parameters.obstacle_min_height * 0.8, parameters.resolution * 2.0);
+  std::vector<bool> ground_seeds(downsampled->size(), false);
+  if (std::isfinite(seed_height)) {
+    for (const auto & entry : candidate_surfaces) {
+      const auto & point = (*downsampled)[entry.second];
+      const double radius = std::hypot(
+        static_cast<double>(point.x), static_cast<double>(point.y));
+      if (radius <= kGroundSeedRadius &&
+        std::abs(static_cast<double>(point.z) - seed_height) <= seed_height_tolerance)
+      {
+        ground_seeds[entry.second] = true;
+      }
+    }
   }
 
   const double maximum_ground_gradient = std::tan(
     parameters.maximum_ground_slope_degrees * kPi / 180.0);
+  // Keep the graph local.  The normal fitting radius is deliberately wider,
+  // but using it as a connectivity radius bridges across furniture edges.
+  const double continuity_radius = std::max(
+    parameters.resolution * 2.0, std::min(parameters.normal_radius * 0.5, 0.15));
   const int continuity_radius_cells = std::max(
-    2, static_cast<int>(std::ceil(parameters.normal_radius / parameters.resolution)));
+    2, static_cast<int>(std::ceil(continuity_radius / parameters.resolution)));
   auto connectivity_search = std::make_shared<pcl::search::KdTree<pcl::PointXYZ>>();
   connectivity_search->setInputCloud(downsampled);
   const double connectivity_search_radius =
-    static_cast<double>(continuity_radius_cells + 2) * parameters.resolution;
+    static_cast<double>(continuity_radius_cells) * parameters.resolution * 1.05;
   std::vector<bool> visited(downsampled->size(), false);
   std::vector<std::size_t> largest_component;
+  std::vector<std::size_t> anchored_component;
   for (std::size_t seed = 0U; seed < downsampled->size(); ++seed) {
     if (!ground_candidates[seed] || visited[seed]) {
       continue;
     }
     std::vector<std::size_t> component;
     std::queue<std::size_t> pending;
+    bool contains_ground_seed = false;
     visited[seed] = true;
     pending.push(seed);
     while (!pending.empty()) {
       const std::size_t current_index = pending.front();
       pending.pop();
       component.push_back(current_index);
+      contains_ground_seed = contains_ground_seed || ground_seeds[current_index];
       const auto & current_point = (*downsampled)[current_index];
       const auto current_cell = worldToGrid(current_point, parameters.resolution);
       std::vector<int> neighbor_indices;
@@ -197,12 +262,18 @@ TerrainObservation classifyTerrainPoints(
       }
     }
     if (component.size() > largest_component.size()) {
-      largest_component = std::move(component);
+      largest_component = component;
+    }
+    if (contains_ground_seed && component.size() > anchored_component.size()) {
+      anchored_component = std::move(component);
     }
   }
 
+  const auto & selected_component = anchored_component.empty() ?
+    largest_component : anchored_component;
+
   std::vector<bool> ground_flags(downsampled->size(), false);
-  for (const std::size_t index : largest_component) {
+  for (const std::size_t index : selected_component) {
     ground_flags[index] = true;
   }
 
@@ -213,12 +284,7 @@ TerrainObservation classifyTerrainPoints(
     }
     const auto cell = worldToGrid((*downsampled)[index], parameters.resolution);
     const GridCell3D column{cell.x, cell.y, 0};
-    const auto found = surface_indices.find(column);
-    if (found == surface_indices.end() ||
-      (*downsampled)[index].z > (*downsampled)[found->second].z)
-    {
-      surface_indices[column] = index;
-    }
+    surface_indices[column] = index;
   }
 
   TerrainObservation observation;

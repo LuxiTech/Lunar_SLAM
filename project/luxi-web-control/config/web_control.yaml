@@ -19,19 +19,35 @@ web_control:
     enable_output: true
 
     # D1 stand/lie-down and C++ /cmd_vel bridge control shown as a web switch.
+    # Select exactly one robot. Feedback services and the bridge output topic
+    # are derived from this namespace unless explicitly overridden below.
+    robot_namespace: d15041873
     enable_d1_control: true
-    d1_fsm_topic: /d15041873/rl_controller/fsm
-    d1_controller_status_service: /d15041873/command/get_controller_status
-    d1_parameter_service: /d15041873/teleop_command/get_parameters
+    d1_fsm_topic: ""
+    d1_controller_status_service: ""
+    d1_parameter_service: ""
     d1_feedback_timeout: 3.0
 
-    # C++ IMU level calibrator controlled by the web button. USB/H30 mapping
-    # remains available when this optional /sensors service is not present.
+    # The web button starts a short-lived H30-only process, collects gravity,
+    # saves one mount quaternion per robot namespace, then releases the serial
+    # port before mapping/navigation starts its normal USB sensor chain.
     imu_level_calibration_service: /sensors/imu/calibrate_level
     imu_level_status_topic: /sensors/imu/level_calibration_status
+    imu_level_standalone_enabled: true
+    imu_level_calibration_launch_package: lunar_usb_rtabmap_bringup
+    imu_level_calibration_launch_file: usb_imu_level_calibration.launch.py
+    imu_level_calibration_sensor_setup: device/USBCameraSDK/ros2_ws/install/setup.bash
+    imu_level_calibration_workspace_setup: install/setup.bash
+    imu_level_calibration_log_path: log/luxi_web_control_imu_calibration.log
+    imu_level_calibration_store_path: maps/calibration/{robot_namespace}_camera_mount.json
+    imu_level_calibration_start_timeout: 12.0
+    imu_level_calibration_result_timeout: 20.0
+    imu_level_calibration_samples: 200
+    # Optical-frame nominal yaw: base +X forward -> camera optical +Z.
+    imu_level_camera_yaw_degrees: -90.0
 
-    # The API selects one of two explicit USB launch files: CREStereo is the
-    # CUDA-Graph high-coverage primary; VPI is the low-resource fallback.
+    # The API selects an explicit USB launch: stable CREStereo is the default,
+    # CREStereo MAX is the opt-in 10 Hz profile and VPI is the fallback.
     enable_mapping_control: true
     mapping_launch_package: lunar_usb_rtabmap_bringup
     mapping_launch_file: usb_rtabmap.launch.py
@@ -41,7 +57,24 @@ web_control:
       - rtabmap_viz:=false
       - use_imu:=true
       - planar_mode:=false
-    # H30 is the default rotation source for the primary CREStereo profile.
+      # D1 trunk rotation center -> left camera optical center. The user
+      # measured the centered stereo midpoint at (+0.20, 0, +0.20) m; add
+      # half of the calibrated 89.963 mm baseline toward robot-left.
+      - camera_x:=0.20
+      - camera_y:=0.044982
+      - camera_z:=0.20
+      # Camera is horizontal and forward-facing. These map ROS base axes
+      # (x forward, y left, z up) to the optical frame convention.
+      - camera_qx:=-0.5
+      - camera_qy:=0.5
+      - camera_qz:=-0.5
+      - camera_qw:=0.5
+    # The second D1 carries a different USB stereo module. It has no external
+    # trigger input, so its capture profile must not reuse the first module's
+    # hardware-trigger setting.
+    mapping_robot_camera_profiles:
+      - d15042176=device/USBCameraSDK/ros2_ws/src/usb_camera_driver/config/stereo_camera_d15042176.yaml
+    # H30 is the default rotation source for both CREStereo profiles.
     # Startup is rejected if the serial stream or any required axis is invalid.
     mapping_crestereo_use_imu: true
     # Retained for the device-independent launch; the USB launch continues to
@@ -56,14 +89,28 @@ web_control:
     # colored PLY and occupied voxels for immediate browser display. It never
     # enables the path follower by itself.
     enable_navigation_control: true
-    navigation_launch_package: luxi_3d_navigation
-    navigation_launch_file: saved_map_navigation.launch.py
+    # Saved-map localization must own the same USB CREStereo/H30 producer as
+    # mapping; otherwise HLoc subscribes to /sensors/rgbd with no publisher.
+    navigation_launch_package: lunar_usb_rtabmap_bringup
+    navigation_launch_file: usb_crestereo_saved_map_navigation.launch.py
+    navigation_launch_arguments:
+      - use_imu:=true
+      - camera_x:=0.20
+      - camera_y:=0.044982
+      - camera_z:=0.20
+      - camera_qx:=-0.5
+      - camera_qy:=0.5
+      - camera_qz:=-0.5
+      - camera_qw:=0.5
     navigation_rmw_implementation: rmw_fastrtps_cpp
+    navigation_sensor_setup: device/USBCameraSDK/ros2_ws/install/setup.bash
     maps_root: ""
     # Selecting a database without exported layers runs tools/export_rtabmap_octomap.sh.
     # The database must already be saved; this limits the one-shot export duration.
     map_conversion_timeout: 300.0
-    # A missing maps/hloc_maps/mapNNN index is exported and built on CUDA.
+    # Building happens only when the operator explicitly clicks "自动定位",
+    # after mapping/navigation processes have stopped. Plain map display stays
+    # light-weight while a missing index no longer makes localization unusable.
     auto_build_hloc_index: true
     hloc_index_build_timeout: 900.0
     navigation_goal_topic: /navigation/goal_pose
@@ -100,7 +147,9 @@ web_control:
 
     # Read-only RGB and RTAB-Map cloud previews for the web page.
     enable_preview: true
-    rgb_preview_topic: /left_camera/image/compressed
+    # Unified, rectified preview generated from the exact RGB-D packet used by
+    # CRE odometry. It survives raw UVC publisher restarts between map runs.
+    rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
     cloud_preview_topic: /rtabmap/cloud_map
     max_cloud_points: 0
     # Canvas preview only: zero forwards every finite point. Set a positive cap

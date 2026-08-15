@@ -34,6 +34,18 @@ TEST(ImuLevelCalibrator, RecoversCameraRollAndPitch)
   EXPECT_NEAR(mount.pitch, expected_pitch, kTolerance);
 }
 
+TEST(ImuLevelCalibrator, OpticalFrameNominalRollIsNotRejectedAsTilt)
+{
+  const luxi_adapter::MountAngles optical_mount{-M_PI / 2.0, 0.0};
+  EXPECT_NEAR(
+    luxi_adapter::mount_tilt_from_nominal(
+      optical_mount, -M_PI / 2.0, 0.0),
+    0.0, kTolerance);
+  EXPECT_NEAR(
+    luxi_adapter::mount_tilt_from_nominal(optical_mount, 0.0, 0.0),
+    M_PI / 2.0, kTolerance);
+}
+
 TEST(ImuLevelCalibrator, RejectsMissingGravityVector)
 {
   EXPECT_THROW(

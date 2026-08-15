@@ -261,6 +261,17 @@ void SensorAdapter::publish_split_outputs(const rtabmap_msgs::msg::RGBDImage & m
 void SensorAdapter::publish_rgbd_input(rtabmap_msgs::msg::RGBDImage::UniquePtr message)
 {
   normalize_rgbd_headers(*message);
+  // The learned USB path arrives as one atomic RGB-D message, so there is no
+  // separate raw-color callback from which to create the browser preview.
+  // Generate it from the exact rectified color image that is forwarded to
+  // odometry. This keeps the web preview source-aligned with mapping and
+  // avoids a long-lived subscription to restartable 1080p UVC publishers.
+  if (generate_compressed_color_from_raw_ && compressed_color_publisher_ &&
+    compressed_color_publisher_->get_subscription_count() > 0)
+  {
+    publish_generated_compressed_color(
+      std::make_shared<const sensor_msgs::msg::Image>(message->rgb));
+  }
   publish_split_outputs(*message);
   rgbd_publisher_->publish(std::move(message));
 }

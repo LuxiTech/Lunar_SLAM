@@ -13,13 +13,22 @@ stereo_node:
     trigger_mode: hardware
     # Full run04 Kalibr result: t_imu = t_camera + offset.
     timestamp_offset_sec: -0.09126181637751751
-    # Mixed indoor/window mapping profile measured in the current venue.
-    # Keep the stable 10 ms exposure and use the current-venue gain A/B winner.
-    # 100/50 gave 6.61% valid 0.4-3 m depth versus 6.17% at 100/40, with 19%
-    # more texture response and only 2.71% highlight clipping. Keep clear of
-    # the measured exposure discontinuity at 180 and gain discontinuity near 70.
+    # Run one bounded controller for both independent UVC sensors. Native AE
+    # would let left/right exposure wander independently and may use a long
+    # exposure while D1 is walking. Keep clear of this module's measured
+    # exposure discontinuity at 180 and gain discontinuity near 70.
     auto_exposure: false
     exposure_absolute: 100
     gain: 50
+    synchronized_auto_exposure: true
+    auto_exposure_target_luma: 85
+    auto_exposure_luma_deadband: 8
+    auto_exposure_update_interval_frames: 5
+    auto_exposure_min_exposure_absolute: 20
+    auto_exposure_max_exposure_absolute: 150
+    auto_exposure_min_gain: 0
+    auto_exposure_max_gain: 68
+    auto_exposure_max_exposure_step: 10
+    auto_exposure_max_gain_step: 4
     left_frame_id: left_camera_optical_frame
     right_frame_id: right_camera_optical_frame

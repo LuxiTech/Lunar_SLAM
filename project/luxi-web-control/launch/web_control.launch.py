@@ -50,7 +50,11 @@ def generate_launch_description():
                 LaunchConfiguration("config"),
                 {
                     "cmd_vel_topic": ParameterValue(
-                        LaunchConfiguration("cmd_vel_topic"),
+                        LaunchConfiguration("web_cmd_vel_topic"),
+                        value_type=str,
+                    ),
+                    "robot_namespace": ParameterValue(
+                        LaunchConfiguration("robot_namespace"),
                         value_type=str,
                     ),
                     "bind_address": ParameterValue(
@@ -80,6 +84,15 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("config", default_value=default_config),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
+        # Keep a distinct name for the deferred OnProcessExit action. When
+        # this launch is included from the D1 launch, a same-named outer
+        # cmd_vel_topic would otherwise replace the scoped manual input after
+        # the ROS daemon reset completes.
+        DeclareLaunchArgument(
+            "web_cmd_vel_topic",
+            default_value=LaunchConfiguration("cmd_vel_topic"),
+        ),
+        DeclareLaunchArgument("robot_namespace", default_value="d15041873"),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
         DeclareLaunchArgument("http_port", default_value="8080"),
         DeclareLaunchArgument(

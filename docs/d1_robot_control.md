@@ -3,17 +3,16 @@
 ## 1. 已确认接口
 
 本方案以 `d1/` 中的交付资料和厂家官方
-`DDTRobot/D1-ROS2-SDK-Demo` 为准。当前设备参数为：
+`DDTRobot/D1-ROS2-SDK-Demo` 为准。当前登记设备为：
 
-| 项目 | 值 |
-| --- | --- |
-| D1 有线 IP | `192.168.123.49/24` |
-| 控制机有线 IP | `192.168.123.51/24` |
-| ROS Domain ID | `42` |
-| RMW | `rmw_fastrtps_cpp` |
-| 机器人 namespace | `d15041873` |
-| 厂家控制输入 | `/d15041873/command/user_command` |
-| 消息类型 | `ddt_msgs/msg/UserCommand` |
+| 机器人 | `ROBOT_NS` | 有线 IP |
+| --- | --- | --- |
+| 第一台 | `d15041873` | `192.168.123.49/24` |
+| 第二台 | `d15042176` | `192.168.123.49/24` |
+
+控制机为 `192.168.123.51/24`，两台均使用 ROS Domain ID `42`、
+`rmw_fastrtps_cpp` 和 `ddt_msgs/msg/UserCommand`。两台有相同的固定有线 IP，不能靠 IP
+识别；一次只能直连其中一台，并以该机 DDS 暴露的 `ROBOT_NS` 作为控制身份。
 
 厂家消息的有效字段为 `fsm_mode`、`pose` 和 `twist`。本工程只将 `/cmd_vel` 的
 `linear.x` 与 `angular.z` 映射到 `UserCommand.twist`，不把 SLAM 地图位姿写入机身
@@ -57,7 +56,7 @@ project/slam_d1_bridge
 扫描 `3parts` 下其他大型依赖：
 
 ```bash
-cd /home/nvidia/Desktop/lunar_slam
+cd /home/nvidia/Desktop/lunar_-slam
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install \
   --base-paths project 3parts/D1-ROS2-SDK-Demo/ddt_msgs \
@@ -96,7 +95,7 @@ ros2 launch slam_d1_bridge slam_d1_bridge.launch.py namespace:=test_d1
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/nvidia/Desktop/lunar_slam/install/setup.bash
+source /home/nvidia/Desktop/lunar_-slam/install/setup.bash
 export ROS_DOMAIN_ID=142
 ros2 topic echo /test_d1/command/user_command
 ```
@@ -140,14 +139,56 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py \
 推荐使用一键脚本同时启动网页、开放 SDK 控制并启动 D1 桥：
 
 ```bash
-/home/nvidia/Desktop/lunar_slam/scripts/start_d1_web_control.sh
+/home/nvidia/Desktop/lunar_-slam/scripts/start_d1_web_control.sh \
+  --robot-ns d15041873 --robot-ip 192.168.123.49
 ```
+
+机器人不会被自动选择。同一 DDS 网络可能同时发现多个 D1，因此必须用 `--robot-ns`
+指定目标；`--robot-ip` 用于启动前的有线连通性检查。两项省略时保留当前默认值
+`d15041873` 和 `192.168.123.49`。网页状态接口 `/api/status` 会返回实际使用的
+`robot_namespace`，已有网页实例指向其他机器人时一键脚本会拒绝继续。
+
+第二台机器人的启动命令为：
+
+```bash
+/home/nvidia/Desktop/lunar_-slam/scripts/start_d1_web_control.sh \
+  --robot-ns d15042176 --robot-ip 192.168.123.49
+```
+
+网页节点会把所选值同步为 `slam_d1_bridge` 启停子进程的
+`ROBOT_NS=d15042176`，因此桥的输出自动解析到
+`/d15042176/command/user_command`，PID 文件也独立为
+`/tmp/slam_d1_bridge_d15042176.pid`。
+
+若第二台能 ping 通但提示 `No D1 DDS namespace was discovered`，说明以太网链路存在，
+但第二台控制器没有在 Domain 42 对外广播 ROS 2 图。此时本地 `ROBOT_NS` 已经同步，
+不能绕过订阅者门禁；应在第二台维护终端检查：
+
+```bash
+grep -E '^(ROS_DOMAIN_ID|ROS_LOCALHOST_ONLY|RMW_IMPLEMENTATION|ROBOT_NS)=' \
+  /opt/d1_ros2/ros2.env /opt/d1_ros2/namespace.sh 2>/dev/null
+systemctl is-active d1_bringup.service
+pid=$(systemctl show d1_bringup.service -p MainPID --value)
+sudo sh -c "tr '\0' '\n' < /proc/${pid}/environ | \
+  grep -E '^(ROS_DOMAIN_ID|ROS_LOCALHOST_ONLY|RMW_IMPLEMENTATION|ROBOT_NS)='"
+```
+
+期望值为 `ROBOT_NS=d15042176`、`ROS_DOMAIN_ID=42`、
+`ROS_LOCALHOST_ONLY=0`、`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`。只有机器人安全趴下、
+有人持物理急停时，才可在修正配置后重启 `d1_bringup.service`。
+
+如果 NX 能发现目标命名空间和 `robot_state_publisher`，但缺少
+`/command/user_command` 订阅者，通常是机器人开机时 `d1_bringup.service` 早于有线
+网卡完成地址配置，导致控制进程的 Fast DDS participant 只绑定了回环接口。一键脚本
+会在远端确认命名空间一致且 FSM 为 `idle` 后，利用 systemd 的 `Restart=on-failure`
+安全重建服务；不会发送运动命令。维护调试时可附加 `--no-dds-recovery` 禁用该行为。
 
 首次受监护联调可附加 `--motion-test`，依次执行 1 秒、最大名义位移 5 cm 的前后运动和
 1 秒的左右低速转动：
 
 ```bash
-/home/nvidia/Desktop/lunar_slam/scripts/start_d1_web_control.sh --motion-test
+/home/nvidia/Desktop/lunar_-slam/scripts/start_d1_web_control.sh \
+  --robot-ns d15041873 --robot-ip 192.168.123.49 --motion-test
 ```
 
 脚本异常时会先发送网页停止命令，再调用 D1 停止脚本让机器人趴下。正常完成后网页和
@@ -160,7 +201,7 @@ export ROBOT_NS=d15041873
 export ROS_DOMAIN_ID=42
 export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export SLAM_D1_WORKSPACE=/home/nvidia/Desktop/lunar_slam
+export SLAM_D1_WORKSPACE=/home/nvidia/Desktop/lunar_-slam
 
 ros2 run slam_d1_bridge start_slam_d1_bridge.sh
 ```

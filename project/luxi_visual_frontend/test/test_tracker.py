@@ -4,7 +4,11 @@ import numpy as np
 from luxi_visual_frontend.feature_backend import NeuralFeatures
 from luxi_visual_frontend.geometry import RelativePose, invert_transform
 import luxi_visual_frontend.tracker as tracker_module
-from luxi_visual_frontend.tracker import TrackerConfig, VisualOdometryTracker
+from luxi_visual_frontend.tracker import (
+    TrackerConfig,
+    VisualOdometryTracker,
+    constrain_camera_pose_vertical_translation,
+)
 
 
 class SequenceBackend:
@@ -27,6 +31,30 @@ class MatchSequenceBackend(SequenceBackend):
 
     def match(self, _first, _second):
         return next(self.matches)
+
+
+def test_vertical_constraint_locks_base_height_but_preserves_attitude():
+    base_from_camera = np.eye(4)
+    base_from_camera[:3, 3] = (0.20, 0.045, 0.20)
+    base_from_camera[:3, :3], _ = cv2.Rodrigues(
+        np.array([0.12, -0.08, 0.03], dtype=np.float64)
+    )
+    odom_from_base = np.eye(4)
+    odom_from_base[:3, 3] = (1.3, -0.4, -0.29)
+    odom_from_base[:3, :3], _ = cv2.Rodrigues(
+        np.array([0.04, -0.06, 0.7], dtype=np.float64)
+    )
+
+    constrained_camera = constrain_camera_pose_vertical_translation(
+        odom_from_base @ base_from_camera, base_from_camera
+    )
+    constrained_base = constrained_camera @ invert_transform(base_from_camera)
+
+    np.testing.assert_allclose(constrained_base[:2, 3], (1.3, -0.4), atol=1e-12)
+    assert abs(constrained_base[2, 3]) < 1e-12
+    np.testing.assert_allclose(
+        constrained_base[:3, :3], odom_from_base[:3, :3], atol=1e-12
+    )
 
 
 def _features(keypoints):
@@ -230,25 +258,27 @@ def test_tracker_keeps_visual_yaw_when_full_imu_rotation_disagrees(monkeypatch):
     )
     inliers = np.arange(len(pixels), dtype=np.int64)
     visual_pose = RelativePose(np.eye(4), inliers, 0.1)
-    imu_pose = np.eye(4)
-    imu_pose[:3, :3], _ = cv2.Rodrigues(
-        np.array([0.0, 0.0, np.deg2rad(-20.0)])
-    )
     monkeypatch.setattr(
         tracker_module, "estimate_relative_pose", lambda *_args: visual_pose
     )
+
+    def fixed_rotation_pose(*args):
+        transform = np.eye(4)
+        transform[:3, :3] = args[4]
+        return RelativePose(transform, inliers, 0.1)
+
     monkeypatch.setattr(
         tracker_module,
         "estimate_translation_with_rotation",
-        lambda *_args: RelativePose(imu_pose, inliers, 0.1),
+        fixed_rotation_pose,
     )
     depth = np.full((480, 640), 2000, dtype=np.uint16)
     intrinsics = np.array(
         [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
     )
     rgb = np.zeros((480, 640, 3), dtype=np.uint8)
-    imu_yaw_20deg, _ = cv2.Rodrigues(
-        np.array([0.0, 0.0, np.deg2rad(20.0)])
+    imu_yaw_4deg, _ = cv2.Rodrigues(
+        np.array([0.0, 0.0, np.deg2rad(4.0)])
     )
 
     tracker.process(
@@ -257,15 +287,143 @@ def test_tracker_keeps_visual_yaw_when_full_imu_rotation_disagrees(monkeypatch):
     )
     result = tracker.process(
         rgb, depth, intrinsics, 0.001, 1.1,
-        world_from_camera_rotation=imu_yaw_20deg,
+        world_from_camera_rotation=imu_yaw_4deg,
     )
 
     assert result.accepted
-    assert result.pose_source == "PNP"
-    assert result.reason == "ACCEPTED"
-    assert np.isclose(np.rad2deg(result.imu_rotation_error), 20.0)
+    assert result.pose_source == "IMU_PNP"
+    assert result.reason == "ACCEPTED_IMU_PNP"
+    assert np.isclose(np.rad2deg(result.imu_rotation_error), 4.0)
     assert np.isclose(result.imu_gravity_error, 0.0)
     np.testing.assert_allclose(result.odom_from_camera, np.eye(4), atol=1e-6)
+
+
+def test_tracker_holds_pose_for_stationary_images_with_imu(monkeypatch):
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
+    )
+    tracker = VisualOdometryTracker(
+        SequenceBackend([_features(pixels), _features(pixels)]),
+        TrackerConfig(
+            minimum_keypoints=8,
+            minimum_matches=8,
+            minimum_depth_matches=8,
+            minimum_inliers=6,
+            minimum_grid_coverage=0.0,
+            minimum_depth_consistency_matches=6,
+        ),
+    )
+    inliers = np.arange(len(pixels), dtype=np.int64)
+    noisy_translation = np.eye(4)
+    noisy_translation[:3, 3] = (0.04, -0.02, 0.03)
+    monkeypatch.setattr(
+        tracker_module,
+        "estimate_relative_pose",
+        lambda *_args: RelativePose(noisy_translation, inliers, 0.2),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.0,
+        world_from_camera_rotation=np.eye(3),
+    )
+    result = tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.1,
+        world_from_camera_rotation=np.eye(3),
+    )
+
+    assert result.accepted
+    assert result.pose_source == "STATIONARY"
+    assert result.reason == "ACCEPTED_STATIONARY"
+    np.testing.assert_allclose(result.odom_from_camera, np.eye(4), atol=1e-9)
+
+
+def test_tracker_uses_zero_motion_command_to_reject_crestereo_drift(monkeypatch):
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
+    )
+    shifted_pixels = pixels + np.array([1.0, 0.0], dtype=np.float32)
+    config = TrackerConfig(
+        minimum_keypoints=8,
+        minimum_matches=8,
+        minimum_depth_matches=8,
+        minimum_inliers=6,
+        minimum_grid_coverage=0.0,
+        minimum_depth_consistency_matches=6,
+        stationary_maximum_median_pixel_motion=0.75,
+        stationary_hint_maximum_median_pixel_motion=2.0,
+        stationary_hint_maximum_translation=0.05,
+    )
+    inliers = np.arange(len(pixels), dtype=np.int64)
+    noisy_translation = np.eye(4)
+    noisy_translation[0, 3] = 0.04
+    monkeypatch.setattr(
+        tracker_module,
+        "estimate_relative_pose",
+        lambda *_args: RelativePose(noisy_translation, inliers, 0.2),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    hinted_tracker = VisualOdometryTracker(
+        SequenceBackend([_features(pixels), _features(shifted_pixels)]), config
+    )
+    hinted_tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.0,
+        world_from_camera_rotation=np.eye(3),
+    )
+    held = hinted_tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.1,
+        world_from_camera_rotation=np.eye(3),
+        stationary_hint=True,
+    )
+
+    moving_tracker = VisualOdometryTracker(
+        SequenceBackend([_features(pixels), _features(shifted_pixels)]), config
+    )
+    moving_tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.0,
+        world_from_camera_rotation=np.eye(3),
+    )
+    moving = moving_tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.1,
+        world_from_camera_rotation=np.eye(3),
+        stationary_hint=False,
+    )
+
+    assert held.accepted and held.reason == "ACCEPTED_STATIONARY_HINT"
+    assert held.pose_source == "STATIONARY_HINT"
+    assert held.median_pixel_motion == 1.0
+    np.testing.assert_allclose(held.odom_from_camera, np.eye(4), atol=1e-9)
+    assert moving.accepted and moving.reason == "ACCEPTED_IMU_PNP"
+    assert moving.pose_source == "IMU_PNP"
+    assert abs(float(moving.odom_from_camera[0, 3])) > 0.03
+
+
+def test_gravity_alignment_corrects_tilt_without_using_imu_yaw():
+    visual_yaw, _ = cv2.Rodrigues(
+        np.array([0.0, 0.0, np.deg2rad(7.0)])
+    )
+    imu_tilt, _ = cv2.Rodrigues(
+        np.array([np.deg2rad(5.0), np.deg2rad(-3.0), np.deg2rad(20.0)])
+    )
+    aligned = VisualOdometryTracker._align_visual_rotation_to_gravity(
+        visual_yaw, np.eye(3), imu_tilt
+    )
+    target_up = imu_tilt.T @ np.array([0.0, 0.0, 1.0])
+
+    np.testing.assert_allclose(
+        aligned @ np.array([0.0, 0.0, 1.0]), target_up, atol=1e-7
+    )
+    np.testing.assert_allclose(aligned.T @ aligned, np.eye(3), atol=1e-7)
+    assert np.isclose(np.linalg.det(aligned), 1.0)
 
 
 def test_tracker_rejects_jump_hidden_by_reseeded_internal_pose(monkeypatch):

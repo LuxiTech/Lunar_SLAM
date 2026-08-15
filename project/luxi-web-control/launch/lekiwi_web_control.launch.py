@@ -38,13 +38,17 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
+        DeclareLaunchArgument("robot_namespace", default_value="d15041873"),
         DeclareLaunchArgument(
             "standard_cmd_vel_topic",
             default_value="/d1/cmd_vel_standard",
         ),
+        DeclareLaunchArgument(
+            "web_cmd_vel_topic",
+            default_value="/d1/cmd_vel_standard",
+        ),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
         DeclareLaunchArgument("http_port", default_value="8080"),
-        DeclareLaunchArgument("reset_ros_daemon", default_value="true"),
         DeclareLaunchArgument("reset_ros_daemon", default_value="true"),
         DeclareLaunchArgument(
             "config",
@@ -55,6 +59,9 @@ def generate_launch_description():
             ),
         ),
         SetEnvironmentVariable("ROS_DOMAIN_ID", "42"),
+        SetEnvironmentVariable(
+            "ROBOT_NS", LaunchConfiguration("robot_namespace")
+        ),
         SetEnvironmentVariable("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         SetEnvironmentVariable(
             "ROS_AUTOMATIC_DISCOVERY_RANGE",
@@ -69,6 +76,12 @@ def generate_launch_description():
                 launch_arguments={
                     "cmd_vel_topic": LaunchConfiguration(
                         "standard_cmd_vel_topic"
+                    ),
+                    "web_cmd_vel_topic": LaunchConfiguration(
+                        "web_cmd_vel_topic"
+                    ),
+                    "robot_namespace": LaunchConfiguration(
+                        "robot_namespace"
                     ),
                     "bind_address": LaunchConfiguration("bind_address"),
                     "http_port": LaunchConfiguration("http_port"),

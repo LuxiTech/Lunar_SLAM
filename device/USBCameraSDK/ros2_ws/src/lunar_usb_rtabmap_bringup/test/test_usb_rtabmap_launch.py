@@ -60,8 +60,50 @@ def test_camera_driver_auto_discovers_replugged_usb_pair():
     assert config["auto_exposure"] is False
     assert config["exposure_absolute"] == 100
     assert config["gain"] == 50
+    assert config["synchronized_auto_exposure"] is True
+    assert config["auto_exposure_max_exposure_absolute"] == 150
+    assert config["auto_exposure_max_gain"] == 68
     assert 'kCameraModalias[] = "usb:v32E4p2234"' in source
     assert 'readTextFile(entry.path() / "index") != "0"' in source
+    assert "updateSynchronizedAutoExposure" in source
+
+
+def test_second_d1_camera_profile_uses_video_mode_and_current_usb_ports():
+    driver_root = PACKAGE_ROOT.parent / "usb_camera_driver"
+    source = (driver_root / "src" / "stereo_node.cpp").read_text(
+        encoding="utf-8"
+    )
+    parameters = yaml.safe_load(
+        (driver_root / "config" / "stereo_camera_d15042176.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["stereo_node"]["ros__parameters"]
+
+    assert parameters["trigger_mode"] == "video"
+    assert "0:2.3:1.0-video-index0" in parameters["left_device"]
+    assert "0:2.4:1.0-video-index0" in parameters["right_device"]
+    assert parameters["auto_discover_devices"] is True
+    assert parameters["auto_exposure"] is False
+    assert parameters["synchronized_auto_exposure"] is True
+    assert parameters["auto_exposure_target_luma"] == 60
+    assert parameters["auto_exposure_update_interval_frames"] == 10
+    assert parameters["auto_exposure_max_exposure_absolute"] == 150
+    assert parameters["auto_exposure_max_gain"] == 58
+    assert "left_.setManualExposureGain" in source
+    assert "right_.setManualExposureGain" in source
+    # Independent UVC dequeue calls may be tens of milliseconds apart even
+    # when the kernel reports the two frame/SOE timestamps as simultaneous.
+    assert "pairingTimestamp(left_metadata_)" in source
+    assert "metadata.v4l2_timestamp_ns" in source
+
+
+def test_usb_mapping_forwards_camera_profile_and_calibration():
+    text = LAUNCH_PATH.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument(\n            "camera_params"' in text
+    assert 'DeclareLaunchArgument(\n            "calibration_file"' in text
+    assert '"camera_params": LaunchConfiguration("camera_params")' in text
+    assert '"calibration_file": LaunchConfiguration("calibration_file")' in text
 
 
 def test_camera_exit_stops_mapping_chain_for_web_status():
@@ -151,6 +193,18 @@ def test_vpi_sensor_actions_accept_runtime_imu_parameter():
     actions = module._sensor_actions()
 
     assert len(actions) == 3
+
+
+def test_d1_mount_uses_left_lens_offset_from_centered_stereo_rig():
+    text = LAUNCH_PATH.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument("camera_x", default_value="0.20")' in text
+    assert 'DeclareLaunchArgument("camera_y", default_value="0.044982")' in text
+    assert 'DeclareLaunchArgument("camera_z", default_value="0.20")' in text
+    assert 'DeclareLaunchArgument("camera_qx", default_value="-0.5")' in text
+    assert 'DeclareLaunchArgument("camera_qy", default_value="0.5")' in text
+    assert 'DeclareLaunchArgument("camera_qz", default_value="-0.5")' in text
+    assert 'DeclareLaunchArgument("camera_qw", default_value="0.5")' in text
 
 
 def test_removed_mapping_modes_are_rejected():

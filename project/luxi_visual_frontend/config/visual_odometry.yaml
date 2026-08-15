@@ -44,6 +44,9 @@ luxi_visual_frontend:
     # Set by profiles whose upstream learned depth node already publishes at
     # the desired rate. Generic camera profiles retain timestamp throttling.
     upstream_rate_limited: false
+    # A higher hardware-profile value reduces latest-frame pickup delay when
+    # the learned tracker can nearly keep pace with its camera.
+    sensor_poll_rate_multiplier: 2.0
     # RTAB-Map consumes one keyframe candidate per second. Keep odometry at
     # 5 Hz, but avoid sending redundant full-resolution RGB-D descriptors.
     rgbd_features_rate: 1.0
@@ -92,6 +95,19 @@ luxi_visual_frontend:
     # it agrees with PnP. Gravity is checked independently so visual yaw wins.
     maximum_imu_rotation_error_deg: 12.0
     maximum_imu_gravity_error_deg: 10.0
+    # Optional fresh Twist command used only to suppress metric-depth flicker
+    # while a ground robot is explicitly stopped. Visual and H30 checks still
+    # have to agree, so a stale zero command cannot freeze real motion.
+    motion_hint_topic: ""
+    motion_hint_timeout: 0.5
+    motion_hint_stationary_linear_speed: 0.01
+    motion_hint_stationary_angular_speed: 0.02
+    stationary_maximum_median_pixel_motion: 0.75
+    stationary_maximum_rotation_deg: 0.30
+    stationary_hint_maximum_median_pixel_motion: 2.0
+    stationary_hint_maximum_translation: 0.05
+    # CRE ground profiles may lock base Z while preserving H30 roll/pitch.
+    constrain_vertical_translation: false
 
     # Optional RTAB-only depth layering. Zero disables it for generic cameras.
     mapping_depth_minimum: 0.0
@@ -100,3 +116,15 @@ luxi_visual_frontend:
     mapping_depth_medium_sparse_pixel_step: 1
     mapping_depth_far_maximum: 0.0
     mapping_depth_far_sparse_pixel_step: 1
+    # CREStereo profiles override these for tracking and RTAB depth. H30
+    # gravity repairs the learned model's curved floor without assuming the
+    # walking base remains level.
+    mapping_ground_prior_enabled: false
+    mapping_ground_camera_height: 0.0
+    mapping_ground_below_tolerance: 0.12
+    mapping_ground_surface_tolerance: 0.0
+    mapping_ground_maximum_correction: 0.0
+    mapping_ground_minimum_up_alignment: 0.0
+    mapping_ground_minimum_row_ratio: 0.0
+    mapping_ground_reject_unverified_below_plane: false
+    mapping_ground_repair_all_below_plane: false

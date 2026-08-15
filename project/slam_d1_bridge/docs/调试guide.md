@@ -88,7 +88,7 @@ ping 192.168.123.50
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/nvidia/Desktop/lunar_slam/install/setup.bash
+source /home/nvidia/Desktop/lunar_-slam/install/setup.bash
 
 export ROS_DOMAIN_ID=42
 export ROS_LOCALHOST_ONLY=0
@@ -158,7 +158,7 @@ ros2 launch slam_d1_bridge slam_d1_bridge.launch.py \
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/nvidia/Desktop/lunar_slam/install/setup.bash
+source /home/nvidia/Desktop/lunar_-slam/install/setup.bash
 export ROS_DOMAIN_ID=42
 export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp

@@ -93,6 +93,8 @@ def _sensor_actions():
         ),
         launch_arguments={
             "start_imu": use_imu_argument,
+            "camera_params": LaunchConfiguration("camera_params"),
+            "calibration_file": LaunchConfiguration("calibration_file"),
         }.items(),
     )
     adapter_config = PathJoinSubstitution([
@@ -302,6 +304,24 @@ def _common_launch_arguments():
         DeclareLaunchArgument("camera_wait_timeout", default_value="60.0"),
         DeclareLaunchArgument("wait_for_camera", default_value="true"),
         DeclareLaunchArgument(
+            "camera_params",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("usb_camera_driver"),
+                "config",
+                "stereo_camera.yaml",
+            ]),
+            description="Stereo capture profile for the installed camera module.",
+        ),
+        DeclareLaunchArgument(
+            "calibration_file",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("usb_camera_driver"),
+                "config",
+                "stereo_opencv.yaml",
+            ]),
+            description="Metric intrinsics and stereo extrinsics for this module.",
+        ),
+        DeclareLaunchArgument(
             "use_imu",
             default_value="true",
             description=(
@@ -320,9 +340,13 @@ def _common_launch_arguments():
         DeclareLaunchArgument(
             "camera_frame", default_value="left_camera_optical_frame"
         ),
-        DeclareLaunchArgument("camera_x", default_value="0.0"),
-        DeclareLaunchArgument("camera_y", default_value="0.0"),
-        DeclareLaunchArgument("camera_z", default_value="0.0"),
+        # D1 installation measured from the trunk rotation center to the
+        # stereo midpoint: +0.20 m forward and +0.20 m upward.  This TF owns
+        # the left optical frame, which is half the calibrated 89.963 mm
+        # baseline to the robot's left of the centered stereo midpoint.
+        DeclareLaunchArgument("camera_x", default_value="0.20"),
+        DeclareLaunchArgument("camera_y", default_value="0.044982"),
+        DeclareLaunchArgument("camera_z", default_value="0.20"),
         DeclareLaunchArgument("camera_qx", default_value="-0.5"),
         DeclareLaunchArgument("camera_qy", default_value="0.5"),
         DeclareLaunchArgument("camera_qz", default_value="-0.5"),

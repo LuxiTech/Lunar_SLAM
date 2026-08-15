@@ -54,9 +54,21 @@ export LD_LIBRARY_PATH="$(printf '%s' "${LD_LIBRARY_PATH:-}" \
 mkdir -p "${output_directory}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 output_name="luxi_rtab_map_${timestamp}"
+output_path="${output_directory}/${output_name}_cloud.ply"
+safe_output_path="${output_directory}/${output_name}_finite_cloud.ply"
+cloud_filter="${workspace}/tools/map_cloud_filter/map_cloud_filter"
+
+if [[ ! -x "${cloud_filter}" ]]; then
+  echo "Finite point-cloud filter is missing: ${cloud_filter}" >&2
+  exit 4
+fi
 
 # Keep this aligned with the 4x4 / 8x8 CREStereo far-depth lattices. Decimation
 # 2 preserves every far sample; decimation 4 would retain only one quarter.
+# Do not run rtabmap-export's radius filter here: it builds a PCL KD-tree on
+# each organized frame before rejecting invalid XYZ samples and aborts when a
+# depth frame contains NaN/Inf. The second stage below first removes non-finite
+# points and then applies the same 0.35 m / 3-neighbor filter safely.
 rtabmap-export \
   --cloud \
   --opt 0 \
@@ -65,16 +77,22 @@ rtabmap-export \
   --min_range 0.35 \
   --max_range 10.0 \
   --edge_bleeding_error 0.10 \
-  --noise_radius 0.35 \
-  --noise_k 3 \
   --output "${output_name}" \
   --output_dir "${output_directory}" \
   "${database_path}"
 
-output_path="${output_directory}/${output_name}_cloud.ply"
 if [[ ! -s "${output_path}" ]]; then
   echo "The database has no exportable odometry poses: ${database_path}" >&2
-  exit 4
+  exit 5
 fi
+
+"${cloud_filter}" \
+  "${output_path}" "${safe_output_path}" \
+  --mean-k 0 \
+  --radius 0.35 \
+  --min-neighbors 3 \
+  --cluster-tolerance 0 \
+  --min-cluster-size 0
+mv -f "${safe_output_path}" "${output_path}"
 
 echo "Exported 3D map: ${output_path}"

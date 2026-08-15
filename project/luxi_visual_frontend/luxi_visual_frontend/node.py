@@ -7,12 +7,13 @@ from collections import deque
 import copy
 import math
 import threading
+import time
 from typing import Any
 
 import cv2
 from cv_bridge import CvBridge
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
@@ -193,6 +194,172 @@ def _tiered_mapping_depth(
     return output
 
 
+def _apply_gravity_ground_plane_prior(
+    depth: np.ndarray,
+    depth_scale: float,
+    intrinsics: np.ndarray,
+    world_from_camera_rotation: np.ndarray | None,
+    camera_height: float,
+    below_ground_tolerance: float,
+    minimum_depth: float,
+    maximum_depth: float,
+    surface_tolerance: float = 0.0,
+    maximum_correction: float = 0.0,
+    minimum_up_alignment: float = 0.0,
+    minimum_row_ratio: float = 0.0,
+    reject_unverified_below_plane: bool = False,
+    repair_all_below_plane: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Move floor-like and impossible returns to the gravity-aligned floor.
+
+    The synchronized H30 attitude supplies gravity in the optical frame, so
+    this remains valid while a legged base pitches or rolls. Existing returns
+    close to the measured plane are snapped to it, and physically impossible
+    returns slightly below it are repaired. Objects higher than
+    ``surface_tolerance`` and unknown pixels are preserved. A positive
+    ``maximum_correction`` prevents a gross stereo error from being stretched
+    onto the floor across an arbitrarily long ray. A positive
+    ``minimum_up_alignment`` additionally requires the local 3-D surface
+    normal to agree with gravity, preventing walls and obstacle faces from
+    being classified as floor.
+    """
+    corrected_mask = np.zeros(np.asarray(depth).shape, dtype=bool)
+    if world_from_camera_rotation is None or camera_height <= 0.0:
+        return depth, corrected_mask
+    if (
+        depth_scale <= 0.0
+        or minimum_depth < 0.0
+        or maximum_depth <= minimum_depth
+        or below_ground_tolerance < 0.0
+        or surface_tolerance < 0.0
+        or maximum_correction < 0.0
+        or not 0.0 <= minimum_up_alignment <= 1.0
+        or not 0.0 <= minimum_row_ratio < 1.0
+    ):
+        raise ValueError("invalid gravity ground-plane depth configuration")
+    image = np.asarray(depth)
+    if image.ndim != 2 or image.size == 0:
+        raise ValueError("gravity ground-plane prior requires a non-empty depth image")
+    matrix = np.asarray(intrinsics, dtype=np.float64)
+    rotation = np.asarray(world_from_camera_rotation, dtype=np.float64)
+    if matrix.shape != (3, 3) or rotation.shape != (3, 3):
+        raise ValueError("gravity ground-plane prior requires 3x3 matrices")
+    if not np.all(np.isfinite(matrix)) or not np.all(np.isfinite(rotation)):
+        raise ValueError("gravity ground-plane matrices must be finite")
+    fx, fy = float(matrix[0, 0]), float(matrix[1, 1])
+    cx, cy = float(matrix[0, 2]), float(matrix[1, 2])
+    if fx <= 0.0 or fy <= 0.0:
+        raise ValueError("gravity ground-plane prior requires positive focal lengths")
+
+    # world_from_camera maps optical vectors into the gravity-aligned world.
+    # Express world-down in the optical frame and intersect each image ray
+    # with the plane one measured camera height below the optical center.
+    camera_down = rotation.T @ np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    rows = (np.arange(image.shape[0], dtype=np.float32)[:, None] - cy) / fy
+    columns = (np.arange(image.shape[1], dtype=np.float32)[None, :] - cx) / fx
+    denominator = (
+        camera_down[0] * columns
+        + camera_down[1] * rows
+        + camera_down[2]
+    )
+    metric = image.astype(np.float32) * depth_scale
+    down_distance = metric * denominator
+    plane_error = down_distance - camera_height
+    physically_below_floor = plane_error > below_ground_tolerance
+    below_floor = physically_below_floor.copy()
+    if maximum_correction > 0.0:
+        below_floor &= plane_error <= maximum_correction
+    visible_plane = (
+        np.isfinite(metric)
+        & (image > 0)
+        & (denominator > 1e-6)
+    )
+    corrected_mask = (
+        visible_plane
+        & (
+            below_floor
+            | (np.abs(plane_error) <= surface_tolerance)
+        )
+    )
+    expected = np.divide(
+        camera_height,
+        denominator,
+        out=np.zeros_like(denominator, dtype=np.float64),
+        where=denominator > 1e-6,
+    )
+    expected_in_range = (
+        (expected >= minimum_depth)
+        & (expected <= maximum_depth)
+    )
+    corrected_mask &= expected_in_range
+    eligible_below_floor = visible_plane & physically_below_floor & expected_in_range
+    if minimum_row_ratio > 0.0:
+        first_row = int(math.floor(image.shape[0] * minimum_row_ratio))
+        corrected_mask[:first_row, :] = False
+        eligible_below_floor[:first_row, :] = False
+    if minimum_up_alignment > 0.0:
+        # Central 3-D differences reject depth discontinuities naturally and
+        # let smooth, curved CRE floor estimates be recognized by their local
+        # upward normal. Unknown neighbors never create a synthetic surface.
+        rays = np.stack(
+            (
+                np.broadcast_to(columns, image.shape),
+                np.broadcast_to(rows, image.shape),
+                np.ones(image.shape, dtype=np.float32),
+            ),
+            axis=2,
+        )
+        points = rays * metric[:, :, None]
+        horizontal = np.zeros_like(points)
+        vertical = np.zeros_like(points)
+        horizontal[:, 1:-1] = points[:, 2:] - points[:, :-2]
+        vertical[1:-1, :] = points[2:, :] - points[:-2, :]
+        normals = np.cross(horizontal, vertical)
+        normal_norm = np.linalg.norm(normals, axis=2)
+        camera_up = rotation.T @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        alignment = np.abs(normals @ camera_up) / np.maximum(normal_norm, 1e-9)
+        neighbor_valid = np.zeros(image.shape, dtype=bool)
+        neighbor_valid[1:-1, 1:-1] = (
+            (image[1:-1, :-2] > 0)
+            & (image[1:-1, 2:] > 0)
+            & (image[:-2, 1:-1] > 0)
+            & (image[2:, 1:-1] > 0)
+        )
+        corrected_mask &= (
+            neighbor_valid
+            & np.isfinite(alignment)
+            & (alignment >= minimum_up_alignment)
+        )
+    if repair_all_below_plane:
+        # On a ground robot a downward ray cannot pass through the measured
+        # support plane. Restore every such physically impossible CRE return
+        # even when disparity flicker makes its local normal unusable. Nearer
+        # table legs and other real obstacles remain above the plane and are
+        # therefore untouched.
+        corrected_mask |= eligible_below_floor
+    rejected_mask = (
+        eligible_below_floor & ~corrected_mask
+        if reject_unverified_below_plane
+        else np.zeros(image.shape, dtype=bool)
+    )
+    if not np.any(corrected_mask) and not np.any(rejected_mask):
+        return depth, corrected_mask
+
+    result = image.copy()
+    scaled = expected / depth_scale
+    if np.issubdtype(result.dtype, np.integer):
+        limits = np.iinfo(result.dtype)
+        scaled = np.clip(np.rint(scaled), limits.min, limits.max)
+    result[corrected_mask] = np.broadcast_to(
+        scaled.astype(result.dtype), result.shape
+    )[corrected_mask]
+    # A downward ray cannot see geometry behind the measured support plane.
+    # If its local normal is not trustworthy enough to synthesize floor, drop
+    # the return instead of preserving a dense curved sheet as an obstacle.
+    result[rejected_mask] = 0
+    return result, corrected_mask
+
+
 class VisualOdometryNode(Node):
     """Run learned RGB-D odometry and publish RTAB-compatible local features."""
 
@@ -224,6 +391,10 @@ class VisualOdometryNode(Node):
             "status_topic": "/luxi_visual_frontend/status",
             "diagnostics_topic": "/luxi_visual_frontend/diagnostics",
             "imu_topic": "/sensors/imu/data",
+            "motion_hint_topic": "",
+            "motion_hint_timeout": 0.5,
+            "motion_hint_stationary_linear_speed": 0.01,
+            "motion_hint_stationary_angular_speed": 0.02,
             "odom_frame": "odom",
             "base_frame": "base_link",
             "use_imu_rotation": True,
@@ -231,6 +402,7 @@ class VisualOdometryNode(Node):
             "maximum_imu_time_difference": 0.03,
             "target_rate": 5.0,
             "upstream_rate_limited": False,
+            "sensor_poll_rate_multiplier": 2.0,
             "rgbd_features_rate": 2.0,
             "maximum_sensor_time_difference": 0.05,
             "transform_timeout": 0.5,
@@ -263,6 +435,11 @@ class VisualOdometryNode(Node):
             "maximum_depth_consistency_error": 0.08,
             "maximum_imu_rotation_error_deg": 12.0,
             "maximum_imu_gravity_error_deg": 10.0,
+            "stationary_maximum_median_pixel_motion": 0.75,
+            "stationary_maximum_rotation_deg": 0.30,
+            "stationary_hint_maximum_median_pixel_motion": 2.0,
+            "stationary_hint_maximum_translation": 0.05,
+            "constrain_vertical_translation": False,
             # Disabled by default. Hardware profiles may retain a dense near
             # layer and publish a much sparser far layer to RTAB-Map without
             # exposing the far depth to visual pose estimation.
@@ -272,16 +449,41 @@ class VisualOdometryNode(Node):
             "mapping_depth_medium_sparse_pixel_step": 1,
             "mapping_depth_far_maximum": 0.0,
             "mapping_depth_far_sparse_pixel_step": 1,
+            # Disabled for generic cameras. CREStereo uses synchronized H30
+            # gravity to correct its smooth-floor bias before metric tracking
+            # and RTAB insertion without assuming the walking base is level.
+            "mapping_ground_prior_enabled": False,
+            "mapping_ground_camera_height": 0.0,
+            "mapping_ground_below_tolerance": 0.12,
+            "mapping_ground_surface_tolerance": 0.0,
+            # Zero retains the historical unlimited correction. CRE profiles
+            # set a small bound so a bad disparity cannot be projected across
+            # the room and turned into a synthetic floor sheet.
+            "mapping_ground_maximum_correction": 0.0,
+            "mapping_ground_minimum_up_alignment": 0.0,
+            "mapping_ground_minimum_row_ratio": 0.0,
+            "mapping_ground_reject_unverified_below_plane": False,
+            "mapping_ground_repair_all_below_plane": False,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         parameters = {name: self.get_parameter(name).value for name in defaults}
         if parameters["target_rate"] <= 0.0:
             raise ValueError("target_rate must be positive")
+        if parameters["sensor_poll_rate_multiplier"] < 1.0:
+            raise ValueError("sensor_poll_rate_multiplier must be at least one")
         if parameters["rgbd_features_rate"] <= 0.0:
             raise ValueError("rgbd_features_rate must be positive")
         if parameters["maximum_imu_time_difference"] <= 0.0:
             raise ValueError("maximum_imu_time_difference must be positive")
+        if (
+            float(parameters["motion_hint_timeout"]) <= 0.0
+            or float(parameters["motion_hint_stationary_linear_speed"]) < 0.0
+            or float(parameters["motion_hint_stationary_angular_speed"]) < 0.0
+            or float(parameters["stationary_hint_maximum_median_pixel_motion"]) < 0.0
+            or float(parameters["stationary_hint_maximum_translation"]) < 0.0
+        ):
+            raise ValueError("invalid stationary motion-hint parameters")
         if parameters["minimum_depth_consistency_matches"] < 3:
             raise ValueError("minimum_depth_consistency_matches must be at least 3")
         if parameters["maximum_depth_consistency_error"] <= 0.0:
@@ -309,6 +511,21 @@ class VisualOdometryNode(Node):
                 )
             ):
                 raise ValueError("invalid tiered mapping depth parameters")
+        if bool(parameters["mapping_ground_prior_enabled"]):
+            if (
+                float(parameters["mapping_ground_camera_height"]) <= 0.0
+                or float(parameters["mapping_ground_below_tolerance"]) < 0.0
+                or float(parameters["mapping_ground_surface_tolerance"]) < 0.0
+                or float(parameters["mapping_ground_maximum_correction"]) < 0.0
+                or not 0.0 <= float(
+                    parameters["mapping_ground_minimum_up_alignment"]
+                ) <= 1.0
+                or not 0.0 <= float(
+                    parameters["mapping_ground_minimum_row_ratio"]
+                ) < 1.0
+                or float(parameters["mapping_depth_far_maximum"]) <= 0.0
+            ):
+                raise ValueError("invalid mapping ground-plane parameters")
         self.get_logger().info("Loading SuperPoint and LightGlue models")
         backend = SuperPointLightGlueBackend(
             str(parameters["device"]),
@@ -371,6 +588,21 @@ class VisualOdometryNode(Node):
             maximum_imu_gravity_error=math.radians(
                 float(parameters["maximum_imu_gravity_error_deg"])
             ),
+            stationary_maximum_median_pixel_motion=float(
+                parameters["stationary_maximum_median_pixel_motion"]
+            ),
+            stationary_maximum_rotation=math.radians(
+                float(parameters["stationary_maximum_rotation_deg"])
+            ),
+            stationary_hint_maximum_median_pixel_motion=float(
+                parameters["stationary_hint_maximum_median_pixel_motion"]
+            ),
+            stationary_hint_maximum_translation=float(
+                parameters["stationary_hint_maximum_translation"]
+            ),
+            constrain_vertical_translation=bool(
+                parameters["constrain_vertical_translation"]
+            ),
         )
         self.parameters = parameters
         self.tracker = VisualOdometryTracker(backend, config)
@@ -392,6 +624,7 @@ class VisualOdometryNode(Node):
         # running. The default callback group remains mutually exclusive for
         # tracker access; only the short, lock-protected IMU callback is split.
         self.imu_callback_group = MutuallyExclusiveCallbackGroup()
+        self.motion_callback_group = MutuallyExclusiveCallbackGroup()
         self.sensor_callback_group = MutuallyExclusiveCallbackGroup()
         self.latest_color: Image | None = None
         self.latest_depth: Image | None = None
@@ -404,6 +637,7 @@ class VisualOdometryNode(Node):
         self.last_rgbd_features_stamp: float | None = None
         self.imu_samples: deque[tuple[float, str, np.ndarray]] = deque(maxlen=400)
         self.camera_from_imu_rotations: dict[tuple[str, str], np.ndarray] = {}
+        self.latest_motion_hint: tuple[float, float, float] | None = None
         # Inference is intentionally slower than the 10 Hz sensor stream.  A
         # depth-one best-effort input prevents stale full-resolution RGB-D
         # packets from queueing while the current frame is being processed.
@@ -426,6 +660,14 @@ class VisualOdometryNode(Node):
                 self._imu_callback,
                 imu_history_qos,
                 callback_group=self.imu_callback_group,
+            )
+        if str(parameters["motion_hint_topic"]):
+            self.create_subscription(
+                Twist,
+                str(parameters["motion_hint_topic"]),
+                self._motion_hint_callback,
+                10,
+                callback_group=self.motion_callback_group,
             )
         atomic_rgbd_input = bool(parameters["rgbd_input_topic"])
         if atomic_rgbd_input:
@@ -457,7 +699,10 @@ class VisualOdometryNode(Node):
         # frames while it was busy. A 2x polling timer observes the newest
         # packet promptly; the timestamp limiter below still bounds actual
         # tracking to target_rate and never builds a stale queue.
-        poll_rate = float(parameters["target_rate"]) * (2.0 if atomic_rgbd_input else 1.0)
+        poll_rate = float(parameters["target_rate"]) * (
+            float(parameters["sensor_poll_rate_multiplier"])
+            if atomic_rgbd_input else 1.0
+        )
         self.timer = self.create_timer(1.0 / poll_rate, self._process_latest)
         self._publish_status("WAITING_FOR_SENSOR_DATA")
         self.get_logger().info(f"Learned frontend inference device: {backend.device}")
@@ -480,6 +725,30 @@ class VisualOdometryNode(Node):
                 f"{float(parameters['mapping_depth_far_maximum']):.1f} m 1/"
                 f"{int(parameters['mapping_depth_far_sparse_pixel_step'])}x"
                 f"{int(parameters['mapping_depth_far_sparse_pixel_step'])} sparse"
+            )
+        if bool(parameters["mapping_ground_prior_enabled"]):
+            self.get_logger().info(
+                "RTAB-only ground prior: H30 gravity, "
+                f"camera_height={float(parameters['mapping_ground_camera_height']):.3f} m, "
+                f"below_tolerance={float(parameters['mapping_ground_below_tolerance']):.3f} m, "
+                f"surface_tolerance="
+                f"{float(parameters['mapping_ground_surface_tolerance']):.3f} m, "
+                f"maximum_correction="
+                f"{float(parameters['mapping_ground_maximum_correction']):.3f} m, "
+                f"minimum_up_alignment="
+                f"{float(parameters['mapping_ground_minimum_up_alignment']):.2f}, "
+                f"minimum_row_ratio="
+                f"{float(parameters['mapping_ground_minimum_row_ratio']):.2f}, "
+                f"reject_unverified="
+                f"{bool(parameters['mapping_ground_reject_unverified_below_plane'])}, "
+                f"repair_all_below="
+                f"{bool(parameters['mapping_ground_repair_all_below_plane'])}"
+            )
+        if str(parameters["motion_hint_topic"]):
+            self.get_logger().info(
+                "Stationary pose gate uses motion hint "
+                f"{parameters['motion_hint_topic']} with "
+                f"{float(parameters['motion_hint_timeout']):.2f} s timeout"
             )
 
     def _color_callback(self, message: Image) -> None:
@@ -511,6 +780,31 @@ class VisualOdometryNode(Node):
             self.imu_samples.append(
                 (_stamp_seconds(message), message.header.frame_id, rotation)
             )
+
+    def _motion_hint_callback(self, message: Twist) -> None:
+        """Record the D1 command without coupling odometry to robot feedback."""
+        linear_speed = math.hypot(float(message.linear.x), float(message.linear.y))
+        angular_speed = abs(float(message.angular.z))
+        with self.lock:
+            self.latest_motion_hint = (
+                time.monotonic(), linear_speed, angular_speed
+            )
+
+    def _commanded_stationary(self) -> bool:
+        """Return true only for a fresh, explicitly zero robot command."""
+        with self.lock:
+            sample = self.latest_motion_hint
+        if sample is None:
+            return False
+        received, linear_speed, angular_speed = sample
+        return (
+            time.monotonic() - received
+            <= float(self.parameters["motion_hint_timeout"])
+            and linear_speed
+            <= float(self.parameters["motion_hint_stationary_linear_speed"])
+            and angular_speed
+            <= float(self.parameters["motion_hint_stationary_angular_speed"])
+        )
 
     def _rgbd_callback(self, message: RGBDImage) -> None:
         """Commit one adapter-normalized RGB-D packet atomically."""
@@ -615,6 +909,10 @@ class VisualOdometryNode(Node):
             if result.imu_gravity_error is None
             else round(math.degrees(result.imu_gravity_error), 4),
             "depth_consistency_inliers": result.depth_consistency_inliers,
+            "median_pixel_motion": None
+            if result.median_pixel_motion is None
+            else round(result.median_pixel_motion, 4),
+            "commanded_stationary": self._commanded_stationary(),
         }
         status.values = [KeyValue(key=name, value=str(value)) for name, value in values.items()]
         message.status = [status]
@@ -777,14 +1075,20 @@ class VisualOdometryNode(Node):
             world_from_camera_rotation, imu_time_error = (
                 self._world_from_camera_rotation(stamp, color.header.frame_id)
             )
+            # PnP must see the actual CRE measurement. Feeding it a synthetic
+            # gravity plane made tens of thousands of unrelated keypoints
+            # share one fabricated depth and coupled floor repair into pose.
+            tracking_depth = np.asarray(depth_image)
             result = self.tracker.process(
                 np.asarray(rgb),
-                np.asarray(depth_image),
+                tracking_depth,
                 _camera_intrinsics(camera_info),
                 depth_scale,
                 stamp,
                 base_from_camera,
                 world_from_camera_rotation,
+                base_from_camera,
+                stationary_hint=self._commanded_stationary(),
             )
             # The first frame establishes the odometry origin, so it has no
             # relative rotation to constrain. Warn only after a pose exists.
@@ -807,11 +1111,59 @@ class VisualOdometryNode(Node):
                     stamp,
                     float(self.parameters["rgbd_features_rate"]),
                 ):
+                    mapping_depth = tracking_depth
+                    if bool(self.parameters["mapping_ground_prior_enabled"]):
+                        mapping_depth, ground_corrected = (
+                            _apply_gravity_ground_plane_prior(
+                                mapping_depth,
+                                depth_scale,
+                                _camera_intrinsics(camera_info),
+                                world_from_camera_rotation,
+                                float(self.parameters["mapping_ground_camera_height"]),
+                                float(self.parameters["mapping_ground_below_tolerance"]),
+                                float(self.parameters["mapping_depth_minimum"]),
+                                float(self.parameters["mapping_depth_far_maximum"]),
+                                float(self.parameters["mapping_ground_surface_tolerance"]),
+                                float(self.parameters["mapping_ground_maximum_correction"]),
+                                float(
+                                    self.parameters[
+                                        "mapping_ground_minimum_up_alignment"
+                                    ]
+                                ),
+                                float(
+                                    self.parameters[
+                                        "mapping_ground_minimum_row_ratio"
+                                    ]
+                                ),
+                                bool(
+                                    self.parameters[
+                                        "mapping_ground_reject_unverified_below_plane"
+                                    ]
+                                ),
+                                bool(
+                                    self.parameters[
+                                        "mapping_ground_repair_all_below_plane"
+                                    ]
+                                ),
+                            )
+                        )
+                        corrected_count = int(np.count_nonzero(ground_corrected))
+                        if corrected_count > 0:
+                            self.get_logger().info(
+                                "RTAB-only ground prior corrected "
+                                f"{corrected_count} physically valid floor pixels",
+                                throttle_duration_sec=5.0,
+                            )
+                        elif world_from_camera_rotation is None:
+                            self.get_logger().warn(
+                                "RTAB-only ground prior skipped: no synchronized H30 attitude",
+                                throttle_duration_sec=2.0,
+                            )
                     self._publish_rgbd_features(
                         result,
                         color,
                         depth,
-                        np.asarray(depth_image),
+                        mapping_depth,
                         depth_scale,
                         camera_info,
                     )

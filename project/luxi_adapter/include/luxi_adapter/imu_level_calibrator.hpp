@@ -24,6 +24,8 @@ struct MountAngles
 };
 
 MountAngles estimate_mount_angles(const tf2::Vector3 & measured_up_in_camera);
+double mount_tilt_from_nominal(
+  const MountAngles & mount, double nominal_roll, double nominal_pitch);
 bool is_stationary_imu_sample(
   const tf2::Vector3 & angular_velocity,
   const tf2::Vector3 & acceleration,
@@ -53,6 +55,8 @@ private:
   double camera_y_;
   double camera_z_;
   double camera_yaw_;
+  double nominal_roll_;
+  double nominal_pitch_;
   double gravity_;
   double gravity_tolerance_;
   double maximum_angular_speed_;

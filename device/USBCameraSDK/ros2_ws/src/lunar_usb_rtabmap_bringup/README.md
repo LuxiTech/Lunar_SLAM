@@ -1,11 +1,12 @@
 # lunar_usb_rtabmap_bringup
 
-USB 双目到 Luxi/RTAB-Map 的一键启动包。两条链路使用独立 launch，不接受旧的
+USB 双目到 Luxi/RTAB-Map 的一键启动包。各档使用独立 launch，不接受旧的
 `mode` 或 `depth_backend` 参数。
 
 | Launch | 用途 |
 |---|---|
-| `usb_crestereo_rtabmap.launch.py` | 默认主链路：CREStereo + Luxi 直接里程计 |
+| `usb_crestereo_rtabmap.launch.py` | 默认高质量主链路：原生 640×360 CREStereo + H30/Luxi 里程计 |
+| `usb_crestereo_max_performance_rtabmap.launch.py` | 可选高帧率档：320×180 模型、10 Hz、960×540 输出 |
 | `usb_rtabmap.launch.py` | 备用链路：VPI + Luxi + RTAB F2M |
 
 ## 使用
@@ -20,6 +21,14 @@ CREStereo + RViz：
 
 ```bash
 ros2 launch lunar_usb_rtabmap_bringup usb_crestereo_rtabmap.launch.py \
+  rviz:=true use_imu:=true new_map:=true
+```
+
+CREStereo 极致档 + RViz：
+
+```bash
+ros2 launch lunar_usb_rtabmap_bringup \
+  usb_crestereo_max_performance_rtabmap.launch.py \
   rviz:=true use_imu:=true new_map:=true
 ```
 
@@ -41,10 +50,16 @@ ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py \
 | `use_imu` | `true` | 默认使用 H30；无数据或无效轴会阻止里程计启动 |
 | `planar_mode` | `false` | 仅地面机器人需要时启用 3DoF 约束 |
 
+D1 当前安装外参以机身旋转中心为 `base_link`：双目中点约向前 0.20 m、向上
+0.20 m，双目中心线与机身中心轴重合。由于建图使用左目光心坐标系，按 89.963 mm
+标定基线换算后为 `camera_x=0.20`、`camera_y=0.044982`、`camera_z=0.20` m。
+相机水平朝前，旋转四元数保持 `(-0.5, 0.5, -0.5, 0.5)`。
+
 ## CREStereo 配置
 
-- 模型：`crestereo_init_iter2_180x320_fp16.onnx`
-- 深度输出：约 6 Hz，始终处理最新双目帧
+- 主模型：`crestereo_combined_iter2_360x640.onnx`（320×180 初始预测 + 640×360 精化）
+- 置信度：320×180 FP16 反向模型做左右一致性校验，拒绝反光和遮挡错误
+- 深度输出：单独运行约 2.7 Hz，完整建图约 2.3–2.5 Hz，始终处理最新双目帧
 - 里程计：SuperPoint + LightGlue 直接发布位姿和同时间戳 RGB-D
 - 0.4–4 m：稠密地图并参与位姿估计
 - 4–6 m：4×4 稀疏采样
@@ -56,4 +71,10 @@ ros2 launch lunar_usb_rtabmap_bringup usb_rtabmap.launch.py \
 H30 驱动支持断线和静默自动重开。只有在明确进行无 IMU 诊断时才使用
 `use_imu:=false`；正常建图应保持默认值，并确认六轴、时间戳和四元数健康。
 
+极致档保留 1080p 相机输入，发布 960×540 RGB-D，使用 640 个特征点、匹配尺寸对应
+的 SuperPoint TensorRT FP16 引擎和 LightGlue CUDA Graph。地图写入提高到 2 Hz；
+健康守护在 85 °C 告警、92 °C 或硬件节流时停止整条 launch。TensorRT 引擎与本机
+JetPack/TensorRT 版本绑定，缺少引擎时会自动回退 PyTorch，帧率也会随之降低。
+
 测试结果见 [CREStereo 基准记录](../../../../../maps/benchmarks/usb_crestereo_20260812/README.md)。
+极致档见 [CREStereo MAX 基准](../../../../../maps/benchmarks/usb_crestereo_max_performance_20260813/README.md)。

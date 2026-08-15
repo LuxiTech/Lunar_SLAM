@@ -12,6 +12,7 @@ import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
@@ -313,12 +314,20 @@ class HlocLocalizerNode(Node):
 
 def main(arguments: list[str] | None = None) -> None:
     rclpy.init(args=arguments)
-    node = HlocLocalizerNode()
+    node = None
     try:
+        # Model loading is intentionally inside the interrupt guard: the
+        # first localization start can spend several seconds parsing NetVLAD,
+        # and stopping from the web page during that window is normal.
+        node = HlocLocalizerNode()
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            try:
+                node.destroy_node()
+            except KeyboardInterrupt:
+                pass
         if rclpy.ok():
             rclpy.shutdown()

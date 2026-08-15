@@ -26,5 +26,10 @@ setup(
     description="USB stereo RTAB-Map bringup for Lunar SLAM.",
     license="Apache-2.0",
     tests_require=["pytest"],
-    entry_points={"console_scripts": []},
+    entry_points={
+        "console_scripts": [
+            "jetson_health_guard = "
+            "lunar_usb_rtabmap_bringup.jetson_health_guard:main",
+        ]
+    },
 )

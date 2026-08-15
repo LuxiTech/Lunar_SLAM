@@ -67,6 +67,31 @@ class TrackerConfig:
     maximum_depth_consistency_error: float = 0.08
     maximum_imu_rotation_error: float = math.radians(12.0)
     maximum_imu_gravity_error: float = math.radians(10.0)
+    stationary_maximum_median_pixel_motion: float = 0.75
+    stationary_maximum_rotation: float = math.radians(0.30)
+    stationary_hint_maximum_median_pixel_motion: float = 2.0
+    stationary_hint_maximum_translation: float = 0.05
+    # Legged mapping still needs H30 roll/pitch to deskew the camera cloud,
+    # but the base cannot accumulate vertical translation on a level-floor
+    # run.  Hardware profiles can therefore lock base Z without flattening
+    # its measured attitude.
+    constrain_vertical_translation: bool = False
+
+
+def constrain_camera_pose_vertical_translation(
+    odom_from_camera: np.ndarray,
+    base_from_camera: np.ndarray,
+) -> np.ndarray:
+    """Keep the corresponding base pose at z=0 while preserving attitude."""
+    camera_pose = np.asarray(odom_from_camera, dtype=np.float64)
+    mounting = np.asarray(base_from_camera, dtype=np.float64)
+    if camera_pose.shape != (4, 4) or mounting.shape != (4, 4):
+        raise ValueError("camera pose and mounting transform must be 4x4")
+    if not np.all(np.isfinite(camera_pose)) or not np.all(np.isfinite(mounting)):
+        raise ValueError("camera pose and mounting transform must be finite")
+    odom_from_base = camera_pose @ invert_transform(mounting)
+    odom_from_base[2, 3] = 0.0
+    return odom_from_base @ mounting
 
 
 @dataclass(frozen=True)
@@ -92,6 +117,7 @@ class TrackingResult:
     imu_rotation_error: float | None = None
     imu_gravity_error: float | None = None
     depth_consistency_inliers: int = 0
+    median_pixel_motion: float | None = None
 
 
 @dataclass
@@ -192,6 +218,63 @@ class VisualOdometryTracker:
         )
         return math.acos(cosine)
 
+    @staticmethod
+    def _align_visual_rotation_to_gravity(
+        visual_current_from_reference: np.ndarray,
+        reference_world_from_camera: np.ndarray,
+        current_world_from_camera: np.ndarray,
+    ) -> np.ndarray:
+        """Correct visual tilt from IMU gravity without importing IMU yaw.
+
+        The H30 AHRS yaw can drift slowly in indoor magnetic fields. Applying
+        its complete relative rotation rotates every accumulated cloud even
+        while the camera is still. The minimum rotation which maps the visual
+        up vector onto the measured gravity vector changes roll/pitch only and
+        leaves visual features responsible for heading.
+        """
+        visual = np.asarray(visual_current_from_reference, dtype=np.float64)
+        reference = np.asarray(reference_world_from_camera, dtype=np.float64)
+        current = np.asarray(current_world_from_camera, dtype=np.float64)
+        if any(matrix.shape != (3, 3) for matrix in (visual, reference, current)):
+            raise ValueError("visual and IMU rotations must be 3x3")
+        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        visual_up = visual @ (reference.T @ world_up)
+        measured_up = current.T @ world_up
+        visual_up /= np.linalg.norm(visual_up)
+        measured_up /= np.linalg.norm(measured_up)
+        cross = np.cross(visual_up, measured_up)
+        sine = float(np.linalg.norm(cross))
+        cosine = float(np.clip(np.dot(visual_up, measured_up), -1.0, 1.0))
+        if sine <= 1e-10:
+            correction = np.eye(3, dtype=np.float64)
+            if cosine < 0.0:
+                # A 180 degree disagreement is physically unlikely, but keep
+                # the helper defined for tests and corrupted sensor samples.
+                axis = np.cross(visual_up, np.array([1.0, 0.0, 0.0]))
+                if np.linalg.norm(axis) <= 1e-10:
+                    axis = np.cross(visual_up, np.array([0.0, 1.0, 0.0]))
+                axis /= np.linalg.norm(axis)
+                correction = 2.0 * np.outer(axis, axis) - np.eye(3)
+        else:
+            skew = np.array(
+                [
+                    [0.0, -cross[2], cross[1]],
+                    [cross[2], 0.0, -cross[0]],
+                    [-cross[1], cross[0], 0.0],
+                ],
+                dtype=np.float64,
+            )
+            correction = (
+                np.eye(3) + skew + skew @ skew * ((1.0 - cosine) / (sine * sine))
+            )
+        aligned = correction @ visual
+        u, _, vt = np.linalg.svd(aligned)
+        aligned = u @ vt
+        if np.linalg.det(aligned) < 0.0:
+            u[:, -1] *= -1.0
+            aligned = u @ vt
+        return aligned
+
     def _maybe_reseed_keyframe(
         self,
         features: NeuralFeatures,
@@ -252,6 +335,7 @@ class VisualOdometryTracker:
         imu_rotation_error: float | None = None,
         imu_gravity_error: float | None = None,
         depth_consistency_inliers: int = 0,
+        median_pixel_motion: float | None = None,
     ) -> TrackingResult:
         return TrackingResult(
             accepted,
@@ -273,6 +357,7 @@ class VisualOdometryTracker:
             imu_rotation_error,
             imu_gravity_error,
             depth_consistency_inliers,
+            median_pixel_motion,
         )
 
     def process(
@@ -284,6 +369,8 @@ class VisualOdometryTracker:
         stamp: float,
         initial_odom_from_camera: np.ndarray | None = None,
         world_from_camera_rotation: np.ndarray | None = None,
+        base_from_camera: np.ndarray | None = None,
+        stationary_hint: bool = False,
     ) -> TrackingResult:
         """Extract, match and geometrically verify one synchronized frame."""
         started = time.perf_counter()
@@ -314,6 +401,14 @@ class VisualOdometryTracker:
             pose = np.eye(4) if initial_odom_from_camera is None else np.asarray(
                 initial_odom_from_camera, dtype=np.float64
             ).copy()
+            if self.config.constrain_vertical_translation:
+                if base_from_camera is None:
+                    raise ValueError(
+                        "base_from_camera is required for vertical translation constraint"
+                    )
+                pose = constrain_camera_pose_vertical_translation(
+                    pose, base_from_camera
+                )
             self._keyframe = _Keyframe(
                 features, points3d, valid_depth, pose, stamp, imu_rotation
             )
@@ -428,14 +523,20 @@ class VisualOdometryTracker:
                         )
                         pose_source = "PNP_DEPTH"
                         depth_consistency_inliers = len(remapped_inliers)
+        full_imu_current_from_reference = None
         if imu_rotation is not None and reference.world_from_camera_rotation is not None:
-            imu_current_from_reference = (
+            full_imu_current_from_reference = (
                 imu_rotation.T @ reference.world_from_camera_rotation
+            )
+            gravity_aligned_current_from_reference = self._align_visual_rotation_to_gravity(
+                pose.current_from_reference[:3, :3],
+                reference.world_from_camera_rotation,
+                imu_rotation,
             )
             rotation_delta = np.eye(4, dtype=np.float64)
             rotation_delta[:3, :3] = (
                 pose.current_from_reference[:3, :3].T
-                @ imu_current_from_reference
+                @ full_imu_current_from_reference
             )
             imu_rotation_error = rotation_angle(rotation_delta)
             imu_gravity_error = self._gravity_rotation_error(
@@ -445,43 +546,109 @@ class VisualOdometryTracker:
             )
             pnp_match_indices = pose.inlier_indices
             pnp_current_indices = current_indices[pnp_match_indices]
-            current_depth_mask = valid_depth[pnp_current_indices]
-            consistent_match_positions = np.flatnonzero(current_depth_mask)
-            if (
-                len(consistent_match_positions)
-                >= self.config.minimum_depth_consistency_matches
-            ):
-                fixed_rotation_pose = estimate_translation_with_rotation(
-                    reference.points3d[
-                        reference_indices[pnp_match_indices[consistent_match_positions]]
-                    ],
-                    points3d[pnp_current_indices[consistent_match_positions]],
-                    features.keypoints[pnp_current_indices[consistent_match_positions]],
-                    intrinsics,
-                    imu_current_from_reference,
-                    self.config.maximum_depth_consistency_error,
-                    self.config.minimum_depth_consistency_matches,
+            if not self.config.use_depth_translation_refinement:
+                # CREStereo depth changes measurably between identical image
+                # pairs. Keep metric PnP translation from the reference depth
+                # and let H30 correct roll/pitch without feeding current-frame
+                # disparity flicker back into translation.
+                fixed_transform = pose.current_from_reference.copy()
+                fixed_transform[:3, :3] = gravity_aligned_current_from_reference
+                pose = type(pose)(
+                    fixed_transform, pose.inlier_indices, pose.reprojection_rmse
                 )
+                pose_source = "IMU_PNP"
+            else:
+                current_depth_mask = valid_depth[pnp_current_indices]
+                consistent_match_positions = np.flatnonzero(current_depth_mask)
                 if (
-                    fixed_rotation_pose is not None
-                    and fixed_rotation_pose.reprojection_rmse
-                    <= self.config.maximum_reprojection_rmse
-                    and imu_rotation_error
-                    <= self.config.maximum_imu_rotation_error
-                    and imu_gravity_error
-                    <= self.config.maximum_imu_gravity_error
+                    len(consistent_match_positions)
+                    >= self.config.minimum_depth_consistency_matches
                 ):
-                    remapped_inliers = pnp_match_indices[
-                        consistent_match_positions[fixed_rotation_pose.inlier_indices]
-                    ]
-                    if len(remapped_inliers) >= self.config.minimum_inliers:
-                        pose = type(pose)(
-                            fixed_rotation_pose.current_from_reference,
-                            remapped_inliers,
-                            fixed_rotation_pose.reprojection_rmse,
-                        )
-                        pose_source = "IMU_DEPTH"
-                        depth_consistency_inliers = len(remapped_inliers)
+                    fixed_rotation_pose = estimate_translation_with_rotation(
+                        reference.points3d[
+                            reference_indices[pnp_match_indices[consistent_match_positions]]
+                        ],
+                        points3d[pnp_current_indices[consistent_match_positions]],
+                        features.keypoints[pnp_current_indices[consistent_match_positions]],
+                        intrinsics,
+                        gravity_aligned_current_from_reference,
+                        self.config.maximum_depth_consistency_error,
+                        self.config.minimum_depth_consistency_matches,
+                    )
+                    if (
+                        fixed_rotation_pose is not None
+                        and fixed_rotation_pose.reprojection_rmse
+                        <= self.config.maximum_reprojection_rmse
+                        and imu_gravity_error
+                        <= self.config.maximum_imu_gravity_error
+                    ):
+                        remapped_inliers = pnp_match_indices[
+                            consistent_match_positions[fixed_rotation_pose.inlier_indices]
+                        ]
+                        if len(remapped_inliers) >= self.config.minimum_inliers:
+                            pose = type(pose)(
+                                fixed_rotation_pose.current_from_reference,
+                                remapped_inliers,
+                                fixed_rotation_pose.reprojection_rmse,
+                            )
+                            pose_source = "IMU_DEPTH"
+                            depth_consistency_inliers = len(remapped_inliers)
+
+        # Learned stereo depth flickers even when the images are stationary.
+        # Detect stillness from image motion plus rotation and hold the
+        # keyframe pose exactly, preventing false motion from accumulating.
+        inlier_reference_indices = reference_indices[pose.inlier_indices]
+        inlier_current_indices = current_indices[pose.inlier_indices]
+        pixel_motion = np.linalg.norm(
+            reference.features.keypoints[inlier_reference_indices]
+            - features.keypoints[inlier_current_indices],
+            axis=1,
+        )
+        median_pixel_motion = (
+            float(np.median(pixel_motion)) if len(pixel_motion) else math.inf
+        )
+        stationary_rotation = (
+            rotation_angle(full_imu_current_from_reference)
+            if full_imu_current_from_reference is not None
+            else rotation_angle(pose.current_from_reference)
+        )
+        visual_stationary = (
+            self.config.stationary_maximum_median_pixel_motion > 0.0
+            and median_pixel_motion
+            <= self.config.stationary_maximum_median_pixel_motion
+        )
+        hinted_stationary = (
+            stationary_hint
+            and self.config.stationary_hint_maximum_median_pixel_motion > 0.0
+            and median_pixel_motion
+            <= self.config.stationary_hint_maximum_median_pixel_motion
+            and np.linalg.norm(pose.current_from_reference[:3, 3])
+            <= self.config.stationary_hint_maximum_translation
+        )
+        if (
+            full_imu_current_from_reference is not None
+            and (visual_stationary or hinted_stationary)
+            and stationary_rotation <= self.config.stationary_maximum_rotation
+        ):
+            held_current_from_reference = np.eye(4, dtype=np.float64)
+            if hinted_stationary and self._last_accepted_pose is not None:
+                # The explicit stop hint holds the latest accepted global
+                # pose, not necessarily the older keyframe pose. This avoids
+                # snapping backward when the D1 stops just before the next
+                # distance-based keyframe threshold. Pure visual stillness
+                # retains the historical reference hold so an IMU-assisted
+                # keyframe reseed can propagate its corrected orientation.
+                reference_from_held = (
+                    invert_transform(reference.odom_from_camera)
+                    @ self._last_accepted_pose
+                )
+                held_current_from_reference = invert_transform(reference_from_held)
+            pose = type(pose)(
+                held_current_from_reference,
+                pose.inlier_indices,
+                pose.reprojection_rmse,
+            )
+            pose_source = "STATIONARY_HINT" if hinted_stationary else "STATIONARY"
 
         inlier_count = len(pose.inlier_indices)
         inlier_ratio = inlier_count / float(depth_match_count)
@@ -507,6 +674,17 @@ class VisualOdometryTracker:
 
         reference_from_current = invert_transform(pose.current_from_reference)
         odom_from_camera = reference.odom_from_camera @ reference_from_current
+        if self.config.constrain_vertical_translation:
+            if base_from_camera is None:
+                raise ValueError(
+                    "base_from_camera is required for vertical translation constraint"
+                )
+            # Apply the constraint before jump validation and before a new
+            # keyframe is stored. This prevents vertical error from becoming
+            # the reference for every subsequent PnP estimate.
+            odom_from_camera = constrain_camera_pose_vertical_translation(
+                odom_from_camera, base_from_camera
+            )
         if self._last_accepted_pose is not None:
             last_from_current = (
                 invert_transform(self._last_accepted_pose) @ odom_from_camera
@@ -539,6 +717,7 @@ class VisualOdometryTracker:
                 imu_rotation_error=imu_rotation_error,
                 imu_gravity_error=imu_gravity_error,
                 depth_consistency_inliers=depth_consistency_inliers,
+                median_pixel_motion=median_pixel_motion,
             )
 
         reference_from_current_motion = invert_transform(reference.odom_from_camera) @ odom_from_camera
@@ -571,7 +750,14 @@ class VisualOdometryTracker:
             points3d,
             True,
             "TRACKING",
-            "ACCEPTED_IMU_DEPTH" if pose_source == "IMU_DEPTH" else "ACCEPTED",
+            "ACCEPTED_" + pose_source
+            if pose_source in {
+                "IMU_DEPTH",
+                "IMU_PNP",
+                "STATIONARY",
+                "STATIONARY_HINT",
+            }
+            else "ACCEPTED",
             odom_from_camera,
             match_count,
             depth_match_count,
@@ -584,4 +770,5 @@ class VisualOdometryTracker:
             imu_rotation_error,
             imu_gravity_error,
             depth_consistency_inliers,
+            median_pixel_motion,
         )

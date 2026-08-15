@@ -30,6 +30,7 @@ const mappingMode = $("#mappingMode");
 const imuCalibrationState = $("#imuCalibrationState");
 const imuCalibrationDetail = $("#imuCalibrationDetail");
 const imuCalibrationButton = $("#imuCalibrationButton");
+let mappingModeInitialized = false;
 const rgbPreview = $("#rgbPreview");
 const rgbPreviewState = $("#rgbPreviewState");
 const rgbPreviewHint = $("#rgbPreviewHint");
@@ -202,7 +203,9 @@ function beginAction(action) {
     return;
   }
   if (!robotControlReady) {
-    showToast("请先开启机器人控制");
+    showToast(robotControlState.textContent === "正在站立"
+      ? "机器人正在站立，请等待控制就绪"
+      : "机器人控制尚未就绪，请先开启或重试控制");
     return;
   }
   joystickPointerId = null;
@@ -269,7 +272,9 @@ joystickPad.addEventListener("pointerdown", (event) => {
     return;
   }
   if (!robotControlReady) {
-    showToast("请先开启机器人控制");
+    showToast(robotControlState.textContent === "正在站立"
+      ? "机器人正在站立，请等待控制就绪"
+      : "机器人控制尚未就绪，请先开启或重试控制");
     return;
   }
   held.clear();
@@ -369,6 +374,7 @@ const robotControlStateNames = {
   disabling: "正在趴下",
   standing_up: "正在站立",
   standing_uncontrolled: "站立但控制未就绪",
+  recovery_required: "需重新开启",
   offline: "状态离线",
   unknown: "未知姿态",
   failed: "切换失败",
@@ -386,11 +392,15 @@ function updateRobotControl(control) {
   if (!control) return;
   const managed = Boolean(control.enabled);
   const active = Boolean(control.active);
+  const bridgeActive = Boolean(control.bridge_active);
+  const ready = Boolean(control.control_ready);
   const transitioning = Boolean(control.transitioning);
-  robotControlReady = !managed || Boolean(control.control_ready);
-  robotControlToggle.checked = managed && active;
+  robotControlReady = !managed || ready;
+  // Standing/bridge-active is not the same as accepting motion commands.
+  // Reflect only the backend's complete safety gate in the switch.
+  robotControlToggle.checked = managed && ready;
   robotControlToggle.disabled = !managed || transitioning || robotControlRequestPending
-    || (!control.feedback_online && !active);
+    || (!control.feedback_online && !bridgeActive && !active);
   robotControlState.textContent = robotControlStateNames[control.state] || control.state;
   robotControlState.className = `mapping-state ${control.state}`;
   const posture = robotPostureNames[control.posture] || control.posture || "未知";
@@ -463,6 +473,7 @@ const mappingStateNames = {
 const imuCalibrationStateNames = {
   offline: "服务离线",
   idle: "等待校准",
+  starting: "启动 H30",
   waiting_stationary: "等待静止",
   collecting: "采集中",
   calibrated: "校准完成",
@@ -478,13 +489,20 @@ function updateImuCalibration(calibration) {
   const busy = Boolean(calibration.busy);
   imuCalibrationButton.disabled = !calibration.can_start || busy
     || imuCalibrationRequestPending;
-  if (calibration.state === "collecting") {
+  if (calibration.state === "starting") {
+    imuCalibrationDetail.textContent = "正在独立启动 H30 校准链路，请保持机器人静止。";
+  } else if (calibration.state === "collecting") {
     imuCalibrationDetail.textContent =
       `请勿移动机器人：${calibration.sample_count || 0}/${calibration.required_samples || 0} 帧`;
   } else if (calibration.state === "calibrated") {
-    const roll = Number(calibration.roll_degrees).toFixed(2);
-    const pitch = Number(calibration.pitch_degrees).toFixed(2);
-    imuCalibrationDetail.textContent = `已适配当前装配角度：roll=${roll}°，pitch=${pitch}°`;
+    const rollValue = calibration.installation_roll_degrees
+      ?? (Number(calibration.roll_degrees) + 90.0);
+    const pitchValue = calibration.installation_pitch_degrees
+      ?? calibration.pitch_degrees;
+    const roll = Number(rollValue).toFixed(2);
+    const pitch = Number(pitchValue).toFixed(2);
+    const saved = calibration.persisted ? "，已保存并应用到建图/定位" : "";
+    imuCalibrationDetail.textContent = `实际安装偏角：roll=${roll}°，pitch=${pitch}°${saved}`;
   } else {
     imuCalibrationDetail.textContent = calibration.message
       || "将机器人放在水平面并保持静止，然后点击一键校准。";
@@ -544,6 +562,9 @@ function updateNavigation(navigation) {
   const selectedLocalizable = navigationUseFiltered
     ? selectedMap?.filtered_localizable
     : selectedMap?.localizable;
+  const selectedLoadable = navigationUseFiltered
+    ? selectedMap?.filtered_loadable
+    : selectedMap?.loadable;
   navigationLoadButton.disabled = navigationLoadPending || !selectedMap?.convertible;
   navigationFilterButton.disabled = navigationLoadPending || !selectedMap?.convertible;
   navigationFilterButton.textContent = navigationUseFiltered
@@ -554,7 +575,7 @@ function updateNavigation(navigation) {
   navigationLocateButton.disabled =
     navigationLoadPending || navigationLocatePending ||
     navigation.state === "running" ||
-    !selectedLocalizable ||
+    !selectedLoadable ||
     navigationCloud.map_id !== selectedMap?.id ||
     navigationCloud.variant !== selectedVariant ||
     navigationVoxels.variant !== selectedVariant;
@@ -574,7 +595,7 @@ function updateNavigation(navigation) {
   }
   navigationStartButton.disabled =
     !navigation.planning_localization_ready || !navigation.path_ready ||
-    navigation.active || estopActive;
+    navigation.active || estopActive || !robotControlReady;
   navigationHaltButton.disabled = !navigation.active;
   navigationPose = navigation.pose || null;
   if (navigationLoadPending) {
@@ -609,7 +630,9 @@ function updateNavigation(navigation) {
             ? `规划失败：${navigation.planning_error || "未生成可执行路径"}；` +
               "灰色虚线仅为上一条有效路径参考，不能用于出发。"
           : navigation.path_ready
-            ? `规划完成，共 ${navigation.path_point_count} 个路径点；可点击“出发”。`
+            ? robotControlReady
+              ? `规划完成，共 ${navigation.path_point_count} 个路径点；可点击“出发”。`
+              : `规划完成，共 ${navigation.path_point_count} 个路径点；请先开启机器人控制。`
             : "请选择目标点并等待路径规划完成。";
       navigationDetail.textContent =
         `${mapName} 已完成 HLoc 粗定位和 ICP 精定位：${poseText}${fitness}。${motionText}`;
@@ -1131,7 +1154,8 @@ async function loadNavigationMap(automatic = false) {
   if (!variantLoadable) {
     navigationDetail.textContent = `${mapId} 正在生成${variantLabel}，请稍候…`;
   } else if (!variantLocalizable) {
-    navigationDetail.textContent = `${mapId} 正在使用 GPU 构建 HLoc 索引，请稍候…`;
+    navigationDetail.textContent =
+      `${mapId} 地图图层正在加载；点击“自动定位”时会按需构建 HLoc 索引。`;
   }
   try {
     const result = await api("/api/navigation/load_map", {
@@ -1151,7 +1175,7 @@ async function loadNavigationMap(automatic = false) {
     showToast(
       `${mapId} ${variantLoadable ? "已加载" : "已生成并加载"}${variantLabel}；` +
       ((navigationUseFiltered ? loadedMap?.filtered_localizable : loadedMap?.localizable)
-        ? "可点击“自动定位”" : "尚未构建 HLoc 索引")
+        ? "可点击“自动定位”" : "点击“自动定位”将构建 HLoc 索引")
     );
     return true;
   } catch (error) {
@@ -1176,12 +1200,21 @@ async function toggleNavigationFilter() {
 
 async function startNavigationLocalization() {
   const mapId = navigationMapSelect.value;
+  const map = navigationMapRecords.get(mapId);
+  const mapLocalizable = navigationUseFiltered
+    ? map?.filtered_localizable
+    : map?.localizable;
   if (!mapId || navigationLocatePending) return;
   navigationLocatePending = true;
   navigationLocateButton.disabled = true;
   navigationPose = null;
+  if (!mapLocalizable) {
+    navigationDetail.textContent =
+      `${mapId} 首次定位正在构建 GPU HLoc 索引，完成后会自动启动相机和定位…`;
+  }
   try {
     const result = await api("/api/navigation/localize", {map_id: mapId});
+    if (Array.isArray(result.maps)) updateNavigationMaps(result.maps);
     updateNavigation(result.navigation);
     showToast("自动定位已启动，请缓慢移动或转动机器人");
   } catch (error) {
@@ -1639,7 +1672,8 @@ function updateMapping(mapping) {
   const mappingStateName = mappingStateNames[mapping.state] || mapping.state;
   mappingState.textContent = mappingStateName;
   mappingState.className = `mapping-state ${mapping.state}`;
-  const calibrationRequired = currentImuCalibration.service_available
+  const calibrationRequired = (currentImuCalibration.service_available
+    || currentImuCalibration.standalone_available)
     && currentImuCalibration.state !== "calibrated";
   mappingStartButton.disabled = !mapping.enabled || mapping.state === "running"
     || calibrationRequired;
@@ -1647,10 +1681,17 @@ function updateMapping(mapping) {
   mappingMode.disabled = !mapping.enabled || mapping.state === "running";
   if (mapping.state === "running" && mapping.mode) {
     mappingMode.value = mapping.mode;
-  } else if (mapping.default_mode) {
+    mappingModeInitialized = true;
+  } else if (!mappingModeInitialized && mapping.default_mode) {
     mappingMode.value = mapping.default_mode;
+    mappingModeInitialized = true;
   }
-  const modeName = mapping.mode === "crestereo" ? "CREStereo 模型" : "VPI";
+  const modeNames = {
+    crestereo: "CREStereo 高质量 640×360",
+    crestereo_max: "CREStereo 高帧率 10 Hz",
+    vpi: "VPI",
+  };
+  const modeName = modeNames[mapping.mode] || mapping.mode;
   if (mapping.last_error) {
     mappingDetail.textContent = mapping.last_error;
   } else if (mapping.state === "running") {
@@ -1661,7 +1702,7 @@ function updateMapping(mapping) {
   } else {
     mappingDetail.textContent = calibrationRequired
       ? "请先将机器人放在水平面并完成 IMU 一键校准。"
-      : "CREStereo 模型深度与学习里程计为主链路；VPI 保留为低资源备用链路。";
+      : "CREStereo 为稳定主链路；极致模式输出 960×540 深度并冲刺 10 Hz；VPI 为备用链路。";
   }
 }
 

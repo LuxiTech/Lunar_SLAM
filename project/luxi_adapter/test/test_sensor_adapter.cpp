@@ -218,6 +218,7 @@ TEST_F(SensorAdapterTest, SplitsSynchronizedRgbdInputIntoCanonicalTopics)
     {"rgbd_output_topic", "/adapter_rgbd_test/output/rgbd"},
     {"compressed_color_output_topic", "/adapter_rgbd_test/output/compressed_color"},
     {"enable_imu", false},
+    {"generate_compressed_color_from_raw", true},
   };
   auto adapter = std::make_shared<luxi_adapter::SensorAdapter>(
     rclcpp::NodeOptions().parameter_overrides(parameters));
@@ -228,6 +229,7 @@ TEST_F(SensorAdapterTest, SplitsSynchronizedRgbdInputIntoCanonicalTopics)
   std::atomic<int> color_count{0};
   std::atomic<int> depth_count{0};
   std::atomic<int> info_count{0};
+  std::atomic<int> compressed_count{0};
   builtin_interfaces::msg::Time received_stamp;
   builtin_interfaces::msg::Time received_info_stamp;
   std::atomic<int> rgbd_count{0};
@@ -249,6 +251,16 @@ TEST_F(SensorAdapterTest, SplitsSynchronizedRgbdInputIntoCanonicalTopics)
     [&rgbd_count, &received_info_stamp](rtabmap_msgs::msg::RGBDImage::ConstSharedPtr message) {
       ++rgbd_count;
       received_info_stamp = message->rgb_camera_info.header.stamp;
+    });
+  auto compressed_output = test_node->create_subscription<sensor_msgs::msg::CompressedImage>(
+    "/adapter_rgbd_test/output/compressed_color", sensor_qos,
+    [&compressed_count](sensor_msgs::msg::CompressedImage::ConstSharedPtr message) {
+      if (message->format == "jpeg" && message->data.size() >= 4 &&
+        message->data[0] == 0xff && message->data[1] == 0xd8 &&
+        message->data[message->data.size() - 2] == 0xff && message->data.back() == 0xd9)
+      {
+        ++compressed_count;
+      }
     });
 
   rtabmap_msgs::msg::RGBDImage rgbd;
@@ -274,7 +286,8 @@ TEST_F(SensorAdapterTest, SplitsSynchronizedRgbdInputIntoCanonicalTopics)
   executor.add_node(test_node);
   const auto deadline = std::chrono::steady_clock::now() + 3s;
   while (std::chrono::steady_clock::now() < deadline &&
-    (color_count == 0 || depth_count == 0 || info_count == 0 || rgbd_count == 0))
+    (color_count == 0 || depth_count == 0 || info_count == 0 ||
+    rgbd_count == 0 || compressed_count == 0))
   {
     rgbd_input->publish(rgbd);
     executor.spin_some();
@@ -285,6 +298,7 @@ TEST_F(SensorAdapterTest, SplitsSynchronizedRgbdInputIntoCanonicalTopics)
   EXPECT_GT(depth_count, 0);
   EXPECT_GT(info_count, 0);
   EXPECT_GT(rgbd_count, 0);
+  EXPECT_GT(compressed_count, 0);
   EXPECT_EQ(received_stamp.sec, 123);
   EXPECT_EQ(received_stamp.nanosec, 456u);
   EXPECT_EQ(received_info_stamp.sec, 123);

@@ -35,7 +35,9 @@ from std_msgs.msg import Float32, String
 
 from luxi_web_control.web_control_node import discover_navigation_maps
 from luxi_web_control.web_control_node import D1ControlManager
+from luxi_web_control.web_control_node import d1_feedback_request_timed_out
 from luxi_web_control.web_control_node import classify_d1_posture
+from luxi_web_control.web_control_node import camera_calibration_overrides
 from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import HlocIndexBuilder
@@ -51,6 +53,9 @@ from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_terrain_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
 from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
+from luxi_web_control.web_control_node import normalize_robot_namespace
+from luxi_web_control.web_control_node import robot_resource_name
+from luxi_web_control.web_control_node import replace_launch_arguments
 from luxi_web_control.web_control_node import WebControlNode
 
 
@@ -120,6 +125,13 @@ def test_d1_control_keeps_standard_yaw_direction():
 
     assert '"invert_angular_z": False' in launch_source
     assert 'default_value="/d1/cmd_vel_standard"' in launch_source
+    assert '"web_cmd_vel_topic": LaunchConfiguration(' in launch_source
+
+    generic_source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/launch/web_control.launch.py"
+    ).read_text(encoding="utf-8")
+    assert 'LaunchConfiguration("web_cmd_vel_topic")' in generic_source
 
 
 def test_d1_control_scripts_do_not_depend_on_ros_daemon_discovery():
@@ -134,12 +146,30 @@ def test_d1_control_scripts_do_not_depend_on_ros_daemon_discovery():
         assert "successful=True" in source
 
 
+def test_d1_start_script_treats_existing_managed_bridge_as_success():
+    source = (
+        WORKSPACE_ROOT
+        / "project/slam_d1_bridge/scripts/start_slam_d1_bridge.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "is_managed_bridge_pid" in source
+    assert "already active with managed PID" in source
+    assert "PID file points to an unrelated live process" in source
+    managed_message = source.index("already active with managed PID")
+    assert source.index("exit 0", managed_message) > managed_message
+
+
 def test_d1_web_control_is_enabled_and_exposes_switch():
     config = yaml.safe_load(
         (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
         .read_text(encoding="utf-8")
     )
-    assert config["web_control"]["ros__parameters"]["enable_d1_control"] is True
+    parameters = config["web_control"]["ros__parameters"]
+    assert parameters["enable_d1_control"] is True
+    assert parameters["robot_namespace"] == "d15041873"
+    assert parameters["d1_fsm_topic"] == ""
+    assert parameters["d1_controller_status_service"] == ""
+    assert parameters["d1_parameter_service"] == ""
 
     page = (WORKSPACE_ROOT / "project/luxi-web-control/web/index.html").read_text(
         encoding="utf-8"
@@ -149,6 +179,27 @@ def test_d1_web_control_is_enabled_and_exposes_switch():
     )
     assert 'id="robotControlToggle"' in page
     assert 'api("/api/robot/control", {active: requested})' in app
+    assert "robotControlToggle.checked = managed && ready" in app
+
+
+def test_d1_stale_feedback_request_is_retried():
+    class PendingFuture:
+        @staticmethod
+        def done():
+            return False
+
+    class CompletedFuture:
+        @staticmethod
+        def done():
+            return True
+
+    pending = PendingFuture()
+    assert not d1_feedback_request_timed_out(pending, 10.0, 12.9, 3.0)
+    assert d1_feedback_request_timed_out(pending, 10.0, 13.0, 3.0)
+    assert not d1_feedback_request_timed_out(
+        CompletedFuture(), 10.0, 20.0, 3.0
+    )
+    assert not d1_feedback_request_timed_out(None, None, 20.0, 3.0)
 
 
 def test_web_imu_calibration_button_and_mapping_gate_are_present():
@@ -170,12 +221,130 @@ def test_web_imu_calibration_button_and_mapping_gate_are_present():
     assert "请先在水平面完成 IMU 一键校准" in backend
 
 
+def test_usb_mount_calibration_generates_optical_quaternion_and_replaces_defaults():
+    calibration = {
+        "calibrated": True,
+        "roll_degrees": -90.0,
+        "pitch_degrees": 0.0,
+    }
+    overrides = camera_calibration_overrides(calibration, -90.0)
+    expected = {
+        "camera_qx": -0.5,
+        "camera_qy": 0.5,
+        "camera_qz": -0.5,
+        "camera_qw": 0.5,
+    }
+    for name, value in expected.items():
+        assert float(overrides[name]) == pytest.approx(value)
+
+    arguments = replace_launch_arguments(
+        ["use_imu:=true", "camera_qx:=0", "camera_qw:=1"], overrides
+    )
+    for name in expected:
+        assert sum(item.startswith(f"{name}:=") for item in arguments) == 1
+    assert "use_imu:=true" in arguments
+
+
+def test_web_enables_short_lived_h30_mount_calibration():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )["web_control"]["ros__parameters"]
+    assert config["imu_level_standalone_enabled"] is True
+    assert config["imu_level_calibration_launch_file"] == (
+        "usb_imu_level_calibration.launch.py"
+    )
+    assert "{robot_namespace}" in config["imu_level_calibration_store_path"]
+    assert config["imu_level_camera_yaw_degrees"] == -90.0
+
+
+def test_stopped_mapping_poll_does_not_reset_the_user_mode_selection():
+    app = (
+        WORKSPACE_ROOT / "project/luxi-web-control/web/app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "let mappingModeInitialized = false" in app
+    assert "mapping.state === \"running\" && mapping.mode" in app
+    assert "!mappingModeInitialized && mapping.default_mode" in app
+    assert "else if (mapping.default_mode)" not in app
+
+
+def test_robot_namespace_selects_all_d1_resources():
+    assert normalize_robot_namespace("/d15042176/") == "d15042176"
+    assert robot_resource_name(
+        "d15042176", "command/user_command"
+    ) == "/d15042176/command/user_command"
+    with pytest.raises(ValueError):
+        normalize_robot_namespace("fleet/d15049999")
+
+
+def test_robot_namespace_is_forwarded_by_both_web_launches():
+    launch_directory = WORKSPACE_ROOT / "project/luxi-web-control/launch"
+    generic = (launch_directory / "web_control.launch.py").read_text(
+        encoding="utf-8"
+    )
+    d1 = (launch_directory / "lekiwi_web_control.launch.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'DeclareLaunchArgument("robot_namespace"' in generic
+    assert 'LaunchConfiguration("robot_namespace")' in generic
+    assert 'DeclareLaunchArgument("robot_namespace"' in d1
+    assert '"robot_namespace": LaunchConfiguration(' in d1
+    assert '"ROBOT_NS", LaunchConfiguration("robot_namespace")' in d1
+
+
+def test_d1_one_click_script_accepts_explicit_robot_identity():
+    source = (
+        WORKSPACE_ROOT / "scripts/start_d1_web_control.sh"
+    ).read_text(encoding="utf-8")
+    assert "--robot-ns" in source
+    assert "--robot-ip" in source
+    assert 'robot_namespace:="${ROBOT_NS}"' in source
+    assert "targets '${existing_robot_ns:-unknown}'" in source
+    assert "topic info --no-daemon --spin-time 5.0" in source
+    assert "No D1 DDS namespace was discovered" in source
+    assert "--no-dds-recovery" in source
+    assert "restart_remote_bringup_if_idle" in source
+    assert "Refusing DDS recovery because the remote D1 is not confirmed idle" in source
+    assert 'kill -KILL "${main_pid}"' in source
+    assert "ip -4 route get 1.1.1.1" in source
+    assert "http://192.168.123.51:8080" not in source
+    assert source.index("trap startup_failed ERR INT TERM") > source.index(
+        "D1 command subscriber is not available"
+    )
+
+
+def test_d1_web_mapping_uses_measured_stereo_mount():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )["web_control"]["ros__parameters"]
+
+    arguments = set(config["mapping_launch_arguments"])
+    assert "camera_x:=0.20" in arguments
+    assert "camera_y:=0.044982" in arguments
+    assert "camera_z:=0.20" in arguments
+    assert "camera_qx:=-0.5" in arguments
+    assert "camera_qy:=0.5" in arguments
+    assert "camera_qz:=-0.5" in arguments
+    assert "camera_qw:=0.5" in arguments
+
+    profiles = config["mapping_robot_camera_profiles"]
+    assert profiles == [
+        "d15042176=device/USBCameraSDK/ros2_ws/src/"
+        "usb_camera_driver/config/stereo_camera_d15042176.yaml"
+    ]
+
+
 def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
     pid_file = tmp_path / "bridge.pid"
     start_script = tmp_path / "start.sh"
     stop_script = tmp_path / "stop.sh"
+    environment_file = tmp_path / "environment.txt"
     start_script.write_text(
-        f"#!/bin/sh\necho {os.getpid()} > {pid_file}\n",
+        f"#!/bin/sh\n"
+        f"printf '%s|%s' \"$ROBOT_NS\" \"$SLAM_D1_WORKSPACE\" > {environment_file}\n"
+        f"echo {os.getpid()} > {pid_file}\n",
         encoding="utf-8",
     )
     stop_script.write_text(
@@ -190,6 +359,8 @@ def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
         stop_script=stop_script,
         bridge_pid_file=pid_file,
         log_path=tmp_path / "d1.log",
+        robot_namespace="d15042176",
+        workspace_root=tmp_path,
     )
 
     assert manager.set_active(True)[0]
@@ -198,6 +369,10 @@ def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
             break
         threading.Event().wait(0.01)
     assert manager.status()["state"] == "active"
+    assert manager.status()["robot_namespace"] == "d15042176"
+    assert environment_file.read_text(encoding="utf-8") == (
+        f"d15042176|{tmp_path}"
+    )
 
     assert manager.set_active(False)[0]
     for _ in range(100):
@@ -205,6 +380,40 @@ def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
             break
         threading.Event().wait(0.01)
     assert manager.status()["state"] == "inactive"
+
+
+def test_d1_control_manager_forced_enable_recovers_existing_bridge(tmp_path):
+    pid_file = tmp_path / "bridge.pid"
+    recovery_file = tmp_path / "recovery.txt"
+    start_script = tmp_path / "start.sh"
+    stop_script = tmp_path / "stop.sh"
+    pid_file.write_text(str(os.getpid()), encoding="ascii")
+    start_script.write_text(
+        f"#!/bin/sh\nprintf '%s' \"${{SLAM_D1_RECOVER_EXISTING:-false}}\""
+        f" > {recovery_file}\n",
+        encoding="utf-8",
+    )
+    stop_script.write_text("#!/bin/sh\n", encoding="utf-8")
+    start_script.chmod(0o755)
+    stop_script.chmod(0o755)
+    manager = D1ControlManager(
+        enabled=True,
+        start_script=start_script,
+        stop_script=stop_script,
+        bridge_pid_file=pid_file,
+        log_path=tmp_path / "d1.log",
+        robot_namespace="d15042176",
+        workspace_root=tmp_path,
+    )
+
+    accepted, _ = manager.set_active(True, force=True)
+    assert accepted
+    for _ in range(100):
+        if not manager.status()["transitioning"]:
+            break
+        threading.Event().wait(0.01)
+    assert recovery_file.read_text(encoding="utf-8") == "true"
+    assert manager.status()["state"] == "active"
 
 
 @pytest.mark.parametrize(
@@ -231,8 +440,13 @@ def test_map_export_filters_isolated_depth_outliers():
     assert "--opt 0" in script
     assert "--decimation 2" in script
     assert "--max_range 10.0" in script
-    assert "--noise_radius 0.35" in script
-    assert "--noise_k 3" in script
+    # rtabmap-export applies radius search before removing invalid organized
+    # depth points. The project filter must sanitize finite XYZ first.
+    assert "--noise_radius" not in script
+    assert 'cloud_filter="${workspace}/tools/map_cloud_filter/map_cloud_filter"' in script
+    assert "--radius 0.35" in script
+    assert "--min-neighbors 3" in script
+    assert "--mean-k 0" in script
     assert "--min_range 0.35" in script
     assert "--edge_bleeding_error 0.10" in script
 
@@ -242,6 +456,54 @@ def test_map_export_uses_five_centimeter_octomap_resolution():
         WORKSPACE_ROOT / "tools/export_rtabmap_octomap.sh"
     ).read_text(encoding="utf-8")
     assert '"${octomap_path}" 0.05' in script
+
+
+def test_map_display_does_not_synchronously_build_hloc_index():
+    source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/luxi_web_control/web_control_node.py"
+    ).read_text(encoding="utf-8")
+    load_method = source.split("    def load_navigation_map(", 1)[1].split(
+        "    def start_navigation_localization(", 1
+    )[0]
+
+    assert "hloc_index_builder.build(" not in load_method
+    assert "map display is available" in load_method
+
+
+def test_auto_localization_builds_missing_hloc_and_gates_robot_motion():
+    source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/luxi_web_control/web_control_node.py"
+    ).read_text(encoding="utf-8")
+    localize_method = source.split(
+        "    def start_navigation_localization(", 1
+    )[1].split("    def stop_navigation(", 1)[0]
+    motion_method = source.split(
+        "    def start_navigation_motion(", 1
+    )[1].split("    def halt_navigation_motion(", 1)[0]
+
+    assert "self.hloc_index_builder.build(" in localize_method
+    assert 'robot_control["control_ready"]' in motion_method
+
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )["web_control"]["ros__parameters"]
+    assert config["auto_build_hloc_index"] is True
+    assert config["navigation_launch_package"] == "lunar_usb_rtabmap_bringup"
+    assert config["navigation_launch_file"] == (
+        "usb_crestereo_saved_map_navigation.launch.py"
+    )
+    assert config["navigation_sensor_setup"].endswith(
+        "device/USBCameraSDK/ros2_ws/install/setup.bash"
+    )
+
+    app = (
+        WORKSPACE_ROOT / "project/luxi-web-control/web/app.js"
+    ).read_text(encoding="utf-8")
+    assert "!selectedLoadable" in app
+    assert "navigation.active || estopActive || !robotControlReady" in app
 
 
 def test_velocity_is_clamped_to_server_limits():
@@ -428,7 +690,7 @@ def test_web_mapping_controller_defaults_to_crestereo_primary(tmp_path):
     assert "new_map:=true" in command
     assert status["frontend"] == "crestereo_cuda_graph+luxi_direct_odom"
     assert status["mode"] == "crestereo"
-    assert status["modes"] == ["crestereo", "vpi"]
+    assert status["modes"] == ["crestereo", "crestereo_max", "vpi"]
     assert status["default_mode"] == "crestereo"
 
 
@@ -457,6 +719,34 @@ def test_web_mapping_controller_selects_crestereo_launch(tmp_path):
     assert "use_imu:=true" in command
     assert "use_imu:=false" not in command
     assert status["frontend"] == "crestereo_cuda_graph+luxi_direct_odom"
+
+
+def test_web_mapping_controller_selects_crestereo_max_launch(tmp_path):
+    workspace_setup = Path(tmp_path / "workspace_setup.bash")
+    workspace_setup.touch()
+    controller = MappingController(
+        enabled=True,
+        package="lunar_usb_rtabmap_bringup",
+        launch_file="usb_rtabmap.launch.py",
+        rmw_implementation="rmw_fastrtps_cpp",
+        sensor_setup=None,
+        workspace_setup=workspace_setup,
+        log_path=Path(tmp_path / "mapping.log"),
+        launch_arguments=("new_map:=true", "use_imu:=false", "rviz:=false"),
+        crestereo_use_imu=True,
+    )
+
+    command = controller._command("crestereo_max")[-1]
+    controller._mode = "crestereo_max"
+    status = controller.status()
+
+    assert "usb_crestereo_max_performance_rtabmap.launch.py" in command
+    assert "usb_crestereo_rtabmap.launch.py" not in command
+    assert "use_imu:=true" in command
+    assert "use_imu:=false" not in command
+    assert status["frontend"] == (
+        "crestereo_10hz+superpoint_trt+lightglue_graph"
+    )
 
 
 def test_web_mapping_controller_keeps_vpi_imu_setting(tmp_path):
@@ -601,6 +891,7 @@ def test_mapping_stop_signals_only_top_level_launch(tmp_path):
 
 def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
     setup = Path(tmp_path / "setup.bash")
+    sensor_setup = Path(tmp_path / "usb_setup.bash")
     database = Path(tmp_path / "map.db")
     octomap = Path(tmp_path / "map.bt")
     cloud = Path(tmp_path / "map_cloud.ply")
@@ -608,17 +899,18 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
     hloc_map = Path(tmp_path / "hloc_map")
     hloc_map.mkdir()
     (hloc_map / "metadata.yaml").touch()
-    for path in (setup, database, octomap):
+    for path in (setup, sensor_setup, database, octomap):
         path.touch()
     controller = NavigationController(
         enabled=True,
         package="luxi_3d_navigation",
         launch_file="saved_map_navigation.launch.py",
         rmw_implementation="rmw_cyclonedds_cpp",
-        sensor_setup=None,
+        sensor_setup=sensor_setup,
         workspace_setup=setup,
         octomap_library_path=Path(tmp_path),
         log_path=Path(tmp_path / "navigation.log"),
+        launch_arguments=("use_imu:=true", "camera_x:=0.20"),
     )
 
     started, message = controller.start(
@@ -632,6 +924,11 @@ def test_navigation_requires_exported_cloud_and_passes_it_to_launch(tmp_path):
     assert f"cloud_path:={cloud}" in command[-1]
     assert f"hloc_map_directory:={hloc_map}" in command[-1]
     assert f"semantic_path:={semantic}" in command[-1]
+    assert "use_imu:=true" in command[-1]
+    assert "camera_x:=0.20" in command[-1]
+    assert command[-1].index(f"source {setup}") < command[-1].index(
+        f"source {sensor_setup}"
+    )
 
 
 def test_sparse_cloud_extracts_finite_xyzrgb_points():
@@ -992,6 +1289,10 @@ def test_navigation_motion_requires_localization_and_path():
         "path_ready": True,
         "active": False,
     }
+    node.d1_control_status = lambda: {
+        "enabled": True,
+        "control_ready": True,
+    }
 
     started, message = node.start_navigation_motion()
 
@@ -1000,6 +1301,19 @@ def test_navigation_motion_requires_localization_and_path():
     assert len(published) == 1
     assert published[0].data is True
     assert node._navigation_follower_state == "starting"
+
+    node.d1_control_status = lambda: {
+        "enabled": True,
+        "control_ready": False,
+    }
+    started, message = node.start_navigation_motion()
+    assert not started
+    assert "站立且可控制" in message
+    assert len(published) == 1
+    node.d1_control_status = lambda: {
+        "enabled": True,
+        "control_ready": True,
+    }
 
     node.navigation_status = lambda: {
         "state": "running",

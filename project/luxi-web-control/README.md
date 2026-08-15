@@ -168,13 +168,34 @@ ros2 run luxi_web_control web_control_node --ros-args \
 
 ### 已连接的 D1 机器人（192.168.123.49）
 
-控制目标使用 Fast DDS、Domain 42 和子网发现。网页与导航先输出标准
+控制目标使用 Fast DDS、Domain 42 和子网发现。代码不会根据 DDS 图自动选择机器人：
+同一网络可能发现多台 D1，自动选择存在误控风险。用 `robot_namespace` 显式指定唯一目标。
+网页与导航先输出标准
 `geometry_msgs/msg/Twist`，再由 `slam_d1_bridge` 转换为厂家接口
 `/d15041873/command/user_command`。启动网页和速度仲裁：
 
 ```bash
-ros2 launch luxi_web_control lekiwi_web_control.launch.py
+ros2 launch luxi_web_control lekiwi_web_control.launch.py \
+  robot_namespace:=d15041873
 ```
+
+一键入口还可同时指定该机器人的有线 IP：
+
+```bash
+./scripts/start_d1_web_control.sh \
+  --robot-ns d15041873 --robot-ip 192.168.123.49
+```
+
+第二台 D1 使用相同有线 IP，按 namespace 区分：
+
+```bash
+./scripts/start_d1_web_control.sh \
+  --robot-ns d15042176 --robot-ip 192.168.123.49
+```
+
+`robot_namespace` 会统一派生 FSM 反馈、控制器状态服务、SDK 参数服务、桥输出话题、
+PID 文件和日志。若 8080 端口已有网页实例指向另一台机器人，脚本会拒绝复用，需先安全
+停止原实例再切换。
 
 该启动文件名因兼容已有部署仍保留 `lekiwi`，当前配置面向 D1：它通过 C++ 适配器把
 网页 `/d1/cmd_vel_standard` 与导航 `/navigation/cmd_vel` 仲裁后转发到 `/cmd_vel`。
@@ -236,14 +257,18 @@ ros2 topic echo /cmd_vel geometry_msgs/msg/Twist
 
 ## 网页控制 RTAB-Map 建图（当前 NX USB 双目配置）
 
-网页“深度链路”可选择 CREStereo 预训练模型或 VPI OFA/PVA/VIC，两者均连接 Luxi
-学习特征和 RTAB-Map；当前默认使用 CREStereo 主链路，VPI 作为低资源次选项。不要再单独启动相机
-profile。算法、性能与复测方法见
+网页“深度链路”可选择 CREStereo 稳定档、CREStereo 极致档或 VPI OFA/PVA/VIC，
+三者均连接 Luxi 和 RTAB-Map；默认使用稳定 CREStereo，极致档以 960×540 RGB-D
+冲刺 10 Hz，VPI 是备用项。不要再单独启动相机 profile。算法、性能与复测方法见
 [USB 双目相机 README](../../device/USBCameraSDK/ros2_ws/README.md)。
 
-服务端只接受 `mode=vpi` 或 `mode=crestereo`，不会恢复已移除的 CUDA SGM/经典
-前端。VPI 链路默认传入 `use_imu:=true`；IMU 六轴或四元数健康门禁失败时建图不会
-启动。CREStereo 使用同时间戳的学习前端里程计直接驱动 RTAB-Map。网页默认设置
+稳定档使用 640×360 两级 CREStereo，并以低分辨率反向推理做左右一致性校验；在
+反光地面上会主动舍弃无法双向验证的点，避免把镜面亮斑和遮挡边缘融合成障碍。
+
+服务端只接受 `mode=crestereo`、`mode=crestereo_max` 或 `mode=vpi`，不会恢复已移除
+的 CUDA SGM/经典前端。VPI 链路默认传入 `use_imu:=true`；IMU 六轴或四元数健康门禁
+失败时建图不会启动。两个 CREStereo 档均使用同时间戳的学习前端里程计直接驱动
+RTAB-Map。网页默认设置
 `mapping_crestereo_use_imu:=true`；H30 无数据或轴/四元数无效时健康门禁会拒绝启动，
 避免不可信姿态进入地图。
 
@@ -252,13 +277,23 @@ CREStereo 建图采用分层深度：0.4--4 m 全量构建可靠近场结构，4
 的里程计特征求解，因此不会用低视差深度拉动相机位姿；VPI profile 的既有范围和
 资源配置不变。
 
+D1 上车安装使用实测近似值：双目中点位于机身旋转中心前方 0.20 m、上方 0.20 m，
+且两者中心线重合。网页实际传入左目光心 TF，因此结合 89.963 mm 双目基线设置为
+`camera_x=0.20`、`camera_y=0.044982`、`camera_z=0.20` m；相机水平朝前。
+
 打开网页后按以下顺序操作：
 
-1. 确认 USB 双目模组已连接，且没有其他进程占用相机。
-2. 选择深度链路后点击“开始建图”。状态栏会显示实际使用的算法，并以无 RViz模式启动。
-3. 使用虚拟摇杆缓慢运动并采集环境。
-4. 点击“停止建图”。网页只向顶层 launch 发送一次 `SIGINT`，由 launch 按顺序关闭
+1. 确认 USB 双目和 H30 已连接，机器人位于水平面且完全静止。
+2. 点击“安装角度校准”。网页会短暂独占 H30，采集 200 个重力样本后自动释放串口，
+   并将结果保存到 `maps/calibration/<robot_namespace>_camera_mount.json`。下一次建图和
+   定位会自动覆盖 `camera_qx/qy/qz/qw`，不需要手工抄写角度。
+3. 选择深度链路后点击“开始建图”。状态栏会显示实际使用的算法，并以无 RViz模式启动。
+4. 使用虚拟摇杆缓慢运动并采集环境。
+5. 点击“停止建图”。网页只向顶层 launch 发送一次 `SIGINT`，由 launch 按顺序关闭
    子节点；等待 RTAB-Map 打印保存完成后，状态才返回“未启动”。
+
+安装角度校准日志位于 `log/luxi_web_control_imu_calibration.log`。校准期间不能同时建图
+或定位；启动失败、H30 无数据、机器人持续晃动及结果保存失败都会直接显示在网页上。
 
 网页下方会同时显示两块只读预览：USB 左相机 RGB 图像，以及来自
 `/rtabmap/cloud_map` 的彩色点云。RGB 在相机驱动运行后即可显示；点云需要建图
@@ -365,9 +400,9 @@ A* 使用同一代价且默认权重为 8.0，在存在宽通道时会选择低�
 | `web_root` | 安装目录 | 自定义网页资源目录，主要用于开发测试 |
 | `enable_mapping_control` | `true` | 是否显示并允许 RTAB-Map 建图开关 |
 | `mapping_launch_package` | `lunar_usb_rtabmap_bringup` | 与 D435i 同层级的 USB 专属建图入口包 |
-| `mapping_launch_file` | `usb_rtabmap.launch.py` | 兼容配置项；服务端根据网页模式选择 VPI 或 CREStereo 独立入口 |
+| `mapping_launch_file` | `usb_rtabmap.launch.py` | 兼容项；服务端根据网页模式选择稳定 CRE、CRE MAX 或 VPI 入口 |
 | `mapping_launch_arguments` | `new_map/无界面/H30 IMU/自由 6DoF` | 传给建图入口的参数列表；IMU 健康门禁失败时不会启动里程计 |
-| `mapping_crestereo_use_imu` | `true` | CREStereo 默认使用 H30；仅无 IMU 诊断时关闭 |
+| `mapping_crestereo_use_imu` | `true` | 两个 CREStereo 档默认使用 H30；仅无 IMU 诊断时关闭 |
 | `mapping_sensor_setup` | USB 工作区 `install/setup.bash` | 在通用算法环境之上加载 USB 设备包 |
 | `auto_build_hloc_index` | `true` | 加载地图时是否自动构建缺失的 GPU HLoc 索引 |
 | `hloc_index_build_timeout` | `900.0` | HLoc 导出和单个模型构建步骤的超时秒数 |

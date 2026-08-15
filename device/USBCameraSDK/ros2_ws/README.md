@@ -8,9 +8,11 @@ Jetson Orin NX + ROS 2 Humble。
 | 链路 | 定位 | 特点 |
 |---|---|---|
 | CREStereo | 默认主链路 | 深度覆盖完整，适合 0.4–4 m 主地图和 4–10 m 稀疏轮廓 |
+| CREStereo MAX | 可选极致档 | 960×540 RGB-D、10 Hz 深度目标，优先帧率和画质 |
 | VPI | 网页备用项 | 资源较低，近场更稳定，但有效深度更稀疏 |
 
-已移除 CUDA SGM 和经典前端选项。网页与终端均只保留 CREStereo、VPI 两条链路。
+已移除 CUDA SGM 和经典前端。网页提供 CREStereo 稳定档、CREStereo MAX 和 VPI；
+前两项使用同一深度算法，但性能调度相互独立。
 
 ## 启动
 
@@ -29,6 +31,14 @@ ros2 launch lunar_usb_rtabmap_bringup usb_crestereo_rtabmap.launch.py \
   rviz:=true rtabmap_viz:=false use_imu:=true new_map:=true
 ```
 
+CREStereo 极致模式：
+
+```bash
+ros2 launch lunar_usb_rtabmap_bringup \
+  usb_crestereo_max_performance_rtabmap.launch.py \
+  rviz:=true rtabmap_viz:=false use_imu:=true new_map:=true
+```
+
 VPI 备用链路：
 
 ```bash
@@ -43,7 +53,8 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py \
   bind_address:=0.0.0.0 http_port:=8080
 ```
 
-网页默认选择 CREStereo。停止时必须先点击“停止建图”，等待 RTAB-Map 保存完成。
+网页默认选择稳定 CREStereo，需要时手动切换“CREStereo 极致”。停止时必须先点击
+“停止建图”，等待 RTAB-Map 保存完成。
 
 ## 建图策略
 
@@ -68,25 +79,30 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py \
 10 m 是输出上限，不代表 10 m 范围内都具有 D435i 级绝对精度。无纹理、反光、过曝和
 遮挡区域仍会缺失或波动；月面类场景应保留地表纹理，并避免只拍摄大面积纯色区域。
 
-## NX 实测资源
+## NX 实测（当前高质量主链路）
 
-最终 CREStereo 主配置使用 180×320 FP16 模型、CUDA Graph 和 6 Hz 最新帧调度：
+主链路使用 640×360 四输入级联模型，并用 320×180 FP16 反向模型做左右一致性校验。
+在当前反光走廊的同一组双目数据和实机静态链路上测得：
 
 | 指标 | 结果 |
 |---|---:|
-| 原始深度 | 5.94–6.02 Hz |
-| 视觉里程计 | 平均 4.90 Hz，中位数 5.91 Hz |
-| 平均匹配内点 | 91.2 |
-| GPU | 平均 49.1%，中位数 41.5%，p90 99% |
-| 整机输入功耗 | 平均 12.70 W |
-| 系统内存 | 平均 6.57 GiB |
-| 深度节点 | 0.518 CPU 核 / 1.103 GiB RSS |
-| 视觉前端 | 0.394 CPU 核 / 1.527 GiB RSS |
-| RTAB-Map | 0.121 CPU 核 / 0.298 GiB RSS |
+| 深度节点单独运行 | 2.68–2.70 Hz |
+| 完整 H30 + LightGlue + RTAB 链路 | 2.32–2.47 Hz |
+| 有效深度中位数 | 约 46% |
+| 静态深度变化 p50 / p90 | 145 / 568 mm |
+| 相邻帧变化 >0.5 m | 24.2% → 12.5% |
+| 视觉前端静态匹配 | 425–431 matches，53–58 inliers |
+| 448 s 静止末端位移 / yaw 范围 | 1.34 cm / 1.08° |
 
-GPU 峰值来自 CREStereo 和 LightGlue 的短时突发；中位数明显较低，说明帧间仍有调度
-余量。解除 6 Hz 限速可提高深度帧率，但会增加功耗并挤占视觉前端资源，不建议作为
-默认配置。
+低置信度反光点会变为未知，而不是保留为假障碍；因此点数少于旧单次模型，但融合后
+墙体和地面轮廓更稳定。网页“CREStereo 极致”仍保留高帧率模式，适合优先看帧率而非
+反光场景几何置信度的情况。
+
+极致档仍采集相机原始 1920×1080/10 Hz MJPEG，CREStereo 推理为 320×180 FP16，
+RGB-D 发布为 960×540。CPU 预处理与 GPU 推理流水化后，深度内部吞吐约 10 Hz；完整
+视觉里程计平均 7.74 Hz、中位数 9.19 Hz。该档平均约 18.85 W，GPU 平均/中位数
+66.8%/92%，测试最高 77.2 °C、无节流。它带 85 °C 告警和 92 °C 自动停止保护。
+高帧率档使用 320×180 模型冲刺 10 Hz；需要真实几何细节时使用默认的原生 640×360 主链路。详见[高帧率模式基准](../../../maps/benchmarks/usb_crestereo_max_performance_20260813/README.md)。
 
 ## 关键话题
 

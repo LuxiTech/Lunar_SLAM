@@ -33,6 +33,14 @@ def generate_launch_description():
                 driver_share / "models" / "crestereo_init_iter2_180x320_fp16.onnx"
             ),
         ),
+        DeclareLaunchArgument(
+            "left_right_model_path",
+            default_value=str(
+                driver_share
+                / "models"
+                / "crestereo_init_iter2_180x320_fp16.onnx"
+            ),
+        ),
         DeclareLaunchArgument("execution_provider", default_value="cuda"),
         DeclareLaunchArgument(
             "imu_params", default_value=str(bringup_share / "config" / "h30_imu.yaml")
@@ -60,6 +68,9 @@ def generate_launch_description():
                 {
                     "calibration_file": LaunchConfiguration("calibration_file"),
                     "model_path": LaunchConfiguration("model_path"),
+                    "left_right_model_path": LaunchConfiguration(
+                        "left_right_model_path"
+                    ),
                     "execution_provider": LaunchConfiguration("execution_provider"),
                     "point_cloud_max_depth_m": LaunchConfiguration(
                         "point_cloud_max_depth_m"
@@ -79,6 +90,13 @@ def generate_launch_description():
                 },
             ],
             output="screen",
+            # RGB alone is not a usable RGB-D camera chain.  If the learned
+            # depth process cannot load its model (or exits later), stop the
+            # enclosing launch immediately instead of leaving the web page
+            # indefinitely reporting that it is waiting for the camera.
+            on_exit=[
+                EmitEvent(event=Shutdown(reason="CREStereo depth exited"))
+            ],
         ),
         Node(
             package="yesense_std_ros2",
