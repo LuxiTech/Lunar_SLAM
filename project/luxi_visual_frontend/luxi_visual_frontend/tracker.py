@@ -40,7 +40,7 @@ class FeatureBackend(Protocol):
 class TrackerConfig:
     """Tracking thresholds expressed in metric and pixel units."""
 
-    minimum_keypoints: int = 80
+    minimum_keypoints: int = 60
     minimum_matches: int = 50
     minimum_depth_matches: int = 30
     minimum_inliers: int = 25
@@ -61,7 +61,7 @@ class TrackerConfig:
     keyframe_min_inlier_ratio: float = 0.40
     maximum_frame_translation: float = 1.0
     maximum_frame_rotation: float = math.radians(60.0)
-    maximum_frame_angular_rate: float = math.radians(90.0)
+    maximum_frame_angular_rate: float = math.radians(55.0)
     maximum_consecutive_tracking_failures: int = 3
     minimum_depth_consistency_matches: int = 20
     maximum_depth_consistency_error: float = 0.08
@@ -76,6 +76,11 @@ class TrackerConfig:
     # run.  Hardware profiles can therefore lock base Z without flattening
     # its measured attitude.
     constrain_vertical_translation: bool = False
+    # D435i has no magnetometer. Its AHRS yaw may assist diagnostics, but must
+    # not silently replace visually verified yaw or become the new keyframe
+    # orientation after tracking loss.
+    use_imu_depth_translation: bool = False
+    use_imu_reseed_rotation: bool = False
 
 
 def constrain_camera_pose_vertical_translation(
@@ -297,8 +302,10 @@ class VisualOdometryTracker:
             if self._last_accepted_pose is not None
             else self._last_pose.copy()
         )
-        predicted_rotation = self._predicted_odom_rotation(
-            world_from_camera_rotation, stamp
+        predicted_rotation = (
+            self._predicted_odom_rotation(world_from_camera_rotation, stamp)
+            if self.config.use_imu_reseed_rotation
+            else None
         )
         if predicted_rotation is not None:
             pose[:3, :3] = predicted_rotation
@@ -560,18 +567,27 @@ class VisualOdometryTracker:
             else:
                 current_depth_mask = valid_depth[pnp_current_indices]
                 consistent_match_positions = np.flatnonzero(current_depth_mask)
+                rotation_for_translation = gravity_aligned_current_from_reference
+                if self.config.use_imu_depth_translation:
+                    rotation_for_translation = full_imu_current_from_reference
                 if (
                     len(consistent_match_positions)
                     >= self.config.minimum_depth_consistency_matches
                 ):
                     fixed_rotation_pose = estimate_translation_with_rotation(
                         reference.points3d[
-                            reference_indices[pnp_match_indices[consistent_match_positions]]
+                            reference_indices[
+                                pnp_match_indices[consistent_match_positions]
+                            ]
                         ],
-                        points3d[pnp_current_indices[consistent_match_positions]],
-                        features.keypoints[pnp_current_indices[consistent_match_positions]],
+                        points3d[
+                            pnp_current_indices[consistent_match_positions]
+                        ],
+                        features.keypoints[
+                            pnp_current_indices[consistent_match_positions]
+                        ],
                         intrinsics,
-                        gravity_aligned_current_from_reference,
+                        rotation_for_translation,
                         self.config.maximum_depth_consistency_error,
                         self.config.minimum_depth_consistency_matches,
                     )
@@ -583,7 +599,9 @@ class VisualOdometryTracker:
                         <= self.config.maximum_imu_gravity_error
                     ):
                         remapped_inliers = pnp_match_indices[
-                            consistent_match_positions[fixed_rotation_pose.inlier_indices]
+                            consistent_match_positions[
+                                fixed_rotation_pose.inlier_indices
+                            ]
                         ]
                         if len(remapped_inliers) >= self.config.minimum_inliers:
                             pose = type(pose)(
@@ -591,7 +609,11 @@ class VisualOdometryTracker:
                                 remapped_inliers,
                                 fixed_rotation_pose.reprojection_rmse,
                             )
-                            pose_source = "IMU_DEPTH"
+                            pose_source = (
+                                "IMU_DEPTH"
+                                if self.config.use_imu_depth_translation
+                                else "GRAVITY_DEPTH"
+                            )
                             depth_consistency_inliers = len(remapped_inliers)
 
         # Learned stereo depth flickers even when the images are stationary.

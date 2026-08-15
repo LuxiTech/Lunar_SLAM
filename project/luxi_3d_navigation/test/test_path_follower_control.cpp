@@ -40,6 +40,17 @@ TEST(PathFollowerControl, LargeHeadingErrorRotatesBeforeAdvancing)
   EXPECT_DOUBLE_EQ(command.angular_z, 0.10);
 }
 
+TEST(PathFollowerControl, PreservesD1MinimumEffectiveWalkingSpeed)
+{
+  const auto command = luxi_3d_navigation::pathFollowerCommand(
+    0.13, 0.0, 0.6, 1.2, 0.10, 0.35, 0.15, 0.35, 0.10);
+  EXPECT_DOUBLE_EQ(command.linear_x, 0.10);
+
+  const auto rotate_only = luxi_3d_navigation::pathFollowerCommand(
+    0.13, 0.50, 0.6, 1.2, 0.10, 0.35, 0.15, 0.35, 0.10);
+  EXPECT_DOUBLE_EQ(rotate_only.linear_x, 0.0);
+}
+
 TEST(PathFollowerControl, D1SafetyToleranceOverridesUnsafeRuntimeValue)
 {
   EXPECT_TRUE(luxi_3d_navigation::pathGoalReached(

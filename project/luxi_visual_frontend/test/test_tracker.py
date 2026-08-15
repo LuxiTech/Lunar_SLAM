@@ -190,6 +190,7 @@ def test_tracker_reseed_propagates_from_last_accepted_visual_pose():
             minimum_depth_consistency_matches=6,
             maximum_consecutive_tracking_failures=2,
             maximum_frame_angular_rate=np.deg2rad(180.0),
+            use_imu_reseed_rotation=True,
         ),
     )
     depth = np.full((480, 640), 2000, dtype=np.uint16)
@@ -533,7 +534,6 @@ def test_tracker_refines_pnp_translation_with_current_depth():
         [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
     )
     rgb = np.zeros((480, 640, 3), dtype=np.uint8)
-
     initialized = tracker.process(rgb, depth, intrinsics, 0.001, 1.0)
     refined = tracker.process(rgb, depth, intrinsics, 0.001, 1.1)
 
@@ -589,3 +589,47 @@ def test_tracker_keeps_pnp_when_depth_refinement_has_too_few_inliers(monkeypatch
     assert result.accepted
     assert result.pose_source == "PNP"
     assert result.inlier_count >= 25
+
+
+def test_tracker_default_reseed_never_inherits_unobservable_imu_yaw():
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
+    )
+    features = [_features(pixels) for _ in range(3)]
+    no_matches = np.full(len(pixels), -1, dtype=np.int64)
+    tracker = VisualOdometryTracker(
+        MatchSequenceBackend(features, [no_matches, no_matches]),
+        TrackerConfig(
+            minimum_keypoints=8,
+            minimum_matches=8,
+            minimum_depth_matches=8,
+            minimum_inliers=6,
+            minimum_grid_coverage=0.0,
+            maximum_consecutive_tracking_failures=2,
+            maximum_frame_angular_rate=np.deg2rad(180.0),
+        ),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    imu_yaw, _ = cv2.Rodrigues(
+        np.array([0.0, 0.0, np.deg2rad(20.0)])
+    )
+
+    tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.0,
+        world_from_camera_rotation=np.eye(3),
+    )
+    tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.1,
+        world_from_camera_rotation=imu_yaw,
+    )
+    reseeded = tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.2,
+        world_from_camera_rotation=imu_yaw,
+    )
+
+    assert not reseeded.accepted and reseeded.keyframe_updated
+    np.testing.assert_allclose(reseeded.odom_from_camera, np.eye(4), atol=1e-6)

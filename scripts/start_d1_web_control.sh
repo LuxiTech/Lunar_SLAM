@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-readonly WORKSPACE="${LUXI_WORKSPACE_ROOT:-/home/nvidia/Desktop/lunar_-slam}"
+readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
+readonly WORKSPACE="${LUXI_WORKSPACE_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
 readonly WEB_URL="http://127.0.0.1:8080"
 readonly WEB_LOG="${WORKSPACE}/log/d1_web_control.log"
 readonly WEB_PID_FILE="/tmp/d1_web_control.pid"
@@ -10,6 +12,7 @@ readonly WEB_PID_FILE="/tmp/d1_web_control.pid"
 ROBOT_IP="${D1_ROBOT_IP:-192.168.123.49}"
 ROBOT_NS="${ROBOT_NS:-d15041873}"
 D1_SSH_USER="${D1_SSH_USER:-robot}"
+readonly D1_DISCOVERY_SPIN_TIME="${D1_DISCOVERY_SPIN_TIME:-30.0}"
 
 RUN_MOTION_TEST=false
 ASSUME_YES=false
@@ -97,6 +100,14 @@ export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 export ROBOT_NS
 export SLAM_D1_WORKSPACE="${WORKSPACE}"
 
+readonly D1_LAN_DDS_SETUP="${WORKSPACE}/install/slam_d1_bridge/lib/slam_d1_bridge/setup_d1_lan_dds.sh"
+if [[ ! -r "${D1_LAN_DDS_SETUP}" ]]; then
+    echo "D1 LAN-only DDS setup is missing; rebuild slam_d1_bridge." >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "${D1_LAN_DDS_SETUP}"
+
 # Never silently reuse a web process configured for another robot.
 if existing_web_status="$(curl --fail --silent "${WEB_URL}/api/status" 2>/dev/null)"; then
     existing_robot_ns="$(
@@ -115,7 +126,8 @@ safe_web_stop()
 {
     curl --fail --silent --show-error \
         -X POST -H "Content-Type: application/json" \
-        -d '{}' "${WEB_URL}/api/stop" >/dev/null 2>&1 || true
+        -d '{"client_id":"startup-safety-stop","force":true}' \
+        "${WEB_URL}/api/stop" >/dev/null 2>&1 || true
 }
 
 safe_robot_stop()
@@ -137,7 +149,7 @@ command_subscriber_available()
 {
     local topic_info
     topic_info="$(
-        timeout 10s ros2 topic info --no-daemon --spin-time 5.0 \
+        timeout 35s ros2 topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}" \
             "${COMMAND_TOPIC}" 2>&1 || true
     )"
     grep -Eq 'Subscription count: [1-9][0-9]*' <<<"${topic_info}"
@@ -214,6 +226,7 @@ REMOTE_RECOVERY
 }
 
 ping -c 1 -W 1 "${ROBOT_IP}" >/dev/null
+echo "D1 control LAN: ${D1_LAN_INTERFACE} (${D1_LAN_ADDRESS}) -> ${ROBOT_IP}"
 
 if ! command_subscriber_available; then
     discovered_robot_namespace_lines="$(
@@ -311,7 +324,7 @@ send_web_command_for()
         fi
         curl --fail --silent --show-error \
             -X POST -H "Content-Type: application/json" \
-            -d "{\"linear_x\":${linear_x},\"linear_y\":0.0,\"angular_z\":${angular_z}}" \
+            -d "{\"linear_x\":${linear_x},\"linear_y\":0.0,\"angular_z\":${angular_z},\"client_id\":\"startup-motion-test\"}" \
             "${WEB_URL}/api/cmd_vel" >/dev/null
         sleep 0.1
     done

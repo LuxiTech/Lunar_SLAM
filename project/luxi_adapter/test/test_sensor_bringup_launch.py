@@ -56,6 +56,22 @@ def test_d435i_argument_selects_d435i_driver_and_complete_config():
     assert selection.config_path == PACKAGE_ROOT / "config" / "sensor_bringup.yaml"
 
 
+def test_sensor_bringup_detects_residual_components(tmp_path):
+    module = _load_launch_module()
+    current = tmp_path / str(1234)
+    unrelated = tmp_path / str(5678)
+    current.mkdir()
+    unrelated.mkdir()
+    (current / "cmdline").write_bytes(
+        b"/opt/ros/humble/lib/imu_filter_madgwick/imu_filter_madgwick_node\0"
+    )
+    (unrelated / "cmdline").write_bytes(b"/usr/bin/python3\0worker.py\0")
+
+    assert module.find_residual_sensor_processes(tmp_path) == [
+        (1234, "/opt/ros/humble/lib/imu_filter_madgwick/imu_filter_madgwick_node")
+    ]
+
+
 def test_d435i_uses_project_domain_42():
     yaml = pytest.importorskip("yaml")
     parameters = yaml.safe_load(

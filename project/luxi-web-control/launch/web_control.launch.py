@@ -65,6 +65,10 @@ def generate_launch_description():
                         LaunchConfiguration("http_port"),
                         value_type=int,
                     ),
+                    "restrict_http_to_d1_lan": ParameterValue(
+                        LaunchConfiguration("restrict_http_to_d1_lan"),
+                        value_type=bool,
+                    ),
                 },
             ],
         )
@@ -94,6 +98,9 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("robot_namespace", default_value="d15041873"),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
+        DeclareLaunchArgument(
+            "restrict_http_to_d1_lan", default_value="false"
+        ),
         DeclareLaunchArgument("http_port", default_value="8080"),
         DeclareLaunchArgument(
             "reset_ros_daemon",

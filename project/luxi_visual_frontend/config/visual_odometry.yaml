@@ -55,7 +55,10 @@ luxi_visual_frontend:
     depth_scale_16u: 0.001
     publish_tf: true
 
-    minimum_keypoints: 80
+    # The D435i view contains large low-texture floor regions.  Sixty points
+    # preserves the downstream 50-match geometric gate while allowing the
+    # first odometry keyframe to initialize in the observed 60-79 point range.
+    minimum_keypoints: 60
     minimum_matches: 50
     minimum_depth_matches: 30
     minimum_inliers: 25
@@ -83,7 +86,10 @@ luxi_visual_frontend:
     # Allow fast turns across a longer accepted-frame gap, while rejecting an
     # impossible orientation jump hidden behind an internal IMU reseed.
     maximum_frame_rotation_deg: 15.0
-    maximum_frame_angular_rate_deg: 90.0
+    # The web/D1 control path is limited to 0.8 rad/s (45.8 deg/s). Leave a
+    # small margin for timestamp jitter, but reject the 90-110 degree/s jumps
+    # that produced the stretched map024 trajectory.
+    maximum_frame_angular_rate_deg: 55.0
     # A fast turn can invalidate the old keyframe. Reseed locally after three
     # rejected updates so RTAB-Map is not starved indefinitely.
     maximum_consecutive_tracking_failures: 3
@@ -128,3 +134,7 @@ luxi_visual_frontend:
     mapping_ground_minimum_row_ratio: 0.0
     mapping_ground_reject_unverified_below_plane: false
     mapping_ground_repair_all_below_plane: false
+    # D435i has no magnetometer: retain IMU gravity validation, but never let
+    # drifting AHRS yaw replace PnP yaw or seed a new keyframe after loss.
+    use_imu_depth_translation: false
+    use_imu_reseed_rotation: false

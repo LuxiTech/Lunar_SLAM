@@ -24,6 +24,8 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <!-- HIK support is an optional luxi_adapter profile and must not make the
+       device-independent mapper depend unconditionally on the vendor SDK. -->
   <exec_depend>luxi_adapter</exec_depend>
   <exec_depend>luxi_visual_frontend</exec_depend>
   <exec_depend>rtabmap_odom</exec_depend>

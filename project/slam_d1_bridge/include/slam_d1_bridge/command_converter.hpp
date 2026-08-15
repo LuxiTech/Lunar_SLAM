@@ -37,9 +37,12 @@ public:
 
     [[nodiscard]] ddt_msgs::msg::UserCommand convert(
         const geometry_msgs::msg::Twist & twist,
-        const std::string & fsm_mode) const;
+        const std::string & fsm_mode,
+        double body_height_rate = 0.0) const;
 
-    [[nodiscard]] static ddt_msgs::msg::UserCommand make_stop(const std::string & fsm_mode);
+    [[nodiscard]] static ddt_msgs::msg::UserCommand make_stop(
+        const std::string & fsm_mode,
+        double body_height_rate = 0.0);
 
 private:
     CommandLimits limits_;

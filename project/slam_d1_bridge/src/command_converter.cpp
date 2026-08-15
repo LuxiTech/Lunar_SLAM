@@ -41,9 +41,10 @@ bool CommandConverter::is_valid(const geometry_msgs::msg::Twist & twist) const
 
 ddt_msgs::msg::UserCommand CommandConverter::convert(
     const geometry_msgs::msg::Twist & twist,
-    const std::string & fsm_mode) const
+    const std::string & fsm_mode,
+    double body_height_rate) const
 {
-    auto command = make_stop(fsm_mode);
+    auto command = make_stop(fsm_mode, body_height_rate);
     command.twist.linear.x = std::clamp(
         twist.linear.x, -limits_.max_linear_x, limits_.max_linear_x);
     command.twist.angular.z = std::clamp(
@@ -51,11 +52,14 @@ ddt_msgs::msg::UserCommand CommandConverter::convert(
     return command;
 }
 
-ddt_msgs::msg::UserCommand CommandConverter::make_stop(const std::string & fsm_mode)
+ddt_msgs::msg::UserCommand CommandConverter::make_stop(
+    const std::string & fsm_mode,
+    double body_height_rate)
 {
     ddt_msgs::msg::UserCommand command;
     command.header.frame_id = "cmd";
     command.fsm_mode = fsm_mode;
+    command.twist.linear.z = body_height_rate;
     command.pose.orientation.w = 1.0;
     return command;
 }

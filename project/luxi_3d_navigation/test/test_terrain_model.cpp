@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include "gtest/gtest.h"
 #include "octomap/OcTree.h"
 
@@ -66,6 +68,33 @@ TEST(TerrainModel, PlansOnDirectlySupportedGround)
   const auto goal = terrain.worldToGrid(0.45, 0.05, 0.05);
   EXPECT_TRUE(terrain.isTraversable(start));
   EXPECT_EQ(terrain.plan(start, goal).size(), 5U);
+}
+
+TEST(TerrainModel, DetoursAroundDynamicBlockedColumns)
+{
+  auto tree = makeGroundPatch(15, 9);
+  auto parameters = testParameters();
+  parameters.snap_radius_cells = 3;
+  luxi_3d_navigation::TerrainModel terrain(tree, parameters);
+  const auto start = terrain.worldToGrid(0.15, 0.45, 0.05);
+  const auto goal = terrain.worldToGrid(1.35, 0.45, 0.05);
+  luxi_3d_navigation::GridColumnSet blocked;
+  for (int y = 3; y <= 5; ++y) {
+    blocked.insert(luxi_3d_navigation::GridCell3D{7, y, 0});
+  }
+  const luxi_3d_navigation::GridPlanningBounds bounds{0, 14, 0, 8};
+
+  const auto path = terrain.planAvoidingColumns(start, goal, blocked, bounds);
+
+  ASSERT_FALSE(path.empty());
+  EXPECT_EQ(path.front(), start);
+  EXPECT_EQ(path.back(), goal);
+  for (const auto & cell : path) {
+    EXPECT_EQ(blocked.count(luxi_3d_navigation::GridCell3D{cell.x, cell.y, 0}), 0U);
+  }
+  EXPECT_TRUE(std::any_of(path.begin(), path.end(), [](const auto & cell) {
+    return cell.y < 3 || cell.y > 5;
+  }));
 }
 
 TEST(TerrainModel, UsesTenCentimeterDefaultRobotRadius)

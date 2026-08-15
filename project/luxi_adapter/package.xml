@@ -21,6 +21,10 @@
   <depend>tf2_ros</depend>
 
   <exec_depend>imu_filter_madgwick</exec_depend>
+  <!-- HIK is an optional hardware profile.  Its vendor SDK packages are
+       resolved by sensor_bringup.launch.py only when hardware:=hik; keeping
+       hik_bringup out of the unconditional dependency graph lets a D435i-only
+       host build and run without the MVS SDK and H30 serial driver. -->
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

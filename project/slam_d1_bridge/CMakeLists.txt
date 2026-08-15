@@ -9,8 +9,11 @@ find_package(ament_cmake REQUIRED)
 find_package(ddt_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 add_library(slam_d1_bridge_node
+    src/body_height_controller.cpp
     src/command_converter.cpp
     src/slam_d1_bridge_node.cpp
 )
@@ -19,7 +22,7 @@ target_include_directories(slam_d1_bridge_node PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:include>"
 )
-ament_target_dependencies(slam_d1_bridge_node ddt_msgs geometry_msgs rclcpp)
+ament_target_dependencies(slam_d1_bridge_node ddt_msgs geometry_msgs rclcpp sensor_msgs std_msgs)
 
 add_executable(slam_d1_bridge src/slam_d1_bridge_main.cpp)
 target_compile_features(slam_d1_bridge PUBLIC cxx_std_17)
@@ -29,6 +32,7 @@ install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch docs DESTINATION share/${PROJECT_NAME})
 install(
     PROGRAMS
+        scripts/setup_d1_lan_dds.sh
         scripts/start_slam_d1_bridge.sh
         scripts/stop_slam_d1_bridge.sh
     DESTINATION lib/${PROJECT_NAME}
@@ -43,7 +47,7 @@ install(
 )
 
 ament_export_targets(export_slam_d1_bridge_node HAS_LIBRARY_TARGET)
-ament_export_dependencies(ddt_msgs geometry_msgs rclcpp)
+ament_export_dependencies(ddt_msgs geometry_msgs rclcpp sensor_msgs std_msgs)
 
 if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
@@ -56,6 +60,9 @@ if(BUILD_TESTING)
 
     ament_add_gtest(test_command_converter test/test_command_converter.cpp)
     target_link_libraries(test_command_converter slam_d1_bridge_node)
+
+    ament_add_gtest(test_body_height_controller test/test_body_height_controller.cpp)
+    target_link_libraries(test_body_height_controller slam_d1_bridge_node)
 endif()
 
 ament_package()

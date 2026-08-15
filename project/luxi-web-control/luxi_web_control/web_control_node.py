@@ -43,8 +43,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters
-from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
-from std_msgs.msg import Bool, Float32, String
+from sensor_msgs.msg import BatteryState, CompressedImage, PointCloud2, PointField
+from std_msgs.msg import Bool, Float32, Float64, String
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker
 
@@ -52,6 +52,15 @@ from visualization_msgs.msg import Marker
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 SIOCGIFADDR = 0x8915
 MAP_IDENTIFIER = re.compile(r"^map\d+$")
+CONTROL_CLIENT_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+LEGACY_CONTROL_CLIENT_ID = "legacy-http-client"
+CONTROL_DEFERRED_GET_PATHS = frozenset({
+    "/api/preview/cloud",
+    "/api/navigation/voxels",
+    "/api/navigation/cloud",
+    "/api/navigation/path",
+    "/api/navigation/terrain",
+})
 PLY_SCALAR_FORMATS = {
     "char": "b", "int8": "b", "uchar": "B", "uint8": "B",
     "short": "h", "int16": "h", "ushort": "H", "uint16": "H",
@@ -206,6 +215,110 @@ def d1_feedback_request_timed_out(
         and requested_at is not None
         and now - requested_at >= timeout
     )
+
+
+def parse_body_height(
+    payload: Dict[str, Any], minimum: float, maximum: float
+) -> float:
+    """Validate a browser body-height request without silently changing it."""
+    value = payload.get("height")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("height must be a number")
+    height = float(value)
+    if not math.isfinite(height):
+        raise ValueError("height must be finite")
+    if height < minimum or height > maximum:
+        raise ValueError(
+            f"height level must be between {minimum:.0f} and {maximum:.0f}"
+        )
+    return height
+
+
+def normalize_battery_percentage(value: float) -> Optional[float]:
+    """Accept both ROS's 0..1 convention and the D1 driver's 0..100 value."""
+    if not math.isfinite(value) or value < 0.0:
+        return None
+    percentage = value * 100.0 if value <= 1.0 else value
+    return round(min(100.0, percentage), 1)
+
+
+def parse_control_client_id(payload: Dict[str, Any]) -> str:
+    """Return an optional bounded browser ID used to arbitrate control."""
+    value = payload.get("client_id", "")
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or not CONTROL_CLIENT_IDENTIFIER.fullmatch(value):
+        raise ValueError("client_id must be 8-128 safe ASCII characters")
+    return value
+
+
+def validate_d1_http_bind_address(bind_address: str) -> None:
+    """Limit the D1 web controller to its wired and operator LANs."""
+    try:
+        address = ipaddress.ip_address(bind_address)
+    except ValueError as exc:
+        raise ValueError("D1 bind_address must be a concrete IPv4 address") from exc
+    allowed_networks = (
+        ipaddress.ip_network("192.168.123.0/24"),
+        ipaddress.ip_network("192.168.137.0/24"),
+    )
+    allowed = address.version == 4 and (
+        address.is_loopback
+        or any(address in network for network in allowed_networks)
+    )
+    if not allowed:
+        raise ValueError(
+            "D1 web control may bind only to 127.0.0.1, 192.168.123.x "
+            "or 192.168.137.x"
+        )
+
+
+def resolve_d1_http_bind_addresses(
+    bind_address: str,
+    lan_addresses: Optional[list] = None,
+) -> list:
+    """Resolve a wildcard to concrete D1 wired/operator LAN addresses."""
+    if bind_address != "0.0.0.0":
+        validate_d1_http_bind_address(bind_address)
+        return [bind_address]
+
+    addresses = (
+        discover_lan_ipv4_addresses()
+        if lan_addresses is None
+        else lan_addresses
+    )
+    allowed_networks = (
+        ipaddress.ip_network("192.168.123.0/24"),
+        ipaddress.ip_network("192.168.137.0/24"),
+    )
+    candidates = []
+    for value in addresses:
+        try:
+            parsed = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if parsed.version == 4 and any(
+            parsed in network for network in allowed_networks
+        ):
+            candidates.append(str(parsed))
+    if not candidates:
+        raise ValueError(
+            "bind_address 0.0.0.0 cannot be used because this host has no "
+            "192.168.123.x or 192.168.137.x address; connect an allowed LAN "
+            "first"
+        )
+    return sorted(
+        set(candidates),
+        key=lambda value: ipaddress.ip_address(value).packed,
+    )
+
+
+def resolve_d1_http_bind_address(
+    bind_address: str,
+    lan_addresses: Optional[list] = None,
+) -> str:
+    """Return the first allowed address for callers needing one endpoint."""
+    return resolve_d1_http_bind_addresses(bind_address, lan_addresses)[0]
 
 
 def mapping_graph_conflicts(
@@ -1028,6 +1141,7 @@ class D1ControlManager:
         stop_script: Path,
         bridge_pid_file: Path,
         log_path: Path,
+        transition_timeout: float = 90.0,
         robot_namespace: str = "d15041873",
         workspace_root: Optional[Path] = None,
     ) -> None:
@@ -1036,6 +1150,7 @@ class D1ControlManager:
         self.stop_script = stop_script
         self.bridge_pid_file = bridge_pid_file
         self.log_path = log_path
+        self.transition_timeout = transition_timeout
         self.robot_namespace = normalize_robot_namespace(robot_namespace)
         self.workspace_root = workspace_root
         self._lock = threading.Lock()
@@ -1099,7 +1214,7 @@ class D1ControlManager:
                     [str(script), "--yes"],
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
-                    timeout=30.0,
+                    timeout=self.transition_timeout,
                     check=False,
                     env=environment,
                 )
@@ -1706,6 +1821,19 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/status":
             self._send_json(HTTPStatus.OK, self.server.control_node.status())
             return
+        if (
+            path in CONTROL_DEFERRED_GET_PATHS
+            and self.server.control_node.control_session_active()
+        ):
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "error": "preview paused while manual control is active",
+                },
+            )
+            return
         if path == "/api/preview/rgb":
             image, content_type = self.server.control_node.rgb_preview()
             if image is None:
@@ -1715,6 +1843,12 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(image)
             return
         if path == "/api/preview/cloud":
+            if not self.server.control_node.cloud_preview_enabled:
+                self._send_error_json(
+                    HTTPStatus.NOT_FOUND,
+                    "live cloud preview is disabled",
+                )
+                return
             self._send_json(
                 HTTPStatus.OK,
                 {"ok": True, "cloud": self.server.control_node.cloud_preview()},
@@ -1811,7 +1945,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/cmd_vel":
             try:
                 command = parse_velocity(payload, node.limits)
-                accepted, reason = node.accept_command(command)
+                client_id = parse_control_client_id(payload)
+                accepted, reason = node.accept_command(command, client_id)
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -1824,8 +1959,25 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/stop":
-            node.stop_motion()
-            self._send_json(HTTPStatus.OK, {"ok": True})
+            try:
+                client_id = parse_control_client_id(payload)
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            force = payload.get("force", False)
+            if not isinstance(force, bool):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST, "force must be boolean"
+                )
+                return
+            stopped = node.stop_motion(
+                client_id=client_id,
+                force=force,
+            )
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "stopped": stopped, "ignored": not stopped},
+            )
             return
         if path == "/api/estop":
             active = payload.get("active", True)
@@ -1856,6 +2008,30 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(
                 HTTPStatus.ACCEPTED,
+                {
+                    "ok": True,
+                    "message": message,
+                    "robot_control": node.d1_control_status(),
+                },
+            )
+            return
+        if path == "/api/robot/height":
+            try:
+                height = parse_body_height(
+                    payload,
+                    node.d1_body_height_minimum,
+                    node.d1_body_height_maximum,
+                )
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            node.stop_motion()
+            accepted, message = node.set_d1_body_height(height)
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.OK,
                 {
                     "ok": True,
                     "message": message,
@@ -2017,10 +2193,11 @@ class WebControlNode(Node):
         )
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("bind_address", "0.0.0.0")
+        self.declare_parameter("restrict_http_to_d1_lan", False)
         self.declare_parameter("http_port", 8080)
         self.declare_parameter("auto_stop_existing_web_control", True)
         self.declare_parameter("publish_rate", 20.0)
-        self.declare_parameter("command_timeout", 0.6)
+        self.declare_parameter("command_timeout", 0.8)
         self.declare_parameter("max_linear_x", 0.25)
         self.declare_parameter("max_linear_y", 0.0)
         self.declare_parameter("max_angular_z", 0.8)
@@ -2032,11 +2209,19 @@ class WebControlNode(Node):
         self.declare_parameter("d1_stop_script", "")
         self.declare_parameter("d1_bridge_pid_file", "")
         self.declare_parameter("d1_control_log_path", "")
+        self.declare_parameter("d1_transition_timeout", 90.0)
         # Empty values follow robot_namespace. Explicit absolute names remain
         # available for unusual vendor deployments.
         self.declare_parameter("d1_fsm_topic", "")
         self.declare_parameter("d1_controller_status_service", "")
         self.declare_parameter("d1_parameter_service", "")
+        self.declare_parameter("d1_battery1_topic", "")
+        self.declare_parameter("d1_battery2_topic", "")
+        self.declare_parameter("d1_body_height_command_topic", "")
+        self.declare_parameter("d1_body_height_status_topic", "")
+        self.declare_parameter("d1_body_height_minimum", 0.0)
+        self.declare_parameter("d1_body_height_maximum", 9.0)
+        self.declare_parameter("d1_body_height_default", 0.0)
         self.declare_parameter("d1_feedback_timeout", 3.0)
         self.declare_parameter(
             "imu_level_calibration_service", "/sensors/imu/calibrate_level"
@@ -2089,6 +2274,8 @@ class WebControlNode(Node):
         self.declare_parameter("mapping_workspace_setup", "")
         self.declare_parameter("mapping_log_path", "")
         self.declare_parameter("mapping_planar_motion", True)
+        self.declare_parameter("mapping_rgbd_topic", "/sensors/rgbd/rgbd_image")
+        self.declare_parameter("mapping_imu_topic", "/sensors/imu/data")
         self.declare_parameter("enable_navigation_control", True)
         self.declare_parameter("navigation_launch_package", "luxi_3d_navigation")
         self.declare_parameter("navigation_launch_file", "saved_map_navigation.launch.py")
@@ -2134,6 +2321,10 @@ class WebControlNode(Node):
         self.declare_parameter(
             "navigation_refined_status_topic", "/luxi_location/status"
         )
+        self.declare_parameter("navigation_hloc_status_topic", "/luxi_hloc/status")
+        self.declare_parameter(
+            "navigation_hloc_diagnostics_topic", "/luxi_hloc/diagnostics"
+        )
         self.declare_parameter("navigation_localization_max_variance", 0.5)
         self.declare_parameter("navigation_localization_timeout", 3.0)
         self.declare_parameter("navigation_icp_verification_timeout", 20.0)
@@ -2145,13 +2336,15 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_ground_normal_radius", 0.30)
         self.declare_parameter("navigation_ground_max_slope_degrees", 35.0)
         self.declare_parameter("navigation_obstacle_min_height", 0.15)
+        self.declare_parameter("navigation_terrain_load_timeout", 90.0)
         self.declare_parameter("enable_preview", True)
+        self.declare_parameter("enable_cloud_preview", False)
         self.declare_parameter(
             "rgb_preview_topic",
             "/sensors/rgbd/color/image_raw/compressed",
         )
         self.declare_parameter("cloud_preview_topic", "/rtabmap/cloud_map")
-        self.declare_parameter("max_cloud_points", 0)
+        self.declare_parameter("max_cloud_points", 5000)
         self.declare_parameter("max_saved_cloud_points", 30000)
         self.declare_parameter("semantic_annotation_timeout", 15.0)
         self.declare_parameter("semantic_annotation_executable", "")
@@ -2165,6 +2358,9 @@ class WebControlNode(Node):
             self.get_parameter("imu_level_status_topic").value
         )
         bind_address = str(self.get_parameter("bind_address").value)
+        restrict_http_to_d1_lan = bool(
+            self.get_parameter("restrict_http_to_d1_lan").value
+        )
         http_port = int(self.get_parameter("http_port").value)
         auto_stop_existing = bool(
             self.get_parameter("auto_stop_existing_web_control").value
@@ -2280,6 +2476,9 @@ class WebControlNode(Node):
                 or workspace_root
                 / f"log/luxi_web_control_d1_{robot_pid_token}.log"
             ).resolve(),
+            transition_timeout=float(
+                self.get_parameter("d1_transition_timeout").value
+            ),
             robot_namespace=self.robot_namespace,
             workspace_root=workspace_root,
         )
@@ -2307,6 +2506,53 @@ class WebControlNode(Node):
                 self.robot_namespace, "teleop_command/get_parameters"
             )
         )
+        configured_battery_topics = tuple(
+            str(self.get_parameter(name).value).strip()
+            for name in ("d1_battery1_topic", "d1_battery2_topic")
+        )
+        self.d1_battery_topics = tuple(
+            configured or robot_resource_name(
+                self.robot_namespace, f"status/battery{index}"
+            )
+            for index, configured in enumerate(
+                configured_battery_topics, start=1
+            )
+        )
+        configured_height_command = str(
+            self.get_parameter("d1_body_height_command_topic").value
+        ).strip()
+        configured_height_status = str(
+            self.get_parameter("d1_body_height_status_topic").value
+        ).strip()
+        self.d1_body_height_command_topic = (
+            configured_height_command
+            or robot_resource_name(
+                self.robot_namespace, "command/body_height"
+            )
+        )
+        self.d1_body_height_status_topic = (
+            configured_height_status
+            or robot_resource_name(
+                self.robot_namespace, "status/body_height"
+            )
+        )
+        self.d1_body_height_minimum = float(
+            self.get_parameter("d1_body_height_minimum").value
+        )
+        self.d1_body_height_maximum = float(
+            self.get_parameter("d1_body_height_maximum").value
+        )
+        self.d1_body_height_default = float(
+            self.get_parameter("d1_body_height_default").value
+        )
+        if not (
+            math.isfinite(self.d1_body_height_minimum)
+            and math.isfinite(self.d1_body_height_maximum)
+            and self.d1_body_height_minimum < self.d1_body_height_maximum
+            and self.d1_body_height_minimum <= self.d1_body_height_default
+            <= self.d1_body_height_maximum
+        ):
+            raise ValueError("invalid D1 body-height limits")
         self.d1_feedback_timeout = float(
             self.get_parameter("d1_feedback_timeout").value
         )
@@ -2318,6 +2564,11 @@ class WebControlNode(Node):
         self._d1_sdk_active: Optional[bool] = None
         self._d1_sdk_received_at: Optional[float] = None
         self._d1_feedback_error = ""
+        self._d1_batteries = [None, None]
+        self._d1_battery_received_at = [None, None]
+        self._d1_body_height = self.d1_body_height_default
+        self._d1_body_height_target = self.d1_body_height_default
+        self._d1_body_height_received_at: Optional[float] = None
         self._d1_controller_future = None
         self._d1_controller_requested_at: Optional[float] = None
         self._d1_parameter_future = None
@@ -2417,6 +2668,12 @@ class WebControlNode(Node):
             planar_motion=bool(
                 self.get_parameter("mapping_planar_motion").value
             ),
+        )
+        self.mapping_rgbd_topic = str(
+            self.get_parameter("mapping_rgbd_topic").value
+        )
+        self.mapping_imu_topic = str(
+            self.get_parameter("mapping_imu_topic").value
         )
         navigation_sensor_setup = str(
             self.get_parameter("navigation_sensor_setup").value
@@ -2559,6 +2816,12 @@ class WebControlNode(Node):
         self.navigation_refined_status_topic = str(
             self.get_parameter("navigation_refined_status_topic").value
         )
+        self.navigation_hloc_status_topic = str(
+            self.get_parameter("navigation_hloc_status_topic").value
+        )
+        self.navigation_hloc_diagnostics_topic = str(
+            self.get_parameter("navigation_hloc_diagnostics_topic").value
+        )
         self.navigation_localization_max_variance = float(
             self.get_parameter("navigation_localization_max_variance").value
         )
@@ -2590,6 +2853,9 @@ class WebControlNode(Node):
         self.navigation_obstacle_min_height = float(
             self.get_parameter("navigation_obstacle_min_height").value
         )
+        self.navigation_terrain_load_timeout = float(
+            self.get_parameter("navigation_terrain_load_timeout").value
+        )
         self.navigation = NavigationController(
             enabled=bool(self.get_parameter("enable_navigation_control").value),
             package=str(self.get_parameter("navigation_launch_package").value),
@@ -2614,6 +2880,9 @@ class WebControlNode(Node):
             launch_arguments=tuple(navigation_launch_arguments),
         )
         self.preview_enabled = bool(self.get_parameter("enable_preview").value)
+        self.cloud_preview_enabled = bool(
+            self.get_parameter("enable_cloud_preview").value
+        )
         self.rgb_preview_topic = str(
             self.get_parameter("rgb_preview_topic").value
         )
@@ -2628,6 +2897,9 @@ class WebControlNode(Node):
         )
 
         self._validate_parameters(http_port, publish_rate)
+        bind_addresses = [bind_address]
+        if restrict_http_to_d1_lan:
+            bind_addresses = resolve_d1_http_bind_addresses(bind_address)
         replacement_message = ""
         if auto_stop_existing and http_port != 0:
             replaced, replacement_message = stop_existing_web_control(
@@ -2638,6 +2910,7 @@ class WebControlNode(Node):
         self._lock = threading.Lock()
         self._command = VelocityCommand()
         self._last_command_time: Optional[float] = None
+        self._control_owner_id = ""
         self._timed_out = False
         self._estop_active = False
         self._closed = False
@@ -2675,6 +2948,10 @@ class WebControlNode(Node):
         self._refined_localization_fitness: Optional[float] = None
         self._refined_localization_status = ""
         self._refined_localization_verified_at: Optional[float] = None
+        self._hloc_status = ""
+        self._hloc_status_received_at: Optional[float] = None
+        self._hloc_diagnostics: Optional[dict] = None
+        self._hloc_diagnostics_received_at: Optional[float] = None
         self._navigation_cloud_points = []
         self._navigation_cloud_map_id: Optional[str] = None
         self._navigation_cloud_variant: Optional[str] = None
@@ -2744,6 +3021,9 @@ class WebControlNode(Node):
         self.d1_fsm_subscription = None
         self.d1_controller_status_client = None
         self.d1_parameter_client = None
+        self.d1_body_height_publisher = None
+        self.d1_body_height_subscription = None
+        self.d1_battery_subscriptions = []
         self.d1_feedback_timer = None
         if self.d1_control.enabled:
             d1_feedback_qos = QoSProfile(
@@ -2755,6 +3035,26 @@ class WebControlNode(Node):
                 String,
                 self.d1_fsm_topic,
                 self._on_d1_fsm,
+                d1_feedback_qos,
+            )
+            for index, battery_topic in enumerate(self.d1_battery_topics):
+                self.d1_battery_subscriptions.append(
+                    self.create_subscription(
+                        BatteryState,
+                        battery_topic,
+                        lambda message, pack=index: self._on_d1_battery(
+                            pack, message
+                        ),
+                        d1_feedback_qos,
+                    )
+                )
+            self.d1_body_height_publisher = self.create_publisher(
+                Float64, self.d1_body_height_command_topic, qos
+            )
+            self.d1_body_height_subscription = self.create_subscription(
+                Float64,
+                self.d1_body_height_status_topic,
+                self._on_d1_body_height,
                 d1_feedback_qos,
             )
             self.d1_controller_status_client = self.create_client(
@@ -2848,22 +3148,35 @@ class WebControlNode(Node):
             self._on_navigation_refined_status,
             qos,
         )
+        self.navigation_hloc_status_subscription = self.create_subscription(
+            String,
+            self.navigation_hloc_status_topic,
+            self._on_navigation_hloc_status,
+            qos,
+        )
+        self.navigation_hloc_diagnostics_subscription = self.create_subscription(
+            String,
+            self.navigation_hloc_diagnostics_topic,
+            self._on_navigation_hloc_diagnostics,
+            qos,
+        )
         if self.preview_enabled:
             image_qos = QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.BEST_EFFORT,
                 durability=DurabilityPolicy.VOLATILE,
             )
-            cloud_qos = QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            )
             self.rgb_subscription = self.create_subscription(
                 CompressedImage,
                 self.rgb_preview_topic,
                 self._on_rgb_preview,
                 image_qos,
+            )
+        if self.preview_enabled and self.cloud_preview_enabled:
+            cloud_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
             )
             self.cloud_subscription = self.create_subscription(
                 PointCloud2,
@@ -2876,16 +3189,35 @@ class WebControlNode(Node):
             self._on_publish_timer,
         )
 
-        self.http_server = ControlHTTPServer((bind_address, http_port), self)
+        self.http_servers = []
+        requested_port = http_port
+        try:
+            for address in bind_addresses:
+                server = ControlHTTPServer((address, requested_port), self)
+                self.http_servers.append(server)
+                if requested_port == 0:
+                    requested_port = int(server.server_address[1])
+        except OSError:
+            for server in self.http_servers:
+                server.server_close()
+            raise
+        self.http_server = self.http_servers[0]
         self.http_port = int(self.http_server.server_address[1])
-        self.access_urls = make_access_urls(bind_address, self.http_port)
-        self._http_thread = threading.Thread(
-            target=self.http_server.serve_forever,
-            kwargs={"poll_interval": 0.1},
-            name="luxi-web-control-http",
-            daemon=True,
-        )
-        self._http_thread.start()
+        self.access_urls = [
+            f"http://{server.server_address[0]}:{server.server_address[1]}"
+            for server in self.http_servers
+        ]
+        self._http_threads = []
+        for index, server in enumerate(self.http_servers):
+            thread = threading.Thread(
+                target=server.serve_forever,
+                kwargs={"poll_interval": 0.1},
+                name=f"luxi-web-control-http-{index}",
+                daemon=True,
+            )
+            self._http_threads.append(thread)
+            thread.start()
+        self._http_thread = self._http_threads[0]
         url_lines = "\n  ".join(self.access_urls)
         self.get_logger().info(
             f"Web control is publishing Twist on {self.cmd_vel_topic}\n"
@@ -2911,6 +3243,8 @@ class WebControlNode(Node):
             raise ValueError("command_timeout must be greater than zero")
         if self.d1_feedback_timeout <= 0.0:
             raise ValueError("d1_feedback_timeout must be greater than zero")
+        if self.d1_control.transition_timeout <= 0.0:
+            raise ValueError("d1_transition_timeout must be greater than zero")
         if self.imu_level_calibration_start_timeout <= 0.0:
             raise ValueError("imu_level_calibration_start_timeout must be positive")
         if self.imu_level_calibration_result_timeout <= 0.0:
@@ -2935,6 +3269,8 @@ class WebControlNode(Node):
             raise ValueError("map_conversion_timeout must be positive")
         if self.hloc_index_builder.timeout <= 0.0:
             raise ValueError("hloc_index_build_timeout must be positive")
+        if self.navigation_terrain_load_timeout <= 0.0:
+            raise ValueError("navigation_terrain_load_timeout must be positive")
         if self.semantic_annotation_store.timeout <= 0.0:
             raise ValueError("semantic_annotation_timeout must be positive")
         if not self.cmd_vel_topic:
@@ -2968,16 +3304,34 @@ class WebControlNode(Node):
             ):
                 self._command = VelocityCommand()
                 self._last_command_time = None
+                self._control_owner_id = ""
                 self._timed_out = True
             command = self._command
         self._publish(command)
 
     def _on_d1_fsm(self, message: String) -> None:
         """Cache the robot controller's transient-local FSM feedback."""
+        new_state = message.data.strip()
         with self._d1_status_lock:
-            self._d1_fsm_state = message.data.strip()
+            old_posture = classify_d1_posture(self._d1_fsm_state)
+            new_posture = classify_d1_posture(new_state)
+            self._d1_fsm_state = new_state
             self._d1_fsm_received_at = time.monotonic()
             self._d1_feedback_error = ""
+        posture_changed = (
+            old_posture != "unknown"
+            and new_posture != "unknown"
+            and old_posture != new_posture
+        )
+        if posture_changed:
+            with self._imu_calibration_lock:
+                if self._imu_calibration.get("state") == "calibrated":
+                    self._imu_calibration = {
+                        **self._imu_calibration,
+                        "state": "stale",
+                        "calibrated": False,
+                        "message": "机器人姿态已变化，请在站立静止后重新校准 IMU",
+                    }
 
     def _on_imu_calibration_status(self, message: String) -> None:
         """Cache the C++ level calibrator's transient-local status."""
@@ -3315,12 +3669,17 @@ class WebControlNode(Node):
         status["standalone_error"] = standalone_error or None
         status["store_path"] = str(self.imu_level_calibration_store_path)
         status["log_path"] = str(self.imu_level_calibration_log_path)
+        d1_status = self.d1_control_status()
+        status["robot_standing"] = bool(
+            not d1_status["enabled"] or d1_status["posture"] == "standing"
+        )
         mapping_running = self.mapping.status()["state"] == "running"
         navigation_status = self.navigation.status()
         navigation_running = navigation_status["state"] == "running"
         status["can_start"] = (
             (status["service_available"] or status["standalone_available"])
             and not status["busy"]
+            and status["robot_standing"]
             and not mapping_running and not navigation_running
         )
         return status
@@ -3332,6 +3691,9 @@ class WebControlNode(Node):
         navigation = self.navigation_status()
         if navigation["state"] == "running" or navigation["active"]:
             return False, "请先停止定位和导航，再校准 IMU"
+        d1_status = self.d1_control_status()
+        if d1_status["enabled"] and d1_status["posture"] != "standing":
+            return False, "请先让机器人站立并保持静止，再校准 IMU"
         if self.imu_calibration_status()["busy"]:
             return False, "IMU 正在校准，请保持机器人静止"
         self.stop_motion()
@@ -3589,6 +3951,40 @@ class WebControlNode(Node):
                 self._refined_localization_received_at = None
                 self._refined_localization_verified_at = None
 
+    def _on_navigation_hloc_status(self, message: String) -> None:
+        """Expose the coarse localizer's actual state instead of hiding it."""
+        with self._navigation_lock:
+            self._hloc_status = message.data[:300]
+            self._hloc_status_received_at = time.monotonic()
+
+    def _on_navigation_hloc_diagnostics(self, message: String) -> None:
+        """Cache bounded JSON diagnostics from the HLoc query."""
+        try:
+            diagnostics = json.loads(message.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(diagnostics, dict):
+            return
+        allowed = {
+            "accepted", "reason", "reference", "retrieval_score",
+            "elapsed_seconds", "candidates_tested", "device", "matches",
+            "landmarks", "inliers", "inlier_ratio", "depth_verified",
+            "median_depth_residual", "reprojection_rmse",
+        }
+        bounded = {}
+        for key in allowed:
+            if key not in diagnostics:
+                continue
+            value = diagnostics[key]
+            if isinstance(value, float) and not math.isfinite(value):
+                value = None
+            elif isinstance(value, str):
+                value = value[:300]
+            bounded[key] = value
+        with self._navigation_lock:
+            self._hloc_diagnostics = bounded
+            self._hloc_diagnostics_received_at = time.monotonic()
+
     def _clear_cloud_preview(self) -> None:
         """Discard map data which belongs to a previous mapping session."""
         with self._preview_lock:
@@ -3621,6 +4017,10 @@ class WebControlNode(Node):
             self._refined_localization_fitness = None
             self._refined_localization_status = ""
             self._refined_localization_verified_at = None
+            self._hloc_status = ""
+            self._hloc_status_received_at = None
+            self._hloc_diagnostics = None
+            self._hloc_diagnostics_received_at = None
             self._navigation_cloud_points = []
             self._navigation_cloud_map_id = None
             self._navigation_cloud_variant = None
@@ -3759,7 +4159,7 @@ class WebControlNode(Node):
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=60.0,
+                timeout=self.navigation_terrain_load_timeout,
                 env=environment,
             )
             resolution, traversable, obstacles = parse_terrain_point_output(
@@ -3842,6 +4242,7 @@ class WebControlNode(Node):
             rgb_received_at = self._rgb_received_at
             return {
                 "enabled": self.preview_enabled,
+                "cloud_enabled": self.cloud_preview_enabled,
                 "rgb_topic": self.rgb_preview_topic,
                 "rgb_age_seconds": (
                     None if rgb_received_at is None
@@ -3863,7 +4264,9 @@ class WebControlNode(Node):
             "point_count": len(self._cloud_points),
         }
 
-    def accept_command(self, command: VelocityCommand) -> Tuple[bool, str]:
+    def accept_command(
+        self, command: VelocityCommand, client_id: str = ""
+    ) -> Tuple[bool, str]:
         """Store and immediately publish a validated browser command."""
         d1_status = self.d1_control_status()
         if (
@@ -3875,21 +4278,52 @@ class WebControlNode(Node):
         with self._lock:
             if self._estop_active and command.moving:
                 return False, "emergency stop is active"
+            now = time.monotonic()
+            requester_id = client_id or LEGACY_CONTROL_CLIENT_ID
+            owner_is_live = (
+                bool(self._control_owner_id)
+                and self._last_command_time is not None
+                and now - self._last_command_time <= self.command_timeout
+            )
+            if (
+                command.moving
+                and owner_is_live
+                and self._control_owner_id != requester_id
+            ):
+                return False, "control is in use by another browser"
             self._command = command
             self._last_command_time = (
-                time.monotonic() if command.moving else None
+                now if command.moving else None
             )
+            if command.moving:
+                self._control_owner_id = requester_id
+            elif not owner_is_live or self._control_owner_id == requester_id:
+                self._control_owner_id = ""
             self._timed_out = False
         self._publish(command)
         return True, ""
 
-    def stop_motion(self) -> None:
+    def control_session_active(self) -> bool:
+        """Return whether a browser currently owns the manual-control lease."""
+        with self._lock:
+            return bool(self._control_owner_id)
+
+    def stop_motion(self, client_id: str = "", force: bool = True) -> bool:
         """Clear motion and immediately publish zero velocity."""
         with self._lock:
+            requester_id = client_id or LEGACY_CONTROL_CLIENT_ID
+            if (
+                not force
+                and self._control_owner_id
+                and self._control_owner_id != requester_id
+            ):
+                return False
             self._command = VelocityCommand()
             self._last_command_time = None
+            self._control_owner_id = ""
             self._timed_out = False
         self._publish(VelocityCommand())
+        return True
 
     def set_estop(self, active: bool) -> None:
         """Set the sticky software emergency stop; activation always stops."""
@@ -3897,6 +4331,7 @@ class WebControlNode(Node):
             self._estop_active = active
             self._command = VelocityCommand()
             self._last_command_time = None
+            self._control_owner_id = ""
             self._timed_out = False
         self._publish(VelocityCommand())
         message = Bool()
@@ -3923,6 +4358,64 @@ class WebControlNode(Node):
         )
         return self.d1_control.set_active(active, force=force)
 
+    def _on_d1_battery(self, pack: int, message: BatteryState) -> None:
+        def finite(value: float) -> Optional[float]:
+            return round(float(value), 2) if math.isfinite(value) else None
+
+        statuses = {
+            BatteryState.POWER_SUPPLY_STATUS_UNKNOWN: "unknown",
+            BatteryState.POWER_SUPPLY_STATUS_CHARGING: "charging",
+            BatteryState.POWER_SUPPLY_STATUS_DISCHARGING: "discharging",
+            BatteryState.POWER_SUPPLY_STATUS_NOT_CHARGING: "not_charging",
+            BatteryState.POWER_SUPPLY_STATUS_FULL: "full",
+        }
+        snapshot = {
+            "pack": pack + 1,
+            "percentage": normalize_battery_percentage(message.percentage),
+            "voltage": finite(message.voltage),
+            "current": finite(message.current),
+            "temperature": finite(message.temperature),
+            "status": statuses.get(message.power_supply_status, "unknown"),
+        }
+        with self._d1_status_lock:
+            self._d1_batteries[pack] = snapshot
+            self._d1_battery_received_at[pack] = time.monotonic()
+
+    def _on_d1_body_height(self, message: Float64) -> None:
+        if not math.isfinite(message.data):
+            return
+        with self._d1_status_lock:
+            self._d1_body_height = float(message.data)
+            self._d1_body_height_received_at = time.monotonic()
+
+    def set_d1_body_height(self, height: float) -> Tuple[bool, str]:
+        """Publish a validated height target only while D1 control is ready."""
+        status = self.d1_control_status()
+        if not status["enabled"]:
+            return False, "D1 control is disabled"
+        if not status["control_ready"]:
+            return False, "D1 must be standing with SDK control and bridge ready"
+        if str(status.get("controller_mode") or "").strip().lower() != "biped":
+            return False, (
+                "当前不是已验证的双足 LQR 模式；为避免触发四足形态策略，"
+                "拒绝腿高指令"
+            )
+        if self.d1_body_height_publisher is None:
+            return False, "D1 body-height publisher is unavailable"
+        message = Float64()
+        message.data = height
+        with self._d1_status_lock:
+            self._d1_body_height_target = height
+        self.d1_body_height_publisher.publish(message)
+        percentage = 100.0 * (
+            (height - self.d1_body_height_minimum)
+            / (self.d1_body_height_maximum - self.d1_body_height_minimum)
+        )
+        return True, (
+            f"D1 single-unit biped height set to level {height:.0f} "
+            f"({percentage:.0f}%)"
+        )
+
     def d1_control_status(self) -> Dict[str, Any]:
         """Combine actual D1 FSM/SDK feedback with the local bridge state."""
         managed = self.d1_control.status()
@@ -3935,6 +4428,11 @@ class WebControlNode(Node):
             sdk_active = self._d1_sdk_active
             sdk_received_at = self._d1_sdk_received_at
             feedback_error = self._d1_feedback_error
+            batteries = list(self._d1_batteries)
+            battery_received_at = list(self._d1_battery_received_at)
+            body_height = self._d1_body_height
+            body_height_target = self._d1_body_height_target
+            body_height_received_at = self._d1_body_height_received_at
 
         def age(received_at: Optional[float]) -> Optional[float]:
             return None if received_at is None else round(now - received_at, 2)
@@ -3959,6 +4457,45 @@ class WebControlNode(Node):
             and sdk_age <= self.d1_feedback_timeout
         )
         feedback_online = fsm_online and controller_online and sdk_online
+        battery_packs = []
+        for index, snapshot in enumerate(batteries):
+            battery_age = age(battery_received_at[index])
+            online = bool(
+                managed["enabled"]
+                and snapshot is not None
+                and battery_age is not None
+                and battery_age <= self.d1_feedback_timeout
+                and self.count_publishers(self.d1_battery_topics[index]) > 0
+            )
+            battery_packs.append({
+                **(snapshot or {"pack": index + 1}),
+                "online": online,
+                "age_seconds": battery_age,
+            })
+        online_packs = [pack for pack in battery_packs if pack["online"]]
+        percentages = [
+            pack["percentage"] for pack in online_packs
+            if pack.get("percentage") is not None
+        ]
+        height_age = age(body_height_received_at)
+        height_online = bool(
+            managed["enabled"]
+            and height_age is not None
+            and height_age <= self.d1_feedback_timeout
+            and self.count_publishers(self.d1_body_height_status_topic) > 0
+        )
+        height_supported = bool(
+            controller_online
+            and str(controller_mode).strip().lower() == "biped"
+        )
+        if not controller_online:
+            height_reason = "控制器形态状态离线，无法确认高度功能"
+        elif height_supported:
+            height_reason = "双足 LQR 腿高速率控制已验证"
+        else:
+            height_reason = (
+                "当前不是已验证的双足 LQR 模式"
+            )
         posture = classify_d1_posture(fsm_state) if fsm_online else "offline"
         bridge_active = bool(managed["active"])
         transitioning = bool(managed["transitioning"])
@@ -3970,9 +4507,10 @@ class WebControlNode(Node):
             and bridge_active
             and not transitioning
         )
-        switch_active = bool(
-            bridge_active or posture in {"standing", "standing_up"}
-        )
+        # `enabled` means the feature is configured; `active` is reserved for
+        # actual, feedback-verified web control. Keeping these distinct stops a
+        # prone or merely standing robot from appearing "on" in the browser.
+        switch_active = control_ready
 
         if not managed["enabled"]:
             state = "disabled"
@@ -3980,10 +4518,10 @@ class WebControlNode(Node):
             state = managed["state"]
         elif managed["state"] == "failed":
             state = "failed"
-        elif not feedback_online:
-            state = "offline"
         elif control_ready:
             state = "active"
+        elif not feedback_online:
+            state = "offline"
         elif posture == "prone" and sdk_active is False:
             state = "recovery_required" if bridge_active else "inactive"
         elif posture == "standing_up":
@@ -4011,15 +4549,48 @@ class WebControlNode(Node):
             "sdk_active": sdk_active,
             "sdk_age_seconds": sdk_age,
             "feedback_error": feedback_error or None,
+            "battery": {
+                "online": bool(online_packs),
+                "percentage": min(percentages) if percentages else None,
+                "packs": battery_packs,
+            },
+            "body_height": {
+                "supported": height_supported,
+                "reason": height_reason,
+                "online": height_online,
+                "current": round(body_height, 3) if height_online else None,
+                "target": round(body_height_target, 3),
+                "minimum": self.d1_body_height_minimum,
+                "maximum": self.d1_body_height_maximum,
+                "age_seconds": height_age,
+            },
         }
 
     def start_mapping(self, mode: str = "crestereo") -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
+        d1_status = self.d1_control_status()
+        if d1_status["enabled"] and d1_status["posture"] != "standing":
+            return False, "请先让机器人站立，再校准 IMU 并开始建图"
         calibration = self.imu_calibration_status()
         if (calibration["service_available"] or calibration["standalone_available"]) and (
             calibration.get("state") != "calibrated" or calibration["busy"]
         ):
             return False, "请先在水平面完成 IMU 一键校准"
+        publisher_counts = {
+            self.mapping_rgbd_topic: self.count_publishers(self.mapping_rgbd_topic),
+            self.mapping_imu_topic: self.count_publishers(self.mapping_imu_topic),
+        }
+        invalid_inputs = [
+            f"{topic}={count}个发布者"
+            for topic, count in publisher_counts.items()
+            if count != 1
+        ]
+        if invalid_inputs:
+            return False, (
+                "建图传感器链路必须各有且只有一个发布者："
+                + "，".join(invalid_inputs)
+                + "；请停止重复或残留的 D435i/IMU 进程"
+            )
         if self.mapping.status()["state"] != "running":
             conflicts = mapping_graph_conflicts(
                 self.get_node_names_and_namespaces()
@@ -4335,6 +4906,10 @@ class WebControlNode(Node):
                 self._refined_localization_fitness = None
                 self._refined_localization_status = ""
                 self._refined_localization_verified_at = None
+                self._hloc_status = ""
+                self._hloc_status_received_at = None
+                self._hloc_diagnostics = None
+                self._hloc_diagnostics_received_at = None
                 self._navigation_active = False
                 self._navigation_follower_state = "stopped"
         return stopped, message
@@ -4470,6 +5045,22 @@ class WebControlNode(Node):
             status["coarse_localization_age_seconds"] = coarse_age
             status["localization_fitness"] = self._refined_localization_fitness
             status["localization_status"] = self._refined_localization_status or None
+            hloc_status_age = (
+                None if self._hloc_status_received_at is None else round(
+                    time.monotonic() - self._hloc_status_received_at, 2
+                )
+            )
+            hloc_diagnostics_age = (
+                None if self._hloc_diagnostics_received_at is None else round(
+                    time.monotonic() - self._hloc_diagnostics_received_at, 2
+                )
+            )
+            status["hloc_status"] = self._hloc_status or None
+            status["hloc_status_age_seconds"] = hloc_status_age
+            status["hloc_diagnostics"] = (
+                dict(self._hloc_diagnostics) if self._hloc_diagnostics else None
+            )
+            status["hloc_diagnostics_age_seconds"] = hloc_diagnostics_age
             if running and refined_ready:
                 pose = dict(self._refined_localization_pose)
                 if terrain_pose_ready:
@@ -4506,6 +5097,7 @@ class WebControlNode(Node):
             )
             estop_active = self._estop_active
             timed_out = self._timed_out
+            control_session_active = bool(self._control_owner_id)
         if not self.output_enabled:
             state = "disabled"
         elif estop_active:
@@ -4529,6 +5121,7 @@ class WebControlNode(Node):
             "timed_out": timed_out,
             "command_age": age,
             "command_timeout": self.command_timeout,
+            "control_session_active": control_session_active,
             "command": command.as_dict(),
             "limits": self.limits.as_dict(),
             "subscriber_count": self.publisher.get_subscription_count(),
@@ -4553,10 +5146,12 @@ class WebControlNode(Node):
                     self.stop_motion()
                     time.sleep(0.02)
         finally:
-            self.http_server.shutdown()
-            self.http_server.server_close()
-            if self._http_thread.is_alive():
-                self._http_thread.join(timeout=1.0)
+            for server in self.http_servers:
+                server.shutdown()
+                server.server_close()
+            for thread in self._http_threads:
+                if thread.is_alive():
+                    thread.join(timeout=1.0)
 
 
 def main(args: Optional[list] = None) -> None:

@@ -21,9 +21,12 @@ luxi_hloc_localizer:
     depth_scale_16u: 0.001
 
     minimum_retrieval_score: 0.05
-    minimum_matches: 30
-    minimum_landmarks: 20
-    minimum_inliers: 15
+    # The D435i is mounted low and many valid frames contain mostly floor.
+    # Keep PnP/depth/three-pose/ICP verification, but do not reject a genuine
+    # candidate before geometry when 25 matches include 12 metric landmarks.
+    minimum_matches: 25
+    minimum_landmarks: 12
+    minimum_inliers: 8
     minimum_inlier_ratio: 0.25
     maximum_reprojection_rmse: 3.0
     ransac_reprojection_error: 4.0
@@ -31,7 +34,7 @@ luxi_hloc_localizer:
     ransac_confidence: 0.999
 
     require_depth_verification: true
-    minimum_depth_verified: 8
+    minimum_depth_verified: 6
     maximum_median_depth_residual: 0.25
     minimum_depth: 0.25
     maximum_depth: 6.0

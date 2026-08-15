@@ -49,6 +49,9 @@ from luxi_web_control.web_control_node import make_access_urls
 from luxi_web_control.web_control_node import mapping_graph_conflicts
 from luxi_web_control.web_control_node import rtabmap_database_conversion_error
 from luxi_web_control.web_control_node import NavigationController
+from luxi_web_control.web_control_node import normalize_battery_percentage
+from luxi_web_control.web_control_node import parse_body_height
+from luxi_web_control.web_control_node import parse_control_client_id
 from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_terrain_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
@@ -56,6 +59,9 @@ from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
 from luxi_web_control.web_control_node import normalize_robot_namespace
 from luxi_web_control.web_control_node import robot_resource_name
 from luxi_web_control.web_control_node import replace_launch_arguments
+from luxi_web_control.web_control_node import resolve_d1_http_bind_address
+from luxi_web_control.web_control_node import resolve_d1_http_bind_addresses
+from luxi_web_control.web_control_node import validate_d1_http_bind_address
 from luxi_web_control.web_control_node import WebControlNode
 
 
@@ -71,6 +77,18 @@ def test_saved_map_browser_preview_is_bounded_by_default():
     )
     limit = config["web_control"]["ros__parameters"]["max_saved_cloud_points"]
     assert 10_000 <= limit <= 50_000
+
+
+def test_live_mapping_cloud_is_enabled_and_bounded_for_usb_mapping():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    parameters = config["web_control"]["ros__parameters"]
+    assert parameters["enable_cloud_preview"] is True
+    assert 100 <= parameters["max_cloud_points"] <= 5000
+    assert parameters["command_timeout"] == 0.8
 
 
 def test_navigation_preview_uses_ten_centimeter_robot_radius():
@@ -108,6 +126,38 @@ def test_goal_can_be_selected_before_icp_recovers_without_being_sent():
     assert 'await api("/api/navigation/goal", goal)' in app
 
 
+def test_drive_page_prioritizes_control_over_large_previews():
+    web_root = WORKSPACE_ROOT / "project/luxi-web-control/web"
+    page = (web_root / "index.html").read_text(encoding="utf-8")
+    app = (web_root / "app.js").read_text(encoding="utf-8")
+
+    assert page.index('id="rgbPreview"') < page.index('id="joystickPad"')
+    assert 'id="cloudPreview"' not in page
+    assert "refreshCloudPreview" not in app
+    assert "cancelHeavyPreviewRequests" in app
+    assert "{timeoutMs: 500}" in app
+    assert "let robotControlReady = false" in app
+    assert "consecutiveCommandTimeouts >= 3" in app
+    assert "const RGB_PREVIEW_INTERVAL_MS = 100" in app
+    assert "setInterval(refreshRgbPreview, RGB_PREVIEW_INTERVAL_MS)" in app
+    assert 'window.addEventListener("blur"' not in app
+
+
+def test_d435i_web_preview_has_headroom_for_ten_hz_delivery():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi_adapter/config/sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    parameters = config["luxi_adapter"]["ros__parameters"]
+    assert parameters["compressed_color_rate"] == 12.0
+
+    source = (
+        WORKSPACE_ROOT / "project/luxi_adapter/src/sensor_adapter.cpp"
+    ).read_text(encoding="utf-8")
+    assert '"compressed_color_rate", 12.0' in source
+
+
 def test_lekiwi_launch_uses_vehicle_domain_42():
     launch_source = (
         WORKSPACE_ROOT
@@ -141,7 +191,13 @@ def test_d1_control_scripts_do_not_depend_on_ros_daemon_discovery():
         "stop_slam_d1_bridge.sh",
     ):
         source = (scripts / script_name).read_text(encoding="utf-8")
-        assert "topic info --no-daemon --spin-time 5.0" in source
+        assert 'D1_DISCOVERY_SPIN_TIME="${D1_DISCOVERY_SPIN_TIME:-30.0}"' in source
+        assert 'topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}"' in source
+        assert 'D1_SERVICE_TIMEOUT="${D1_SERVICE_TIMEOUT:-30s}"' in source
+        assert (
+            'timeout --signal=INT --kill-after=2s "${D1_SERVICE_TIMEOUT}"'
+            in source
+        )
         assert "rcl_interfaces/srv/SetParameters" in source
         assert "successful=True" in source
 
@@ -157,6 +213,26 @@ def test_d1_start_script_treats_existing_managed_bridge_as_success():
     assert "PID file points to an unrelated live process" in source
     managed_message = source.index("already active with managed PID")
     assert source.index("exit 0", managed_message) > managed_message
+
+
+def test_d1_control_scripts_resolve_the_current_workspace():
+    bridge_scripts = WORKSPACE_ROOT / "project/slam_d1_bridge/scripts"
+    for script_name in (
+        "start_slam_d1_bridge.sh",
+        "stop_slam_d1_bridge.sh",
+    ):
+        source = (bridge_scripts / script_name).read_text(encoding="utf-8")
+        assert 'readlink -f -- "${BASH_SOURCE[0]}"' in source
+        assert "/home/nvidia/Desktop/lunar_slam" not in source
+
+    web_script = (WORKSPACE_ROOT / "scripts/start_d1_web_control.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'readlink -f -- "${BASH_SOURCE[0]}"' in web_script
+    assert 'D1_DISCOVERY_SPIN_TIME="${D1_DISCOVERY_SPIN_TIME:-30.0}"' in web_script
+    assert 'topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}"' in web_script
+    assert 'source "${D1_LAN_DDS_SETUP}"' in web_script
+    assert "/home/nvidia/Desktop/lunar_slam" not in web_script
 
 
 def test_d1_web_control_is_enabled_and_exposes_switch():
@@ -200,6 +276,71 @@ def test_d1_stale_feedback_request_is_retried():
         CompletedFuture(), 10.0, 20.0, 3.0
     )
     assert not d1_feedback_request_timed_out(None, None, 20.0, 3.0)
+
+
+def test_d1_web_exposes_bridge_battery_and_body_height_interfaces():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )["web_control"]["ros__parameters"]
+    bridge = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/slam_d1_bridge/config/slam_d1_bridge.yaml")
+        .read_text(encoding="utf-8")
+    )["/**"]["ros__parameters"]
+    page = (WORKSPACE_ROOT / "project/luxi-web-control/web/index.html").read_text(
+        encoding="utf-8"
+    )
+    app = (WORKSPACE_ROOT / "project/luxi-web-control/web/app.js").read_text(
+        encoding="utf-8"
+    )
+
+    # Empty overrides deliberately follow robot_namespace, allowing the same
+    # config to control either D1 instead of pinning the first robot identity.
+    assert config["d1_battery1_topic"] == ""
+    assert config["d1_battery2_topic"] == ""
+    assert robot_resource_name(
+        config["robot_namespace"], "status/battery1"
+    ) == "/d15041873/status/battery1"
+    assert robot_resource_name(
+        config["robot_namespace"], "status/battery2"
+    ) == "/d15041873/status/battery2"
+    assert bridge["battery1_status_topic"] == "status/battery1"
+    assert bridge["battery2_status_topic"] == "status/battery2"
+    assert config["d1_body_height_command_topic"] == ""
+    assert robot_resource_name(
+        config["robot_namespace"],
+        "command/body_height",
+    ) == "/d15041873/command/body_height"
+    assert bridge["body_height_command_topic"] == "command/body_height"
+    assert config["d1_body_height_minimum"] == bridge["body_height_minimum"]
+    assert config["d1_body_height_maximum"] == bridge["body_height_maximum"]
+    assert 'id="robotBatteryState"' in page
+    assert 'id="bodyHeight"' in page
+    assert '单体双足模式·腿部高度' in page
+    assert 'max="9" step="0.1"' in page
+    assert 'api("/api/robot/height", {height: Number(bodyHeightInput.value)})' in app
+    assert "height.supported === true" in app
+    assert "heightPercentage.toFixed(0)" in app
+    assert bridge["fsm_mode"] == "loco"
+    assert bridge["height_fsm_mode"] == "loco"
+    assert bridge["body_height_maximum_rate"] == 1.0
+    assert bridge["body_height_linear_z_scale"] == 0.03
+
+
+def test_body_height_validation_and_battery_percentage_normalization():
+    assert parse_body_height({"height": 0.0}, 0.0, 9.0) == 0.0
+    assert parse_body_height({"height": 9.0}, 0.0, 9.0) == 9.0
+    with pytest.raises(ValueError, match="between"):
+        parse_body_height({"height": 10.0}, 0.0, 9.0)
+    with pytest.raises(ValueError, match="number"):
+        parse_body_height({"height": True}, 0.0, 9.0)
+    with pytest.raises(ValueError, match="finite"):
+        parse_body_height({"height": math.nan}, 0.0, 9.0)
+
+    assert normalize_battery_percentage(0.91) == 91.0
+    assert normalize_battery_percentage(91.0) == 91.0
+    assert normalize_battery_percentage(110.0) == 100.0
+    assert normalize_battery_percentage(math.nan) is None
 
 
 def test_web_imu_calibration_button_and_mapping_gate_are_present():
@@ -301,7 +442,10 @@ def test_d1_one_click_script_accepts_explicit_robot_identity():
     assert "--robot-ip" in source
     assert 'robot_namespace:="${ROBOT_NS}"' in source
     assert "targets '${existing_robot_ns:-unknown}'" in source
-    assert "topic info --no-daemon --spin-time 5.0" in source
+    assert (
+        'topic info --no-daemon --spin-time "${D1_DISCOVERY_SPIN_TIME}"'
+        in source
+    )
     assert "No D1 DDS namespace was discovered" in source
     assert "--no-dds-recovery" in source
     assert "restart_remote_bringup_if_idle" in source
@@ -362,6 +506,7 @@ def test_d1_control_manager_runs_enable_and_disable_scripts(tmp_path):
         robot_namespace="d15042176",
         workspace_root=tmp_path,
     )
+    assert manager.transition_timeout == 90.0
 
     assert manager.set_active(True)[0]
     for _ in range(100):
@@ -517,6 +662,67 @@ def test_velocity_is_clamped_to_server_limits():
 def test_missing_velocity_axes_default_to_zero():
     command = parse_velocity({"linear_x": 0.12}, LIMITS)
     assert command == VelocityCommand(0.12, 0.0, 0.0)
+
+
+def test_control_client_id_is_optional_but_bounded():
+    assert parse_control_client_id({}) == ""
+    assert parse_control_client_id({"client_id": "browser-12345678"}) == (
+        "browser-12345678"
+    )
+    with pytest.raises(ValueError):
+        parse_control_client_id({"client_id": "short"})
+    with pytest.raises(ValueError):
+        parse_control_client_id({"client_id": "bad value with spaces"})
+
+
+def test_d1_http_bind_accepts_only_concrete_loopback_or_wired_addresses():
+    validate_d1_http_bind_address("127.0.0.1")
+    validate_d1_http_bind_address("192.168.123.66")
+    validate_d1_http_bind_address("192.168.137.132")
+    with pytest.raises(ValueError):
+        validate_d1_http_bind_address("0.0.0.0")
+    with pytest.raises(ValueError):
+        validate_d1_http_bind_address("198.18.0.1")
+
+
+def test_d1_wildcard_bind_resolves_to_both_allowed_control_lans():
+    addresses = ["192.168.137.132", "192.168.123.66", "198.18.0.1"]
+    assert resolve_d1_http_bind_addresses(
+        "0.0.0.0",
+        addresses,
+    ) == ["192.168.123.66", "192.168.137.132"]
+    assert resolve_d1_http_bind_address("0.0.0.0", addresses) == (
+        "192.168.123.66"
+    )
+    assert resolve_d1_http_bind_address(
+        "192.168.137.132",
+        ["192.168.123.66"],
+    ) == "192.168.137.132"
+    with pytest.raises(ValueError, match="no 192.168.123.x or 192.168.137.x"):
+        resolve_d1_http_bind_addresses(
+            "0.0.0.0",
+            ["10.0.0.2", "198.18.0.1"],
+        )
+
+
+def test_hloc_diagnostics_are_bounded_and_json_safe():
+    node = SimpleNamespace(
+        _navigation_lock=threading.Lock(),
+        _hloc_diagnostics=None,
+        _hloc_diagnostics_received_at=None,
+    )
+    message = String()
+    message.data = (
+        '{"reason":"MATCHES_LOW","matches":3,'
+        '"median_depth_residual":Infinity,"unexpected":"ignored"}'
+    )
+    WebControlNode._on_navigation_hloc_diagnostics(node, message)
+    assert node._hloc_diagnostics == {
+        "reason": "MATCHES_LOW",
+        "matches": 3,
+        "median_depth_residual": None,
+    }
+    assert node._hloc_diagnostics_received_at is not None
 
 
 def test_wildcard_bind_address_expands_to_lan_urls():
@@ -1171,6 +1377,7 @@ def test_terrain_loader_fits_the_matching_point_cloud(monkeypatch, tmp_path):
     node.navigation_ground_normal_radius = 0.30
     node.navigation_ground_max_slope_degrees = 35.0
     node.navigation_obstacle_min_height = 0.15
+    node.navigation_terrain_load_timeout = 90.0
     node.navigation = SimpleNamespace(octomap_library_path=tmp_path)
     node._navigation_lock = threading.Lock()
 
@@ -1180,7 +1387,7 @@ def test_terrain_loader_fits_the_matching_point_cloud(monkeypatch, tmp_path):
             "0.1", "0.6", "/maps/map042_cloud.ply", "0.3", "35.0",
             "0.15",
         ]
-        assert kwargs["timeout"] == 60.0
+        assert kwargs["timeout"] == 90.0
         return subprocess.CompletedProcess(
             command, 0,
             stdout=(

@@ -170,3 +170,22 @@ ros2 run slam_d1_bridge start_slam_d1_bridge.sh
 
 更完整的网络部署、首次运动验收和故障恢复见
 [D1 机器人控制接入与测试](../../docs/d1_robot_control.md)。
+
+## 网页电池与机身高度控制
+
+合并后的桥会把厂家 `battery1`、`battery2` 转发到当前机器人 namespace 下的
+`status/battery1`、`status/battery2`，网页显示两组电池并以较低电量作为总览。
+
+双足 LQR 模式下，网页高度滑块使用 `0..9` 档；9 档对应旧 `0..30` 范围的 30%。桥将
+档位误差转换为零平面速度下的 `linear.z=±0.03`，变化率限制为每秒 1 档。机器人未站立、
+SDK/桥未就绪或 `controller_mode` 不是 `biped` 时，服务端会拒绝高度命令。该值是控制
+档位，不是独立高度传感器的米制读数。
+
+相关话题会自动跟随 `ROBOT_NS`，例如第二台机器人使用：
+
+```text
+/d15042176/command/body_height
+/d15042176/status/body_height
+/d15042176/status/battery1
+/d15042176/status/battery2
+```

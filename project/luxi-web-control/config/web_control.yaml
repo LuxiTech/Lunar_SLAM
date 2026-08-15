@@ -10,7 +10,9 @@ web_control:
 
     # A held web control is refreshed at 10 Hz; output is published at 20 Hz.
     publish_rate: 20.0
-    command_timeout: 0.6
+    # Allow a short mobile-Wi-Fi scheduling gap without producing stop/start
+    # pulses. Emergency stop and pointer release still stop immediately.
+    command_timeout: 0.8
 
     # Server-side safety limits, independent of browser slider values.
     max_linear_x: 0.25
@@ -23,10 +25,24 @@ web_control:
     # are derived from this namespace unless explicitly overridden below.
     robot_namespace: d15041873
     enable_d1_control: true
+    # Empty names follow robot_namespace, so the same web configuration works
+    # for d15041873 and d15042176.
     d1_fsm_topic: ""
     d1_controller_status_service: ""
     d1_parameter_service: ""
+    # Stable interfaces republished/consumed by slam_d1_bridge. The web UI does
+    # not couple itself to the D1 vendor's internal battery topics.
+    d1_battery1_topic: ""
+    d1_battery2_topic: ""
+    d1_body_height_command_topic: ""
+    d1_body_height_status_topic: ""
+    # Old level 9 (30% of 0..30) is now the web's 100% endpoint.
+    d1_body_height_minimum: 0.0
+    d1_body_height_maximum: 9.0
+    d1_body_height_default: 0.0
     d1_feedback_timeout: 3.0
+    # Covers worst-case DDS discovery, SDK service response and posture change.
+    d1_transition_timeout: 90.0
 
     # The web button starts a short-lived H30-only process, collects gravity,
     # saves one mount quaternion per robot namespace, then releases the serial
@@ -80,7 +96,12 @@ web_control:
     # Retained for the device-independent launch; the USB launch continues to
     # use mapping_launch_arguments/planar_mode and is not changed by this value.
     mapping_planar_motion: true
-    # Match the USB camera profile and LeKiwi web launch on the NX.
+    # Mapping is refused unless each canonical input has exactly one publisher.
+    # Duplicate IMU/filter pipelines caused map024 trajectory deformation.
+    mapping_rgbd_topic: /sensors/rgbd/rgbd_image
+    mapping_imu_topic: /sensors/imu/data
+    # Match the USB camera profile and LeKiwi web launch on the NX. The mapping
+    # child uses the same RMW as the sensor pipeline.
     mapping_rmw_implementation: rmw_fastrtps_cpp
     mapping_sensor_setup: device/USBCameraSDK/ros2_ws/install/setup.bash
 
@@ -143,17 +164,24 @@ web_control:
     navigation_ground_normal_radius: 0.30
     navigation_ground_max_slope_degrees: 35.0
     navigation_obstacle_min_height: 0.15
+    # map018 takes about 66 s to fit normals/terrain on this CPU.
+    navigation_terrain_load_timeout: 90.0
     max_terrain_points: 12000
 
-    # Read-only RGB and RTAB-Map cloud previews for the web page.
+    # Keep the lightweight RGB preview plus the bounded USB mapping cloud used
+    # to judge CRE depth quality. The point cap below prevents unbounded HTTP
+    # payload growth.
     enable_preview: true
     # Unified, rectified preview generated from the exact RGB-D packet used by
     # CRE odometry. It survives raw UVC publisher restarts between map runs.
+    # Retain the USB mapping cloud required by the current NX visualization.
+    # Deployments prioritizing navigation bandwidth can turn this off.
+    enable_cloud_preview: true
     rgb_preview_topic: /sensors/rgbd/color/image_raw/compressed
     cloud_preview_topic: /rtabmap/cloud_map
-    max_cloud_points: 0
-    # Canvas preview only: zero forwards every finite point. Set a positive cap
-    # if a large map makes JSON/Canvas expensive. Saved maps are unaffected.
+    max_cloud_points: 5000
+    # Safety cap for deployments that explicitly re-enable the optional live
+    # cloud API. Saved navigation maps are unaffected.
     max_saved_cloud_points: 30000
     semantic_annotation_timeout: 15.0
     semantic_maps_root: ""

@@ -97,7 +97,6 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .status-card strong { font-size: .9rem; }
 
 .control-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr); gap: 16px; }
-.preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
 .navigation-panel { margin-top: 16px; padding: 20px; }
 .navigation-detail, .navigation-note { color: var(--muted); font-size: .73rem; line-height: 1.5; }
 .navigation-detail { margin: 12px 0; }
@@ -163,6 +162,21 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .hint { color: var(--muted); font-size: .75rem; }
 
 .preview-panel { padding: 20px; }
+.drive-rgb-preview { margin-top: 18px; }
+.drive-preview-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: .75rem;
+  font-weight: 750;
+}
+.drive-rgb-preview .rgb-frame {
+  min-height: 0;
+  aspect-ratio: 16 / 9;
+  margin-top: 9px;
+}
 .preview-state {
   padding: 5px 8px;
   border: 1px solid var(--border);
@@ -369,6 +383,20 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
 #robotControlState.unknown,
 #robotControlState.failed { border-color: #77353d; color: #ffadb1; background: var(--danger-dark); }
 
+.robot-status-panel {
+  margin-top: 14px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #101721;
+}
+.robot-status-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.robot-status-heading b { font-size: .85rem; }
+.robot-battery-detail { margin-top: 12px; color: #bfcbdb; font-size: .72rem; line-height: 1.6; }
+.body-height-row { margin-top: 18px; }
+.robot-status-panel > small { display: block; margin-top: 7px; color: var(--muted); font-size: .66rem; }
+input[type="range"]:disabled { cursor: not-allowed; opacity: .45; }
+
 .mapping-panel {
   margin: 24px 0;
   padding: 15px;
@@ -452,7 +480,6 @@ input[type="range"] { width: 100%; margin: 13px 0 0; accent-color: var(--accent)
 @media (max-width: 760px) {
   .shell { width: min(100% - 20px, 580px); padding-top: 18px; }
   .control-grid { grid-template-columns: 1fr; }
-  .preview-grid { grid-template-columns: 1fr; }
   .navigation-actions { grid-template-columns: 1fr 1fr; }
   .navigation-actions label { grid-column: 1 / -1; }
   .semantic-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -25,6 +25,9 @@ from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import BatteryState
+from std_msgs.msg import Float64
 
 from luxi_web_control.web_control_node import WebControlNode
 
@@ -76,6 +79,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
         Parameter("web_root", value=str(source_web)),
         Parameter("enable_mapping_control", value=False),
         Parameter("enable_preview", value=False),
+        Parameter("enable_cloud_preview", value=True),
     ])
     observer = rclpy.create_node("web_control_test_observer")
     messages = []
@@ -115,6 +119,8 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"robotControlToggle" in page
             assert b'id="mappingMode"' in page
             assert b'CREStereo' in page
+            assert b"robotBatteryState" in page
+            assert b"bodyHeight" in page
             assert b"imuCalibrationButton" in page
             assert b'value="crestereo_max"' in page
 
@@ -141,7 +147,10 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"let mappingModeInitialized = false" in app
             assert b"!mappingModeInitialized && mapping.default_mode" in app
             assert b'api("/api/mapping/start", {mode: mappingMode.value})' in app
+            assert b'api("/api/robot/height", {height: Number(bodyHeightInput.value)})' in app
             assert b'api("/api/imu/calibrate")' in app
+            assert b"controlClientId" in app
+            assert b"MATCHES_LOW" in app
 
         imu_calibration = node.status()["imu_calibration"]
         assert imu_calibration["service_available"] is False
@@ -169,6 +178,17 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert False, "disabled D1 control must reject enable requests"
         except HTTPError as error:
             assert error.code == 409
+
+        try:
+            _post(base_url, "/api/robot/height", {"height": 0.0})
+            assert False, "disabled D1 control must reject height requests"
+        except HTTPError as error:
+            assert error.code == 409
+        try:
+            _post(base_url, "/api/robot/height", {"height": 10.0})
+            assert False, "out-of-range body height must be rejected"
+        except HTTPError as error:
+            assert error.code == 400
 
         with _LOCAL_OPENER.open(base_url + "/api/preview/cloud", timeout=2.0) as response:
             assert response.status == 200
@@ -262,12 +282,57 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert error.code == 423
 
         _post(base_url, "/api/estop", {"active": False})
-        _post(base_url, "/api/cmd_vel", {"linear_x": 0.1})
+        owner = "browser-owner-0001"
+        stale = "browser-stale-0002"
+        _post(
+            base_url,
+            "/api/cmd_vel",
+            {"linear_x": 0.1, "client_id": owner},
+        )
         assert _wait_for(
             lambda: any(message.linear.x == 0.1 for message in messages)
         )
-        _post(base_url, "/api/stop", {})
+        try:
+            _LOCAL_OPENER.open(
+                base_url + "/api/navigation/cloud", timeout=2.0
+            )
+            assert False, "large previews must pause during manual control"
+        except HTTPError as error:
+            assert error.code == 409
+        _, ignored = _post(
+            base_url,
+            "/api/stop",
+            {"client_id": stale},
+        )
+        assert ignored["ignored"] is True
+        assert node.status()["state"] == "moving"
+        _, legacy_stop = _post(base_url, "/api/stop", {})
+        assert legacy_stop["ignored"] is True
+        try:
+            _post(base_url, "/api/cmd_vel", {"linear_x": 0.1})
+            assert False, "an old browser must not overwrite a modern lease"
+        except HTTPError as error:
+            assert error.code == 423
+        try:
+            _post(
+                base_url,
+                "/api/cmd_vel",
+                {"linear_x": 0.1, "client_id": stale},
+            )
+            assert False, "a second browser must not steal a live lease"
+        except HTTPError as error:
+            assert error.code == 423
+        _, stopped = _post(
+            base_url,
+            "/api/stop",
+            {"client_id": owner},
+        )
+        assert stopped["stopped"] is True
         assert _wait_for(lambda: messages and messages[-1].linear.x == 0.0)
+        with _LOCAL_OPENER.open(
+            base_url + "/api/navigation/cloud", timeout=2.0
+        ) as response:
+            assert response.status == 200
     finally:
         executor.shutdown(timeout_sec=1.0)
         spin_thread.join(timeout=1.0)
@@ -278,3 +343,135 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def test_d1_battery_status_and_height_request_reach_ros():
+    source_web = Path(__file__).parents[1] / "web"
+    rclpy.init()
+    node = WebControlNode(parameter_overrides=[
+        Parameter("http_port", value=0),
+        Parameter("bind_address", value="127.0.0.1"),
+        Parameter("cmd_vel_topic", value="/web_d1_test/cmd_vel"),
+        Parameter("web_root", value=str(source_web)),
+        Parameter("enable_d1_control", value=True),
+        Parameter("d1_battery1_topic", value="/web_d1_test/status/battery1"),
+        Parameter("d1_battery2_topic", value="/web_d1_test/status/battery2"),
+        Parameter(
+            "d1_body_height_command_topic",
+            value="/web_d1_test/command/body_height",
+        ),
+        Parameter(
+            "d1_body_height_status_topic",
+            value="/web_d1_test/status/body_height",
+        ),
+        Parameter("d1_fsm_topic", value="/web_d1_test/fsm"),
+        Parameter("enable_mapping_control", value=False),
+        Parameter("enable_navigation_control", value=False),
+        Parameter("enable_preview", value=False),
+    ])
+    observer = rclpy.create_node("web_d1_test_observer")
+    battery_qos = QoSProfile(
+        depth=5,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+    battery_publisher = observer.create_publisher(
+        BatteryState, "/web_d1_test/status/battery1", battery_qos
+    )
+    height_messages = []
+    observer.create_subscription(
+        Float64,
+        "/web_d1_test/command/body_height",
+        height_messages.append,
+        10,
+    )
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    executor.add_node(observer)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    base_url = f"http://127.0.0.1:{node.http_port}"
+
+    try:
+        assert _wait_for(lambda: battery_publisher.get_subscription_count() > 0)
+        battery = BatteryState()
+        battery.percentage = 0.76
+        battery.voltage = 48.2
+        for _ in range(3):
+            battery_publisher.publish(battery)
+            time.sleep(0.03)
+        assert _wait_for(
+            lambda: node.d1_control_status()["battery"]["online"]
+        )
+        status = node.d1_control_status()["battery"]
+        assert status["percentage"] == 76.0
+        assert status["packs"][0]["voltage"] == 48.2
+
+        # Feature availability must never make the browser switch look active.
+        # The switch represents feedback-verified SDK control, not merely a
+        # configured manager or a latched physical posture.
+        now = time.monotonic()
+        node.count_publishers = lambda _topic: 1
+        node.d1_control.status = lambda: {
+            "enabled": True,
+            "state": "inactive",
+            "active": False,
+            "transitioning": False,
+            "last_error": "",
+            "log_path": "",
+        }
+        with node._d1_status_lock:
+            node._d1_fsm_state = "idle"
+            node._d1_fsm_received_at = now
+            node._d1_controller_mode = "biped"
+            node._d1_controller_received_at = now
+            node._d1_sdk_active = False
+            node._d1_sdk_received_at = now
+        prone = node.d1_control_status()
+        assert prone["state"] == "inactive"
+        assert prone["posture"] == "prone"
+        assert prone["active"] is False
+        assert prone["control_ready"] is False
+
+        with node._d1_status_lock:
+            node._d1_fsm_state = "loco"
+            node._d1_fsm_received_at = time.monotonic()
+        standing = node.d1_control_status()
+        assert standing["state"] == "standing_uncontrolled"
+        assert standing["active"] is False
+
+        node.d1_control_status = lambda: {
+            "enabled": True,
+            "control_ready": True,
+            "controller_mode": "quadruped",
+        }
+        try:
+            _post(base_url, "/api/robot/height", {"height": 4.5})
+            raise AssertionError("non-biped height request should be rejected")
+        except HTTPError as error:
+            assert error.code == 409
+            result = json.load(error)
+        assert "双足 LQR 模式" in result["error"]
+        assert not height_messages
+
+        node.d1_control_status = lambda: {
+            "enabled": True,
+            "control_ready": True,
+            "controller_mode": "biped",
+        }
+        response_status, result = _post(
+            base_url, "/api/robot/height", {"height": 4.5}
+        )
+        assert response_status == 200
+        assert result["ok"] is True
+        assert _wait_for(
+            lambda: height_messages
+            and abs(height_messages[-1].data - 4.5) < 1.0e-9
+        )
+    finally:
+        node.close()
+        executor.shutdown(timeout_sec=2.0)
+        spin_thread.join(timeout=2.0)
+        observer.destroy_node()
+        node.destroy_node()
+        rclpy.shutdown()

@@ -408,7 +408,7 @@ class VisualOdometryNode(Node):
             "transform_timeout": 0.5,
             "depth_scale_16u": 0.001,
             "publish_tf": True,
-            "minimum_keypoints": 80,
+            "minimum_keypoints": 60,
             "minimum_matches": 50,
             "minimum_depth_matches": 30,
             "minimum_inliers": 25,
@@ -429,7 +429,7 @@ class VisualOdometryNode(Node):
             "keyframe_min_inlier_ratio": 0.40,
             "maximum_frame_translation": 0.25,
             "maximum_frame_rotation_deg": 15.0,
-            "maximum_frame_angular_rate_deg": 90.0,
+            "maximum_frame_angular_rate_deg": 55.0,
             "maximum_consecutive_tracking_failures": 3,
             "minimum_depth_consistency_matches": 20,
             "maximum_depth_consistency_error": 0.08,
@@ -464,6 +464,10 @@ class VisualOdometryNode(Node):
             "mapping_ground_minimum_row_ratio": 0.0,
             "mapping_ground_reject_unverified_below_plane": False,
             "mapping_ground_repair_all_below_plane": False,
+            # D435i/H30 yaw is not trusted unless an explicit hardware profile
+            # enables it; visual yaw remains authoritative by default.
+            "use_imu_depth_translation": False,
+            "use_imu_reseed_rotation": False,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -602,6 +606,12 @@ class VisualOdometryNode(Node):
             ),
             constrain_vertical_translation=bool(
                 parameters["constrain_vertical_translation"]
+            ),
+            use_imu_depth_translation=bool(
+                parameters["use_imu_depth_translation"]
+            ),
+            use_imu_reseed_rotation=bool(
+                parameters["use_imu_reseed_rotation"]
             ),
         )
         self.parameters = parameters

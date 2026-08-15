@@ -15,6 +15,11 @@ const angularValue = $("#angularValue");
 const robotControlToggle = $("#robotControlToggle");
 const robotControlState = $("#robotControlState");
 const robotControlDetail = $("#robotControlDetail");
+const robotBatteryState = $("#robotBatteryState");
+const robotBatteryDetail = $("#robotBatteryDetail");
+const bodyHeightInput = $("#bodyHeight");
+const bodyHeightValue = $("#bodyHeightValue");
+const bodyHeightDetail = $("#bodyHeightDetail");
 const estopButton = $("#estopButton");
 const releaseButton = $("#releaseButton");
 const toast = $("#toast");
@@ -34,9 +39,6 @@ let mappingModeInitialized = false;
 const rgbPreview = $("#rgbPreview");
 const rgbPreviewState = $("#rgbPreviewState");
 const rgbPreviewHint = $("#rgbPreviewHint");
-const cloudPreview = $("#cloudPreview");
-const cloudPreviewState = $("#cloudPreviewState");
-const cloudPreviewHint = $("#cloudPreviewHint");
 const navigationState = $("#navigationState");
 const navigationDetail = $("#navigationDetail");
 const navigationMapSelect = $("#navigationMapSelect");
@@ -67,14 +69,27 @@ const semanticUndoButton = $("#semanticUndoButton");
 const semanticReloadButton = $("#semanticReloadButton");
 const semanticSaveButton = $("#semanticSaveButton");
 const semanticStatus = $("#semanticStatus");
+const RGB_PREVIEW_INTERVAL_MS = 100;
 
 const held = new Set();
+const controlClientId = (() => {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+})();
 let estopActive = false;
 let online = false;
 let toastTimer = null;
 let commandRequestPending = false;
-let robotControlReady = true;
+let commandFailureToastAt = 0;
+let consecutiveCommandTimeouts = 0;
+let controlSessionActive = false;
+// Do not permit motion during the one-second window before the first actual
+// D1 feedback snapshot arrives.
+let robotControlReady = false;
 let robotControlRequestPending = false;
+let bodyHeightRequestPending = false;
+let bodyHeightDragging = false;
+let bodyHeightTimer = null;
 let imuCalibrationRequestPending = false;
 let currentImuCalibration = {};
 let joystickPointerId = null;
@@ -82,7 +97,7 @@ let joystickX = 0;
 let joystickY = 0;
 let rgbRefreshPending = false;
 let rgbObjectUrl = null;
-let cloudRefreshPending = false;
+const heavyPreviewControllers = new Set();
 let navigationMapsRefreshPending = false;
 let navigationLoadPending = false;
 let navigationLocatePending = false;
@@ -129,19 +144,76 @@ function showToast(message) {
   toastTimer = setTimeout(() => toast.classList.remove("show"), 2200);
 }
 
-async function api(path, body = {}, options = {}) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body),
-    cache: "no-store",
-    keepalive: options.keepalive || false,
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(result.error || `HTTP ${response.status}`);
+class ApiError extends Error {
+  constructor(message, status = 0, kind = "http") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.kind = kind;
   }
-  return result;
+}
+
+async function api(path, body = {}, options = {}) {
+  const controller = options.timeoutMs ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), options.timeoutMs)
+    : null;
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+      cache: "no-store",
+      keepalive: options.keepalive || false,
+      signal: controller?.signal,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new ApiError(result.error || `HTTP ${response.status}`, response.status);
+    }
+    return result;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new ApiError("控制请求超时", 0, "timeout");
+    }
+    throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+function controlFailureMessage(error) {
+  const message = String(error?.message || error);
+  if (message.includes("not standing with SDK control and bridge ready")) {
+    return "机器人未站立，或 SDK/控制桥尚未就绪；运动指令已拒绝";
+  }
+  if (message.includes("control is in use by another browser")) {
+    return "另一台手机或浏览器正在控制机器人";
+  }
+  if (message.includes("emergency stop is active")) {
+    return "急停已开启，运动指令已拒绝";
+  }
+  return message;
+}
+
+function heavyPreviewAllowed() {
+  return !controlActive() && !controlSessionActive && !document.hidden;
+}
+
+function cancelHeavyPreviewRequests() {
+  for (const controller of heavyPreviewControllers) controller.abort();
+  heavyPreviewControllers.clear();
+}
+
+async function fetchHeavyPreview(path) {
+  if (!heavyPreviewAllowed()) throw new Error("preview paused");
+  const controller = new AbortController();
+  heavyPreviewControllers.add(controller);
+  try {
+    return await fetch(path, {cache: "no-store", signal: controller.signal});
+  } finally {
+    heavyPreviewControllers.delete(controller);
+  }
 }
 
 function currentCommand() {
@@ -174,14 +246,33 @@ function controlActive() {
 }
 
 async function sendCommand() {
-  if (!controlActive() || !robotControlReady || estopActive || commandRequestPending) return;
+  if (!controlActive() || !robotControlReady || estopActive) return;
+  cancelHeavyPreviewRequests();
+  if (commandRequestPending) return;
   commandRequestPending = true;
   const command = currentCommand();
   updateReadout(command);
   try {
-    await api("/api/cmd_vel", command);
+    await api(
+      "/api/cmd_vel",
+      {...command, client_id: controlClientId},
+      {timeoutMs: 500},
+    );
+    consecutiveCommandTimeouts = 0;
   } catch (error) {
-    if (!String(error.message).includes("emergency stop")) showToast(`控制失败：${error.message}`);
+    if (error.kind === "timeout") consecutiveCommandTimeouts += 1;
+    else consecutiveCommandTimeouts = 0;
+    const now = Date.now();
+    if (
+      (error.kind !== "timeout" || consecutiveCommandTimeouts >= 3)
+      && now - commandFailureToastAt > 1500
+    ) {
+      commandFailureToastAt = now;
+      const detail = error.kind === "timeout"
+        ? "控制链路延迟，指令正在续发；持续中断时机器人会由看门狗自动停车"
+        : controlFailureMessage(error);
+      showToast(detail);
+    }
   } finally {
     commandRequestPending = false;
   }
@@ -194,7 +285,11 @@ function stop(options = {}) {
   joystickY = 0;
   updateJoystickKnob();
   updateReadout({linear_x: 0, angular_z: 0});
-  api("/api/stop", {}, {keepalive: options.keepalive}).catch(() => {});
+  api(
+    "/api/stop",
+    {client_id: controlClientId},
+    {keepalive: options.keepalive},
+  ).catch(() => {});
 }
 
 function beginAction(action) {
@@ -388,6 +483,36 @@ const robotPostureNames = {
   unknown: "未知",
 };
 
+const hlocReasonNames = {
+  RETRIEVAL_SCORE_LOW: "当前画面与地图参考图差异过大",
+  MATCHES_LOW: "局部特征匹配不足",
+  LANDMARKS_LOW: "带深度的地图特征不足",
+  PNP_FAILED: "特征几何关系无法求出位姿",
+  PNP_INLIERS_LOW: "几何一致的特征数量不足",
+  PNP_INLIER_RATIO_LOW: "特征几何一致率过低",
+  REPROJECTION_ERROR_HIGH: "视觉重投影误差过大",
+  DEPTH_MISSING: "当前深度图不可用",
+  DEPTH_VALID_POINTS_LOW: "有效深度匹配点不足",
+  DEPTH_RESIDUAL_HIGH: "当前深度与地图深度不一致",
+  SENSOR_TIME_MISMATCH: "彩色图与深度图时间不同步",
+  CAMERA_INFO_SIZE_MISMATCH: "相机内参与图像尺寸不一致",
+  CAMERA_TF_UNAVAILABLE: "相机到机器人坐标变换不可用",
+  WAITING_FOR_SENSOR_DATA: "正在等待 RGB-D 数据",
+  PROCESSING: "正在计算粗定位",
+};
+
+function hlocFailureDetail(navigation) {
+  const diagnostics = navigation.hloc_diagnostics || {};
+  const reason = diagnostics.reason || navigation.hloc_status;
+  if (!reason || ["LOCALIZED", "ACCEPTED", "PROCESSING"].includes(reason)) return "";
+  const description = hlocReasonNames[reason] || reason;
+  const counts = Number.isFinite(Number(diagnostics.matches))
+    ? `，匹配=${Number(diagnostics.matches)}` : "";
+  const reference = diagnostics.reference
+    ? `，候选=${String(diagnostics.reference).split("/").pop()}` : "";
+  return `${description}${counts}${reference}`;
+}
+
 function updateRobotControl(control) {
   if (!control) return;
   const managed = Boolean(control.enabled);
@@ -399,6 +524,11 @@ function updateRobotControl(control) {
   // Standing/bridge-active is not the same as accepting motion commands.
   // Reflect only the backend's complete safety gate in the switch.
   robotControlToggle.checked = managed && ready;
+  robotControlToggle.setAttribute(
+    "aria-label",
+    ready ? "结束机器人控制" : "开启机器人控制",
+  );
+  robotControlToggle.title = ready ? "机器人控制已开启" : "机器人控制未开启";
   robotControlToggle.disabled = !managed || transitioning || robotControlRequestPending
     || (!control.feedback_online && !bridgeActive && !active);
   robotControlState.textContent = robotControlStateNames[control.state] || control.state;
@@ -413,7 +543,9 @@ function updateRobotControl(control) {
   if (!managed) {
     robotControlDetail.textContent = "当前启动配置未启用 D1 控制";
   } else if (control.last_error || control.feedback_error) {
-    robotControlDetail.textContent = `${actualState} · ${control.last_error || control.feedback_error}`;
+    robotControlDetail.textContent = `${actualState} · ${controlFailureMessage(
+      control.last_error || control.feedback_error
+    )}`;
   } else if (transitioning) {
     const action = control.state === "enabling"
       ? "正在启用 SDK 并让机器人站立"
@@ -421,6 +553,54 @@ function updateRobotControl(control) {
     robotControlDetail.textContent = `${action} · ${actualState}`;
   } else {
     robotControlDetail.textContent = actualState;
+  }
+
+  const battery = control.battery || {};
+  const packs = Array.isArray(battery.packs) ? battery.packs.filter((pack) => pack.online) : [];
+  if (battery.online && battery.percentage !== null && battery.percentage !== undefined) {
+    robotBatteryState.textContent = `${Number(battery.percentage).toFixed(0)}%`;
+    robotBatteryState.className = "mapping-state active";
+    robotBatteryDetail.textContent = packs.map((pack) => {
+      const percentage = pack.percentage === null || pack.percentage === undefined
+        ? "--" : `${Number(pack.percentage).toFixed(0)}%`;
+      const voltage = pack.voltage === null || pack.voltage === undefined
+        ? "" : ` · ${Number(pack.voltage).toFixed(1)} V`;
+      return `电池 ${pack.pack}: ${percentage}${voltage}`;
+    }).join("  |  ") || "电池反馈在线";
+  } else {
+    robotBatteryState.textContent = "电量离线";
+    robotBatteryState.className = "mapping-state offline";
+    robotBatteryDetail.textContent = active
+      ? "等待 slam_d1_bridge 转发电池反馈"
+      : "开启机器人控制后显示双电池信息";
+  }
+
+  const height = control.body_height || {};
+  const heightSupported = height.supported === true;
+  if (Number.isFinite(Number(height.minimum))) bodyHeightInput.min = height.minimum;
+  if (Number.isFinite(Number(height.maximum))) bodyHeightInput.max = height.maximum;
+  const reportedHeight = height.current ?? height.target;
+  if (!bodyHeightDragging && !bodyHeightRequestPending && Number.isFinite(Number(reportedHeight))) {
+    bodyHeightInput.value = Number(reportedHeight).toFixed(0);
+  }
+  const heightLevel = Number(bodyHeightInput.value);
+  const heightMinimum = Number(height.minimum ?? bodyHeightInput.min);
+  const heightMaximum = Number(height.maximum ?? bodyHeightInput.max);
+  const heightSpan = heightMaximum - heightMinimum;
+  const heightPercentage = heightSpan > 0
+    ? Math.max(0, Math.min(100, 100 * (heightLevel - heightMinimum) / heightSpan))
+    : 0;
+  bodyHeightValue.value = `${heightPercentage.toFixed(0)}%`;
+  bodyHeightInput.disabled = !heightSupported || !managed || !robotControlReady
+    || transitioning || bodyHeightRequestPending;
+  if (!heightSupported) {
+    bodyHeightDetail.textContent = height.reason
+      || "当前形态不支持连续腿高调节";
+  } else if (height.online) {
+    bodyHeightDetail.textContent =
+      `单体双足模式 · 当前 ${heightPercentage.toFixed(0)}% · 控制档位 ${heightLevel.toFixed(1)}/9`;
+  } else {
+    bodyHeightDetail.textContent = "单体双足模式 · 0～9 档对应 0～100%（原 30% 位置为新上限）；需先开启 SDK 控制";
   }
 }
 
@@ -447,6 +627,39 @@ async function toggleRobotControl() {
 }
 
 robotControlToggle.addEventListener("change", toggleRobotControl);
+
+async function sendBodyHeight() {
+  clearTimeout(bodyHeightTimer);
+  if (!robotControlReady || bodyHeightInput.disabled || bodyHeightRequestPending) return;
+  bodyHeightRequestPending = true;
+  bodyHeightInput.disabled = true;
+  stop();
+  try {
+    const result = await api("/api/robot/height", {height: Number(bodyHeightInput.value)});
+    updateRobotControl(result.robot_control);
+  } catch (error) {
+    showToast(`高度调整失败：${error.message}`);
+  } finally {
+    bodyHeightRequestPending = false;
+    refreshStatus();
+  }
+}
+
+bodyHeightInput.addEventListener("pointerdown", () => { bodyHeightDragging = true; });
+bodyHeightInput.addEventListener("pointerup", () => { bodyHeightDragging = false; });
+bodyHeightInput.addEventListener("pointercancel", () => { bodyHeightDragging = false; });
+bodyHeightInput.addEventListener("input", () => {
+  const level = Number(bodyHeightInput.value);
+  const minimum = Number(bodyHeightInput.min);
+  const span = Number(bodyHeightInput.max) - minimum;
+  const percentage = span > 0
+    ? Math.max(0, Math.min(100, 100 * (level - minimum) / span))
+    : 0;
+  bodyHeightValue.value = `${percentage.toFixed(0)}%`;
+  clearTimeout(bodyHeightTimer);
+  bodyHeightTimer = setTimeout(sendBodyHeight, 180);
+});
+bodyHeightInput.addEventListener("change", sendBodyHeight);
 
 function setConnection(isOnline) {
   online = isOnline;
@@ -477,6 +690,7 @@ const imuCalibrationStateNames = {
   waiting_stationary: "等待静止",
   collecting: "采集中",
   calibrated: "校准完成",
+  stale: "姿态已变化",
   failed: "校准失败",
 };
 
@@ -640,8 +854,11 @@ function updateNavigation(navigation) {
       navigationDetail.textContent =
         `${mapName} 已找到 HLoc 全局候选，正在进行 ICP 精配准：${poseText}。`;
     } else {
-      navigationDetail.textContent =
-        `正在 ${mapName} 中进行全局粗定位；请缓慢移动或转动机器人。`;
+      const failure = hlocFailureDetail(navigation);
+      navigationDetail.textContent = failure
+        ? `${mapName} 粗定位尚未通过：${failure}。` +
+          "请让相机看到墙角、门框、箱体等有区分度的物体，并缓慢转动；机器人保持零速度。"
+        : `正在 ${mapName} 中进行全局粗定位；请缓慢移动或转动机器人。`;
     }
     if (navigation.map_id && navigationCloud.map_id !== navigation.map_id) {
       refreshNavigationCloud();
@@ -1043,13 +1260,13 @@ function drawNavigationMap(voxels, path, cloud) {
 }
 
 async function refreshVoxelMap() {
-  if (voxelRefreshPending) return;
+  if (voxelRefreshPending || !heavyPreviewAllowed()) return;
   voxelRefreshPending = true;
   try {
     const [voxelResponse, pathResponse, terrainResponse] = await Promise.all([
-      fetch("/api/navigation/voxels", {cache: "no-store"}),
-      fetch("/api/navigation/path", {cache: "no-store"}),
-      fetch("/api/navigation/terrain", {cache: "no-store"}),
+      fetchHeavyPreview("/api/navigation/voxels"),
+      fetchHeavyPreview("/api/navigation/path"),
+      fetchHeavyPreview("/api/navigation/terrain"),
     ]);
     if (!voxelResponse.ok || !pathResponse.ok || !terrainResponse.ok) {
       throw new Error("preview unavailable");
@@ -1075,10 +1292,10 @@ async function refreshVoxelMap() {
 }
 
 async function refreshNavigationCloud() {
-  if (navigationCloudRefreshPending) return;
+  if (navigationCloudRefreshPending || !heavyPreviewAllowed()) return;
   navigationCloudRefreshPending = true;
   try {
-    const response = await fetch("/api/navigation/cloud", {cache: "no-store"});
+    const response = await fetchHeavyPreview("/api/navigation/cloud");
     if (!response.ok) throw new Error("cloud unavailable");
     navigationCloud = (await response.json()).cloud || {};
   } catch (_error) {
@@ -1740,19 +1957,14 @@ function setPreviewState(element, active, text) {
 function updatePreviewStatus(preview) {
   if (!preview || !preview.enabled) {
     setPreviewState(rgbPreviewState, false, "预览未启用");
-    setPreviewState(cloudPreviewState, false, "预览未启用");
     return;
   }
   const rgbLive = preview.rgb_age_seconds != null && preview.rgb_age_seconds < 3;
   setPreviewState(rgbPreviewState, rgbLive, rgbLive ? "实时" : "等待相机");
-  const cloud = preview.cloud || {};
-  const cloudLive = cloud.point_count > 0 && cloud.age_seconds != null && cloud.age_seconds < 5;
-  const cloudText = cloudLive ? `${cloud.point_count} 点` : "等待建图";
-  setPreviewState(cloudPreviewState, cloudLive, cloudText);
 }
 
 async function refreshRgbPreview() {
-  if (rgbRefreshPending) return;
+  if (rgbRefreshPending || document.hidden) return;
   rgbRefreshPending = true;
   try {
     const response = await fetch(`/api/preview/rgb?t=${Date.now()}`, {cache: "no-store"});
@@ -1772,68 +1984,13 @@ async function refreshRgbPreview() {
   }
 }
 
-function drawCloud(points) {
-  const rect = cloudPreview.getBoundingClientRect();
-  const width = Math.max(1, Math.round(rect.width));
-  const height = Math.max(1, Math.round(rect.height));
-  const ratio = Math.max(1, window.devicePixelRatio || 1);
-  if (cloudPreview.width !== width * ratio || cloudPreview.height !== height * ratio) {
-    cloudPreview.width = width * ratio;
-    cloudPreview.height = height * ratio;
-  }
-  const context = cloudPreview.getContext("2d");
-  context.setTransform(ratio, 0, 0, ratio, 0, 0);
-  context.fillStyle = "#080d13";
-  context.fillRect(0, 0, width, height);
-  if (!points.length) return;
-
-  const previewView = {yaw: Math.PI / 2, pitch: 1.05, zoom: 1};
-  const projected = points.map(([x, y, z, red, green, blue]) => {
-    const result = mapProjection.projectMapPoint(
-      [x, y, z],
-      [0, 0, 0],
-      previewView,
-    );
-    return {x: result.horizontal, y: result.vertical, red, green, blue};
-  });
-  const xs = projected.map((point) => point.x);
-  const ys = projected.map((point) => point.y);
-  const spanX = Math.max(0.1, Math.max(...xs) - Math.min(...xs));
-  const spanY = Math.max(0.1, Math.max(...ys) - Math.min(...ys));
-  const scale = Math.min((width - 24) / spanX, (height - 24) / spanY);
-  const centerX = (Math.min(...xs) + Math.max(...xs)) * 0.5;
-  const centerY = (Math.min(...ys) + Math.max(...ys)) * 0.5;
-  for (const point of projected) {
-    const screenX = width * 0.5 + (point.x - centerX) * scale;
-    const screenY = height * 0.5 - (point.y - centerY) * scale;
-    context.fillStyle = `rgb(${point.red}, ${point.green}, ${point.blue})`;
-    context.fillRect(screenX, screenY, 2, 2);
-  }
-}
-
-async function refreshCloudPreview() {
-  if (cloudRefreshPending) return;
-  cloudRefreshPending = true;
-  try {
-    const response = await fetch("/api/preview/cloud", {cache: "no-store"});
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const result = await response.json();
-    const cloud = result.cloud || {};
-    const points = Array.isArray(cloud.points) ? cloud.points : [];
-    drawCloud(points);
-    cloudPreviewHint.classList.toggle("hidden", points.length > 0);
-  } catch (_error) {
-    cloudPreviewHint.classList.remove("hidden");
-  } finally {
-    cloudRefreshPending = false;
-  }
-}
-
 async function refreshStatus() {
   try {
     const response = await fetch("/api/status", {cache: "no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
+    controlSessionActive = Boolean(data.control_session_active);
+    if (controlSessionActive) cancelHeavyPreviewRequests();
     setConnection(true);
     topic.textContent = data.cmd_vel_topic;
     subscribers.textContent = String(data.subscriber_count);
@@ -1866,26 +2023,28 @@ async function refreshStatus() {
 
 setInterval(sendCommand, 100);
 setInterval(refreshStatus, 1000);
-setInterval(refreshRgbPreview, 500);
-setInterval(refreshCloudPreview, 1200);
+setInterval(refreshRgbPreview, RGB_PREVIEW_INTERVAL_MS);
 setInterval(refreshNavigationMaps, 2500);
 setInterval(refreshVoxelMap, 1000);
 window.addEventListener("resize", () => {
-  refreshCloudPreview();
   refreshVoxelMap();
 });
-window.addEventListener("blur", () => stop({keepalive: true}));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stop({keepalive: true});
 });
 window.addEventListener("pagehide", () => {
   held.clear();
-  navigator.sendBeacon("/api/stop", new Blob(["{}"], {type: "application/json"}));
+  navigator.sendBeacon(
+    "/api/stop",
+    new Blob(
+      [JSON.stringify({client_id: controlClientId})],
+      {type: "application/json"},
+    ),
+  );
 });
 
 updateSpeeds();
 refreshStatus();
 refreshRgbPreview();
-refreshCloudPreview();
 refreshNavigationMaps();
 refreshVoxelMap();

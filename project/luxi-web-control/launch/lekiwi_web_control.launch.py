@@ -68,7 +68,6 @@ def generate_launch_description():
             "SUBNET",
         ),
         SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "0"),
-        SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
         GroupAction(
             scoped=True,
             actions=[IncludeLaunchDescription(
@@ -85,6 +84,10 @@ def generate_launch_description():
                     ),
                     "bind_address": LaunchConfiguration("bind_address"),
                     "http_port": LaunchConfiguration("http_port"),
+                    # The NX control page is also reached through its normal LAN
+                    # address (for example 192.168.0.187), not only the dedicated
+                    # 192.168.123.x robot link.
+                    "restrict_http_to_d1_lan": "false",
                     "config": LaunchConfiguration("config"),
                     "reset_ros_daemon": LaunchConfiguration("reset_ros_daemon"),
                 }.items(),

@@ -16,8 +16,12 @@ done
 post_if_available()
 {
     local path="$1"
+    local body='{}'
+    if [[ "${path}" == "/api/stop" ]]; then
+        body='{"client_id":"system-safety-stop","force":true}'
+    fi
     curl --fail --silent --show-error \
-        -X POST -H "Content-Type: application/json" -d '{}' \
+        -X POST -H "Content-Type: application/json" -d "${body}" \
         "${WEB_URL}${path}" >/dev/null 2>&1 || true
 }
 
