@@ -88,7 +88,7 @@ def test_live_mapping_cloud_is_enabled_and_bounded_for_usb_mapping():
     parameters = config["web_control"]["ros__parameters"]
     assert parameters["enable_cloud_preview"] is True
     assert 100 <= parameters["max_cloud_points"] <= 5000
-    assert parameters["command_timeout"] == 0.8
+    assert parameters["command_timeout"] == 0.6
 
 
 def test_navigation_preview_uses_ten_centimeter_robot_radius():
@@ -126,7 +126,7 @@ def test_goal_can_be_selected_before_icp_recovers_without_being_sent():
     assert 'await api("/api/navigation/goal", goal)' in app
 
 
-def test_drive_page_prioritizes_control_over_large_previews():
+def test_drive_page_uses_pre_main_control_cadence_and_bounded_previews():
     web_root = WORKSPACE_ROOT / "project/luxi-web-control/web"
     page = (web_root / "index.html").read_text(encoding="utf-8")
     app = (web_root / "app.js").read_text(encoding="utf-8")
@@ -135,12 +135,12 @@ def test_drive_page_prioritizes_control_over_large_previews():
     assert 'id="cloudPreview"' not in page
     assert "refreshCloudPreview" not in app
     assert "cancelHeavyPreviewRequests" in app
-    assert "{timeoutMs: 500}" in app
+    assert "{timeoutMs: 500}" not in app
     assert "let robotControlReady = false" in app
-    assert "consecutiveCommandTimeouts >= 3" in app
-    assert "const RGB_PREVIEW_INTERVAL_MS = 100" in app
+    assert "consecutiveCommandTimeouts" not in app
+    assert "const RGB_PREVIEW_INTERVAL_MS = 500" in app
     assert "setInterval(refreshRgbPreview, RGB_PREVIEW_INTERVAL_MS)" in app
-    assert 'window.addEventListener("blur"' not in app
+    assert 'window.addEventListener("blur"' in app
 
 
 def test_d435i_web_preview_has_headroom_for_ten_hz_delivery():

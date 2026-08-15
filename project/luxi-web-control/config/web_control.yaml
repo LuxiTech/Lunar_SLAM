@@ -10,9 +10,9 @@ web_control:
 
     # A held web control is refreshed at 10 Hz; output is published at 20 Hz.
     publish_rate: 20.0
-    # Allow a short mobile-Wi-Fi scheduling gap without producing stop/start
-    # pulses. Emergency stop and pointer release still stop immediately.
-    command_timeout: 0.8
+    # Restore the proven pre-main control watchdog. Pointer release and
+    # emergency stop still publish zero immediately.
+    command_timeout: 0.6
 
     # Server-side safety limits, independent of browser slider values.
     max_linear_x: 0.25

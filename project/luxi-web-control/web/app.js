@@ -69,7 +69,11 @@ const semanticUndoButton = $("#semanticUndoButton");
 const semanticReloadButton = $("#semanticReloadButton");
 const semanticSaveButton = $("#semanticSaveButton");
 const semanticStatus = $("#semanticStatus");
-const RGB_PREVIEW_INTERVAL_MS = 100;
+// Keep the pre-main 2 Hz driving preview cadence.  Pulling JPEG frames at
+// 10 Hz shares the phone-to-NX HTTP connection with the 10 Hz control stream
+// and made joystick updates feel uneven even though every ROS hop stayed at
+// a stable 20 Hz.
+const RGB_PREVIEW_INTERVAL_MS = 500;
 
 const held = new Set();
 const controlClientId = (() => {
@@ -80,8 +84,6 @@ let estopActive = false;
 let online = false;
 let toastTimer = null;
 let commandRequestPending = false;
-let commandFailureToastAt = 0;
-let consecutiveCommandTimeouts = 0;
 let controlSessionActive = false;
 // Do not permit motion during the one-second window before the first actual
 // D1 feedback snapshot arrives.
@@ -246,9 +248,8 @@ function controlActive() {
 }
 
 async function sendCommand() {
-  if (!controlActive() || !robotControlReady || estopActive) return;
+  if (!controlActive() || !robotControlReady || estopActive || commandRequestPending) return;
   cancelHeavyPreviewRequests();
-  if (commandRequestPending) return;
   commandRequestPending = true;
   const command = currentCommand();
   updateReadout(command);
@@ -256,22 +257,10 @@ async function sendCommand() {
     await api(
       "/api/cmd_vel",
       {...command, client_id: controlClientId},
-      {timeoutMs: 500},
     );
-    consecutiveCommandTimeouts = 0;
   } catch (error) {
-    if (error.kind === "timeout") consecutiveCommandTimeouts += 1;
-    else consecutiveCommandTimeouts = 0;
-    const now = Date.now();
-    if (
-      (error.kind !== "timeout" || consecutiveCommandTimeouts >= 3)
-      && now - commandFailureToastAt > 1500
-    ) {
-      commandFailureToastAt = now;
-      const detail = error.kind === "timeout"
-        ? "控制链路延迟，指令正在续发；持续中断时机器人会由看门狗自动停车"
-        : controlFailureMessage(error);
-      showToast(detail);
+    if (!String(error.message).includes("emergency stop")) {
+      showToast(`控制失败：${controlFailureMessage(error)}`);
     }
   } finally {
     commandRequestPending = false;
@@ -2029,6 +2018,7 @@ setInterval(refreshVoxelMap, 1000);
 window.addEventListener("resize", () => {
   refreshVoxelMap();
 });
+window.addEventListener("blur", () => stop({keepalive: true}));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stop({keepalive: true});
 });
