@@ -195,8 +195,8 @@ class VisualOdometryNode(Node):
             "maximum_depth_consistency_error": 0.08,
             "maximum_imu_rotation_error_deg": 12.0,
             "maximum_imu_gravity_error_deg": 10.0,
-            "use_imu_depth_translation": False,
-            "use_imu_reseed_rotation": False,
+            "use_imu_depth_translation": True,
+            "use_imu_reseed_rotation": True,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)

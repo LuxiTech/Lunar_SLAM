@@ -14,9 +14,13 @@ struct SafetyGateParameters
   double command_timeout{0.20};
   double obstacle_timeout{0.35};
   double planner_timeout{1.0};
+  double localization_timeout{1.5};
   double slow_scale{0.50};
   double minimum_linear_speed{0.0};
   double healthy_resume_hold{0.50};
+  double dead_reckoning_duration{0.80};
+  double dead_reckoning_scale{0.50};
+  double maximum_recovery_angular_speed{0.20};
 };
 
 struct SafetyGateResult
@@ -40,6 +44,8 @@ public:
     if (!active) {
       hard_stop_latched_ = false;
       healthy_since_ = -1.0;
+      recovery_active_ = false;
+      localization_fault_started_at_ = -1.0;
     } else if (!active_) {
       healthy_since_ = -1.0;
     }
@@ -68,6 +74,24 @@ public:
     have_planner_state_ = true;
   }
 
+  void updateLocalizationState(const std::string & state, double now_seconds)
+  {
+    if (state == "tracking") {
+      localization_fault_started_at_ = -1.0;
+    } else if (localization_state_ == "tracking" || localization_fault_started_at_ < 0.0) {
+      localization_fault_started_at_ = now_seconds;
+    }
+    localization_state_ = state;
+    localization_time_ = now_seconds;
+    have_localization_state_ = true;
+  }
+
+  void updateRecoveryActive(bool active, double now_seconds)
+  {
+    recovery_active_ = active;
+    recovery_time_ = now_seconds;
+  }
+
   SafetyGateResult evaluate(double now_seconds, bool monitor_only = false)
   {
     SafetyGateResult result;
@@ -81,6 +105,8 @@ public:
       now_seconds - obstacle_time_ > parameters_.obstacle_timeout;
     const bool planner_stale = !have_planner_state_ ||
       now_seconds - planner_time_ > parameters_.planner_timeout;
+    const bool localization_stale = !have_localization_state_ ||
+      now_seconds - localization_time_ > parameters_.localization_timeout;
     const bool recognized_obstacle_state = obstacle_state_ == "clear" ||
       obstacle_state_ == "slow" || obstacle_state_ == "blocked";
     const bool obstacle_hard_fault = obstacle_stale || !recognized_obstacle_state;
@@ -90,8 +116,10 @@ public:
 
     if (monitor_only) {
       result.command = command_stale ? geometry_msgs::msg::Twist() : command_;
-      result.state = obstacle_hard_fault ? "monitor_sensor_fault" : "monitor_only";
-      result.limited = command_stale;
+      result.state = obstacle_hard_fault ? "monitor_sensor_fault" :
+        (localization_stale || localization_state_ != "tracking" ?
+        "monitor_localization_fault" : "monitor_only");
+      result.limited = command_stale || localization_stale || localization_state_ != "tracking";
       return result;
     }
     if (hard_stop_latched_) {
@@ -101,6 +129,48 @@ public:
     }
     if (command_stale) {
       result.state = "command_stale";
+      return result;
+    }
+    if (recovery_active_ &&
+      now_seconds - recovery_time_ <= parameters_.command_timeout &&
+      obstacle_state_ != "blocked")
+    {
+      // A stale localization heartbeat/TF is itself one reason the follower
+      // requests recovery. Permit only the explicitly marked, angular-only
+      // command; fresh obstacle sensing remains mandatory and a blocked
+      // footprint still stops the robot.
+      result.command.angular.z = std::clamp(
+        command_.angular.z, -parameters_.maximum_recovery_angular_speed,
+        parameters_.maximum_recovery_angular_speed);
+      result.state = "localization_recovery_spin";
+      return result;
+    }
+    const bool localization_fault = localization_stale || localization_state_ != "tracking";
+    if (localization_fault) {
+      healthy_since_ = -1.0;
+      const bool dead_reckoning_state = localization_state_ == "degraded" ||
+        localization_state_ == "dead_reckoning";
+      const bool within_dead_reckoning_window = localization_fault_started_at_ >= 0.0 &&
+        now_seconds - localization_fault_started_at_ <= parameters_.dead_reckoning_duration;
+      const bool planner_ready_during_recovery = !planner_stale &&
+        (planner_state_ == "clear" || planner_state_ == "ready");
+      if (!localization_stale && dead_reckoning_state && within_dead_reckoning_window &&
+        planner_ready_during_recovery && obstacle_state_ != "blocked")
+      {
+        const double scale = std::clamp(parameters_.dead_reckoning_scale, 0.0, 1.0);
+        result.command = command_;
+        const double original_x = result.command.linear.x;
+        const double original_y = result.command.linear.y;
+        result.command.linear.x *= scale;
+        result.command.linear.y *= scale;
+        result.command.angular.z *= scale;
+        preserveMinimumLinearCommand(original_x, result.command.linear.x);
+        preserveMinimumLinearCommand(original_y, result.command.linear.y);
+        result.state = "localization_dead_reckoning";
+        return result;
+      }
+      result.state = localization_stale ? "localization_stale" :
+        "localization_" + localization_state_;
       return result;
     }
     if (planner_stale) {
@@ -153,14 +223,20 @@ private:
   bool have_command_{false};
   bool have_obstacle_state_{false};
   bool have_planner_state_{false};
+  bool have_localization_state_{false};
   bool hard_stop_latched_{false};
   double command_time_{};
   double obstacle_time_{};
   double planner_time_{};
+  double localization_time_{};
+  double localization_fault_started_at_{-1.0};
+  double recovery_time_{};
   double last_active_change_{};
   double healthy_since_{-1.0};
   std::string obstacle_state_{"stale"};
   std::string planner_state_{"waiting"};
+  std::string localization_state_{"searching"};
+  bool recovery_active_{false};
   geometry_msgs::msg::Twist command_;
 };
 

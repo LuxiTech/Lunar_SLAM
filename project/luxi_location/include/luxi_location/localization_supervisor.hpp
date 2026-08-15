@@ -35,7 +35,9 @@ bool should_retain_odometry_after_rejected_icp(
   bool relocalize_on_tracking_icp_failure,
   bool alignment_initialized,
   double fitness,
-  double minimum_fitness);
+  double minimum_fitness,
+  double static_point_ratio,
+  double minimum_static_point_ratio_for_relocalization);
 
 class LocalizationSupervisor
 {
@@ -44,6 +46,7 @@ public:
 
   std::optional<Eigen::Matrix4d> add_coarse_pose(const Eigen::Matrix4d & pose);
   HlocAction report_icp_result(bool accepted);
+  void force_relocalization();
 
   LocalizationPhase phase() const;
   int consistent_pose_count() const;

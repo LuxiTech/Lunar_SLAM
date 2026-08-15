@@ -9,6 +9,7 @@
 
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <open3d/Open3D.h>
 #include <rclcpp/rclcpp.hpp>
@@ -146,16 +147,20 @@ public:
     declare_parameter("base_frame", "base_link");
     declare_parameter("odometry_topic", "/navigation/odom");
     declare_parameter("navigation_active_topic", "/navigation/active");
+    declare_parameter("motion_command_topic", "/cmd_vel");
+    declare_parameter("motion_command_timeout", 0.50);
     declare_parameter("maximum_odometry_age", 0.25);
     declare_parameter("map_odom_correction_gain", 0.05);
-    declare_parameter("maximum_odometry_icp_translation_correction", 0.10);
+    declare_parameter("maximum_odometry_icp_translation_correction", 0.35);
     declare_parameter("maximum_odometry_icp_yaw_correction_deg", 10.0);
-    declare_parameter("relocalize_on_tracking_icp_failure", false);
+    declare_parameter("relocalize_on_tracking_icp_failure", true);
+    declare_parameter("relocalization_minimum_static_point_ratio", 0.90);
     declare_parameter("preserve_initial_translation", true);
     declare_parameter("pose_topic", "/luxi_location/pose");
     declare_parameter("map_cloud_topic", "/luxi_location/map_cloud");
     declare_parameter("aligned_cloud_topic", "/luxi_location/aligned_cloud");
     declare_parameter("status_topic", "/luxi_location/status");
+    declare_parameter("health_topic", "/luxi_location/health");
     declare_parameter("fitness_topic", "/luxi_location/fitness");
     declare_parameter("imu_topic", "/d15041873/imu_sensor_broadcaster/imu");
     declare_parameter("use_imu_yaw_prediction", true);
@@ -180,6 +185,8 @@ public:
     declare_parameter("maximum_yaw_correction_deg", 20.0);
     declare_parameter("initial_maximum_translation_correction", 1.50);
     declare_parameter("initial_maximum_yaw_correction_deg", 45.0);
+    declare_parameter("tracking_static_filter_distance", 0.30);
+    declare_parameter("tracking_minimum_static_point_ratio", 0.20);
     declare_parameter("hloc_consistent_pose_count", 3);
     declare_parameter("hloc_maximum_translation_difference", 0.50);
     declare_parameter("hloc_maximum_yaw_difference_deg", 20.0);
@@ -192,6 +199,8 @@ public:
     declare_parameter("relocalization_maximum_translation", 0.40);
     declare_parameter("relocalization_maximum_yaw_deg", 30.0);
     declare_parameter("hloc_enable_service", "/luxi_hloc_localizer/enable");
+    declare_parameter(
+      "relocalization_request_topic", "/luxi_location/relocalization_request");
 
     map_frame_ = get_parameter("map_frame").as_string();
     odom_frame_ = get_parameter("odom_frame").as_string();
@@ -205,15 +214,20 @@ public:
     use_imu_yaw_prediction_ = get_parameter("use_imu_yaw_prediction").as_bool();
     relocalize_on_tracking_icp_failure_ =
       get_parameter("relocalize_on_tracking_icp_failure").as_bool();
+    relocalization_minimum_static_point_ratio_ =
+      get_parameter("relocalization_minimum_static_point_ratio").as_double();
     minimum_fitness_ = get_parameter("minimum_fitness").as_double();
     preserve_initial_translation_ =
       get_parameter("preserve_initial_translation").as_bool();
     maximum_odometry_age_ = get_parameter("maximum_odometry_age").as_double();
+    motion_command_timeout_ = get_parameter("motion_command_timeout").as_double();
     initial_pose_max_variance_ =
       get_parameter("initial_pose_max_variance").as_double();
     if (processing_period_ <= 0.0 || pixel_stride_ <= 0 ||
       minimum_depth_ <= 0.0 || maximum_depth_ <= minimum_depth_ ||
-      maximum_odometry_age_ <= 0.0)
+      maximum_odometry_age_ <= 0.0 || motion_command_timeout_ <= 0.0 ||
+      relocalization_minimum_static_point_ratio_ < 0.0 ||
+      relocalization_minimum_static_point_ratio_ > 1.0)
     {
       throw std::invalid_argument("depth and processing parameters are invalid");
     }
@@ -239,6 +253,10 @@ public:
       get_parameter("initial_maximum_translation_correction").as_double();
     parameters.initial_maximum_yaw_correction =
       get_parameter("initial_maximum_yaw_correction_deg").as_double() * M_PI / 180.0;
+    parameters.tracking_static_filter_distance =
+      get_parameter("tracking_static_filter_distance").as_double();
+    parameters.tracking_minimum_static_point_ratio =
+      get_parameter("tracking_minimum_static_point_ratio").as_double();
     localizer_ = std::make_unique<IcpLocalizer>(parameters);
 
     LocalizationSupervisorParameters supervisor_parameters;
@@ -301,10 +319,18 @@ public:
       get_parameter("navigation_active_topic").as_string(),
       rclcpp::QoS(1).reliable().transient_local(),
       std::bind(&LocalizationNode::navigation_active_callback, this, std::placeholders::_1));
+    motion_command_subscription_ = create_subscription<geometry_msgs::msg::Twist>(
+      get_parameter("motion_command_topic").as_string(), 10,
+      std::bind(&LocalizationNode::motion_command_callback, this, std::placeholders::_1));
     initial_pose_subscription_ =
       create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
       get_parameter("initial_pose_topic").as_string(), 10,
       std::bind(&LocalizationNode::initial_pose_callback, this, std::placeholders::_1));
+    relocalization_request_subscription_ = create_subscription<std_msgs::msg::Bool>(
+      get_parameter("relocalization_request_topic").as_string(), 10,
+      std::bind(
+        &LocalizationNode::relocalization_request_callback, this,
+        std::placeholders::_1));
     hloc_enable_client_ = create_client<std_srvs::srv::SetBool>(
       get_parameter("hloc_enable_service").as_string());
     hloc_control_timer_ = create_wall_timer(
@@ -317,6 +343,9 @@ public:
       get_parameter("aligned_cloud_topic").as_string(), rclcpp::SensorDataQoS());
     status_publisher_ = create_publisher<std_msgs::msg::String>(
       get_parameter("status_topic").as_string(), 10);
+    health_publisher_ = create_publisher<std_msgs::msg::String>(
+      get_parameter("health_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
     fitness_publisher_ = create_publisher<std_msgs::msg::Float32>(
       get_parameter("fitness_topic").as_string(), 10);
     const auto map_qos = rclcpp::QoS(1).reliable().transient_local();
@@ -327,6 +356,7 @@ public:
     publish_status(
       "waiting for " + std::to_string(consistent_pose_count_required_) +
       " consistent HLoc poses");
+    publish_health("searching");
     RCLCPP_INFO(
       get_logger(),
       "loaded %zu map points from %s; waiting for %d consistent HLoc poses",
@@ -378,13 +408,17 @@ private:
       accepted_pose = supervisor_->add_coarse_pose(coarse_pose);
       consistent_pose_count = supervisor_->consistent_pose_count();
       if (accepted_pose.has_value()) {
-        pose_ = *accepted_pose;
+        pending_relocalization_pose_ = *accepted_pose;
+        if (!recovering_with_odometry_) {
+          pose_ = *accepted_pose;
+        }
         has_pose_ = true;
         initial_alignment_ = true;
         yaw_motion_predictor_->reset();
       }
     }
     if (accepted_pose.has_value()) {
+      publish_health("verifying");
       publish_status(
         "HLoc consistency " + std::to_string(consistent_pose_count_required_) + "/" +
         std::to_string(consistent_pose_count_required_) + "; waiting for ICP");
@@ -434,27 +468,41 @@ private:
     Eigen::Matrix4d map_from_odom;
     double variance = 0.01;
     bool publish = false;
+    std::string recovery_health;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      const bool motion_active = motion_active_locked();
       const Eigen::Matrix4d odom_from_base =
-        command_gated_odometry_.update(raw_odom_from_base, navigation_active_);
+        command_gated_odometry_.update(raw_odom_from_base, motion_active);
       odom_from_base_ = odom_from_base;
       odometry_stamp_seconds_ =
         static_cast<double>(message->header.stamp.sec) +
         static_cast<double>(message->header.stamp.nanosec) * 1e-9;
       has_odometry_ = true;
       if (has_pose_ && map_odom_alignment_->initialized()) {
-        map_from_base = navigation_active_ ?
+        map_from_base = motion_active ?
           map_odom_alignment_->predict(odom_from_base_) : stationary_map_pose_;
         map_from_odom = map_odom_alignment_->map_from_odom();
         pose_ = map_from_base;
         variance = last_pose_variance_;
         publish = true;
+        if (recovering_with_odometry_) {
+          recovery_health = pending_relocalization_pose_.has_value() ?
+            "verifying" : "dead_reckoning";
+        } else {
+          // ICP is intentionally slower than the navigation health timeout.
+          // Refresh the validated tracking state with every odometry pose so a
+          // healthy localization is not declared stale between ICP updates.
+          recovery_health = "tracking";
+        }
       }
     }
     if (publish) {
       publish_pose_and_transform(
         map_from_base, map_from_odom, message->header.stamp, variance);
+      if (!recovery_health.empty()) {
+        publish_health(recovery_health);
+      }
     }
   }
 
@@ -465,6 +513,60 @@ private:
       stationary_map_pose_ = pose_;
     }
     navigation_active_ = message->data;
+  }
+
+  void relocalization_request_callback(const std_msgs::msg::Bool::SharedPtr message)
+  {
+    if (!message->data) {
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      supervisor_->force_relocalization();
+      recovering_with_odometry_ = map_odom_alignment_->initialized() && has_pose_;
+      if (!recovering_with_odometry_) {
+        has_pose_ = false;
+      }
+      initial_alignment_ = true;
+      pending_relocalization_pose_.reset();
+      yaw_motion_predictor_->reset();
+    }
+    request_hloc_enabled(true);
+    publish_health("searching");
+    publish_status("explicit navigation recovery requested; searching with HLoc");
+    RCLCPP_WARN(
+      get_logger(),
+      "Navigation requested global relocalization; HLoc search restarted while odometry is retained");
+  }
+
+  void motion_command_callback(const geometry_msgs::msg::Twist::SharedPtr message)
+  {
+    constexpr double epsilon = 1e-4;
+    const bool commanded =
+      std::abs(message->linear.x) > epsilon ||
+      std::abs(message->linear.y) > epsilon ||
+      std::abs(message->angular.z) > epsilon;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (robot_motion_commanded_ && !commanded && has_pose_) {
+      stationary_map_pose_ = pose_;
+    }
+    robot_motion_commanded_ = commanded;
+    motion_command_received_at_ = std::chrono::steady_clock::now();
+  }
+
+  bool motion_active_locked() const
+  {
+    if (navigation_active_) {
+      return true;
+    }
+    if (!robot_motion_commanded_ ||
+      motion_command_received_at_.time_since_epoch().count() == 0)
+    {
+      return false;
+    }
+    return std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - motion_command_received_at_).count() <=
+      motion_command_timeout_;
   }
 
   void depth_callback(const sensor_msgs::msg::Image::SharedPtr message)
@@ -514,7 +616,14 @@ private:
       odom_from_base = odom_from_base_;
       initial_alignment = initial_alignment_;
       if (initial_alignment) {
-        initial_pose = pose_;
+        if (!pending_relocalization_pose_.has_value()) {
+          publish_status(
+            recovering_with_odometry_ ?
+            "dead reckoning while waiting for a consistent HLoc pose" :
+            "waiting for a consistent HLoc pose");
+          return;
+        }
+        initial_pose = *pending_relocalization_pose_;
       } else if (map_odom_alignment_->initialized()) {
         initial_pose = map_odom_alignment_->predict(odom_from_base);
       } else {
@@ -564,10 +673,6 @@ private:
     const Eigen::Matrix4d & odom_from_base,
     const bool initial_alignment)
   {
-    std_msgs::msg::Float32 fitness;
-    fitness.data = static_cast<float>(result.fitness);
-    fitness_publisher_->publish(fitness);
-
     const double stamp_seconds =
       static_cast<double>(stamp.sec) + static_cast<double>(stamp.nanosec) * 1e-9;
     bool accepted = result.accepted;
@@ -583,9 +688,12 @@ private:
       if (accepted) {
         if (initial_alignment) {
           fused_pose = initialPoseForMapAlignment(
-            pose_, result.pose, preserve_initial_translation_);
-          const auto decision = tracking_pose_gate_->evaluate_relocalization(
-            fused_pose, stamp_seconds);
+            pending_relocalization_pose_.value_or(pose_), result.pose,
+            preserve_initial_translation_);
+          const auto decision = map_odom_alignment_->initialized() ?
+            tracking_pose_gate_->evaluate_relocalization(
+              fused_pose, map_odom_alignment_->predict(odom_from_base), stamp_seconds) :
+            tracking_pose_gate_->evaluate_relocalization(fused_pose, stamp_seconds);
           accepted = decision.accepted;
           if (!accepted) {
             reason = decision.reason;
@@ -599,7 +707,7 @@ private:
           accepted = odometry_correction.accepted;
           if (accepted) {
             fused_pose = map_odom_alignment_->predict(odom_from_base);
-            if (!navigation_active_) {
+            if (!motion_active_locked()) {
               fused_pose = stationary_map_pose_;
             }
             const auto decision = tracking_pose_gate_->evaluate(fused_pose, stamp_seconds);
@@ -615,7 +723,8 @@ private:
       keep_odometry_tracking =
         should_retain_odometry_after_rejected_icp(
         initial_alignment, accepted, relocalize_on_tracking_icp_failure_,
-        map_odom_alignment_->initialized(), result.fitness, minimum_fitness_);
+        map_odom_alignment_->initialized(), result.fitness, minimum_fitness_,
+        result.static_point_ratio, relocalization_minimum_static_point_ratio_);
       hloc_action = supervisor_->report_icp_result(
         keep_odometry_tracking ? true : accepted);
       consecutive_failures = supervisor_->consecutive_icp_failures();
@@ -625,9 +734,15 @@ private:
         map_from_odom = map_odom_alignment_->map_from_odom();
         last_pose_variance_ = std::max(result.rmse * result.rmse, 1e-4);
         yaw_motion_predictor_->anchor();
+        pending_relocalization_pose_.reset();
+        recovering_with_odometry_ = false;
       } else if (hloc_action == HlocAction::kEnable) {
-        has_pose_ = false;
+        recovering_with_odometry_ = map_odom_alignment_->initialized() && has_pose_;
+        if (!recovering_with_odometry_) {
+          has_pose_ = false;
+        }
         initial_alignment_ = true;
+        pending_relocalization_pose_.reset();
         yaw_motion_predictor_->reset();
       }
       if (keep_odometry_tracking) {
@@ -636,6 +751,7 @@ private:
     }
     std::ostringstream status;
     status << reason << " fitness=" << result.fitness << " rmse=" << result.rmse
+           << " static_ratio=" << result.static_point_ratio
            << " correction=" << result.translation_correction << "m/"
            << result.yaw_correction * 180.0 / M_PI << "deg";
     if (!initial_alignment && odometry_correction.reason.size() > 0U) {
@@ -650,7 +766,16 @@ private:
       status << "; " << failures_before_relocalization_
              << " consecutive ICP failures, restarting HLoc";
     }
+    // Consumers use this topic as an accepted-localization signal. Keep the
+    // rejected raw overlap in the status text, but never certify it as a pose.
+    std_msgs::msg::Float32 fitness;
+    fitness.data = accepted ? static_cast<float>(result.fitness) : 0.0F;
+    fitness_publisher_->publish(fitness);
     if (!accepted) {
+      publish_health(
+        keep_odometry_tracking ? "tracking" :
+        (hloc_action == HlocAction::kEnable ? "searching" :
+        (initial_alignment ? "verifying" : "degraded")));
       if (keep_odometry_tracking) {
         status << "; local odometry remains authoritative";
       } else if (hloc_action != HlocAction::kEnable) {
@@ -664,6 +789,7 @@ private:
     }
     const double variance = std::max(result.rmse * result.rmse, 1e-4);
     publish_pose_and_transform(fused_pose, map_from_odom, stamp, variance);
+    publish_health("tracking");
 
     open3d::geometry::PointCloud aligned = scan;
     aligned.Transform(fused_pose);
@@ -727,6 +853,13 @@ private:
     status_publisher_->publish(message);
   }
 
+  void publish_health(const std::string & state)
+  {
+    std_msgs::msg::String message;
+    message.data = state;
+    health_publisher_->publish(message);
+  }
+
   void request_hloc_enabled(bool enabled)
   {
     desired_hloc_enabled_ = enabled;
@@ -776,9 +909,11 @@ private:
   double minimum_depth_{0.25};
   double maximum_depth_{4.0};
   double maximum_odometry_age_{0.25};
+  double motion_command_timeout_{0.50};
   double initial_pose_max_variance_{0.0};
   bool use_imu_yaw_prediction_{true};
-  bool relocalize_on_tracking_icp_failure_{false};
+  bool relocalize_on_tracking_icp_failure_{true};
+  double relocalization_minimum_static_point_ratio_{0.90};
   double minimum_fitness_{0.25};
   bool preserve_initial_translation_{true};
   int consistent_pose_count_required_{3};
@@ -794,9 +929,13 @@ private:
   double last_pose_variance_{0.01};
   bool has_odometry_{false};
   bool navigation_active_{false};
+  bool robot_motion_commanded_{false};
+  std::chrono::steady_clock::time_point motion_command_received_at_;
   CommandGatedOdometry command_gated_odometry_;
   bool has_pose_{false};
   bool initial_alignment_{true};
+  bool recovering_with_odometry_{false};
+  std::optional<Eigen::Matrix4d> pending_relocalization_pose_;
   std::chrono::steady_clock::time_point last_processing_time_;
   std::unique_ptr<IcpLocalizer> localizer_;
   std::unique_ptr<LocalizationSupervisor> supervisor_;
@@ -815,12 +954,16 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_subscription_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr navigation_active_subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr motion_command_subscription_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
     initial_pose_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
+    relocalization_request_subscription_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_publisher_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr health_publisher_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr fitness_publisher_;
   rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr hloc_enable_client_;
   rclcpp::TimerBase::SharedPtr hloc_control_timer_;

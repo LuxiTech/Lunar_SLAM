@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "luxi_3d_navigation/localization_health_monitor.hpp"
+#include "luxi_3d_navigation/localization_recovery_controller.hpp"
 #include "luxi_3d_navigation/path_follower_control.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
@@ -47,12 +47,27 @@ public:
     declare_parameter<double>("angular_deadband", 0.15);
     declare_parameter<double>("linear_heading_tolerance", 0.35);
     declare_parameter<double>("localization_timeout", 1.0);
-    declare_parameter<double>("localization_recovery_grace_period", 8.0);
+    declare_parameter<std::string>("localization_health_topic", "/luxi_location/health");
+    declare_parameter<std::string>(
+      "localization_recovery_active_topic", "/navigation/localization_recovery_active");
+    declare_parameter<std::string>(
+      "relocalization_request_topic", "/luxi_location/relocalization_request");
+    declare_parameter<double>("dead_reckoning_duration", 0.80);
+    declare_parameter<double>("localization_recovery_timeout", 45.0);
+    declare_parameter<double>("localization_recovery_angular_speed", 0.20);
+    declare_parameter<double>("localization_recovery_confirmation_time", 1.0);
     declare_parameter<double>("max_path_deviation_m", 0.50);
 
-    localization_health_monitor_ =
-      std::make_unique<luxi_3d_navigation::LocalizationHealthMonitor>(
-      get_parameter("localization_recovery_grace_period").as_double());
+    luxi_3d_navigation::LocalizationRecoveryParameters recovery_parameters;
+    recovery_parameters.dead_reckoning_duration =
+      get_parameter("dead_reckoning_duration").as_double();
+    recovery_parameters.recovery_timeout =
+      get_parameter("localization_recovery_timeout").as_double();
+    recovery_parameters.healthy_confirmation_time =
+      get_parameter("localization_recovery_confirmation_time").as_double();
+    localization_recovery_controller_ =
+      std::make_unique<luxi_3d_navigation::LocalizationRecoveryController>(
+      recovery_parameters);
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>(
       get_parameter("cmd_vel_topic").as_string(), 10);
@@ -62,10 +77,22 @@ public:
     state_pub_ = create_publisher<std_msgs::msg::String>(
       get_parameter("state_topic").as_string(),
       rclcpp::QoS(1).reliable().transient_local());
+    recovery_active_pub_ = create_publisher<std_msgs::msg::Bool>(
+      get_parameter("localization_recovery_active_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local());
+    relocalization_request_pub_ = create_publisher<std_msgs::msg::Bool>(
+      get_parameter("relocalization_request_topic").as_string(), 10);
     terrain_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       get_parameter("terrain_pose_topic").as_string(), 10,
       [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
         terrain_pose_ = *message;
+      });
+    localization_health_sub_ = create_subscription<std_msgs::msg::String>(
+      get_parameter("localization_health_topic").as_string(),
+      rclcpp::QoS(1).reliable().transient_local(),
+      [this](const std_msgs::msg::String::SharedPtr message) {
+        localization_health_ = message->data;
+        localization_health_received_at_ = steadyNow();
       });
 
     path_sub_ = create_subscription<nav_msgs::msg::Path>(
@@ -89,7 +116,8 @@ public:
       get_parameter("start_topic").as_string(), 10,
       [this](const std_msgs::msg::Bool::SharedPtr message) {
         if (message->data) {
-          localization_health_monitor_->reset();
+          localization_recovery_controller_->reset();
+          last_path_turn_direction_ = 1.0;
         }
         setState(
           message->data && !path_.empty(),
@@ -100,7 +128,7 @@ public:
       get_parameter("stop_topic").as_string(), 10,
       [this](const std_msgs::msg::Bool::SharedPtr message) {
         if (message->data) {
-          localization_health_monitor_->reset();
+          localization_recovery_controller_->reset();
           setState(false, "stopped");
         }
       });
@@ -121,6 +149,39 @@ private:
     if (!active_ || path_.empty()) {
       return;
     }
+    const double now_seconds = steadyNow();
+    const double health_timeout = get_parameter("localization_timeout").as_double();
+    const bool health_fresh = localization_health_received_at_ >= 0.0 &&
+      now_seconds - localization_health_received_at_ <= health_timeout;
+    const std::string health = health_fresh ? localization_health_ : "searching";
+    const auto recovery_action = localization_recovery_controller_->update(
+      health, now_seconds);
+    if (recovery_action == luxi_3d_navigation::LocalizationRecoveryAction::kStop) {
+      setState(false, "localization_lost");
+      RCLCPP_ERROR(
+        get_logger(), "Localization recovery reached its bounded timeout; navigation stopped");
+      return;
+    }
+    if (recovery_action == luxi_3d_navigation::LocalizationRecoveryAction::kRotate) {
+      publishRecoveryRotation();
+      return;
+    }
+    if (recovery_action == luxi_3d_navigation::LocalizationRecoveryAction::kHold) {
+      publishRecoveryActive(false);
+      publishStop();
+      updateActiveState(
+        health == "verifying" ? "localization_recovery_verifying" :
+        "localization_recovery_confirming");
+      return;
+    }
+    publishRecoveryActive(false);
+    if (recovery_action == luxi_3d_navigation::LocalizationRecoveryAction::kDeadReckon) {
+      updateActiveState("localization_dead_reckoning");
+    } else if (state_ != "active") {
+      updateActiveState("active");
+      RCLCPP_INFO(get_logger(), "Confirmed localization recovery; resuming navigation");
+    }
+
     try {
       const auto transform = tf_buffer_.lookupTransform(
         get_parameter("map_frame").as_string(), get_parameter("base_frame").as_string(),
@@ -133,11 +194,11 @@ private:
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 2000,
           "Localization transform is stale (age=%.3fs)", transform_age);
-        handleLocalizationFault("localization_lost");
+        handleLocalizationFault();
         return;
       }
       if (!terrain_pose_) {
-        handleLocalizationFault("terrain_pose_lost");
+        handleLocalizationFault();
         return;
       }
       const rclcpp::Time terrain_stamp(terrain_pose_->header.stamp);
@@ -148,7 +209,7 @@ private:
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 2000,
           "Terrain-constrained pose is stale (age=%.3fs)", terrain_age);
-        handleLocalizationFault("terrain_pose_lost");
+        handleLocalizationFault();
         return;
       }
       follow(
@@ -158,7 +219,7 @@ private:
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Localization unavailable: %s", error.what());
-      handleLocalizationFault("localization_lost");
+      handleLocalizationFault();
     }
   }
 
@@ -193,18 +254,8 @@ private:
       RCLCPP_WARN(
         get_logger(), "Robot is %.3fm away from the planned path; stopping",
         nearest_distance);
-      handleLocalizationFault("path_deviation");
+      setState(false, "path_deviation");
       return;
-    }
-    const auto health_action = localization_health_monitor_->update(true, steadyNow());
-    if (health_action != luxi_3d_navigation::LocalizationHealthAction::kTrack) {
-      publishStop();
-      return;
-    }
-    if (state_ == "localization_degraded") {
-      state_ = "active";
-      publishState(state_);
-      RCLCPP_INFO(get_logger(), "Localization recovered; resuming navigation");
     }
     const double lookahead = get_parameter("lookahead_m").as_double();
     const auto * target = &goal;
@@ -220,6 +271,8 @@ private:
     const double dy = target->y - robot_y;
     const double heading = std::atan2(dy, dx) - robot_yaw;
     const double normalized_heading = std::atan2(std::sin(heading), std::cos(heading));
+    last_path_turn_direction_ = luxi_3d_navigation::updatedTurnDirection(
+      normalized_heading, last_path_turn_direction_);
     const auto control = luxi_3d_navigation::pathFollowerCommand(
       std::hypot(dx, dy), normalized_heading,
       get_parameter("linear_gain").as_double(),
@@ -248,23 +301,59 @@ private:
       std::chrono::steady_clock::now().time_since_epoch()).count();
   }
 
-  void handleLocalizationFault(const std::string & terminal_state)
+  void handleLocalizationFault()
   {
-    const auto action = localization_health_monitor_->update(false, steadyNow());
-    publishStop();
-    if (action == luxi_3d_navigation::LocalizationHealthAction::kPause) {
-      if (state_ != "localization_degraded") {
-        state_ = "localization_degraded";
-        publishState(state_);
-        RCLCPP_WARN(
-          get_logger(),
-          "Localization degraded; holding zero velocity while waiting for recovery");
-      }
+    const double now_seconds = steadyNow();
+    const auto action = localization_recovery_controller_->update("searching", now_seconds);
+    if (action == luxi_3d_navigation::LocalizationRecoveryAction::kRotate) {
+      publishRecoveryRotation();
       return;
     }
-    setState(false, terminal_state);
-    RCLCPP_ERROR(
-      get_logger(), "Localization did not recover within the grace period; navigation stopped");
+    publishRecoveryActive(false);
+    publishStop();
+    updateActiveState("localization_recovery_waiting");
+  }
+
+  void publishRecoveryRotation()
+  {
+    if (state_ != "localization_recovery_spin") {
+      recovery_turn_direction_ = last_path_turn_direction_;
+      std_msgs::msg::Bool request;
+      request.data = true;
+      relocalization_request_pub_->publish(request);
+      RCLCPP_WARN(
+        get_logger(),
+        "Localization recovery rotation started: direction=%s angular_speed=%.3f rad/s; HLoc restart requested",
+        recovery_turn_direction_ > 0.0 ? "left" : "right",
+        get_parameter("localization_recovery_angular_speed").as_double());
+    }
+    geometry_msgs::msg::Twist command;
+    command.angular.z = std::clamp(
+      get_parameter("localization_recovery_angular_speed").as_double(), 0.0,
+      get_parameter("max_angular_speed").as_double()) *
+      recovery_turn_direction_;
+    publishRecoveryActive(true);
+    cmd_pub_->publish(command);
+    updateActiveState("localization_recovery_spin");
+  }
+
+  void publishRecoveryActive(const bool active) const
+  {
+    if (!recovery_active_pub_) {
+      return;
+    }
+    std_msgs::msg::Bool message;
+    message.data = active;
+    recovery_active_pub_->publish(message);
+  }
+
+  void updateActiveState(const std::string & state)
+  {
+    if (state_ == state) {
+      return;
+    }
+    state_ = state;
+    publishState(state_);
   }
 
   void publishState(const std::string & state) const
@@ -282,6 +371,7 @@ private:
     active_ = active;
     state_ = state;
     if (!active_) {
+      publishRecoveryActive(false);
       publishStop();
     }
     publishState(state);
@@ -294,15 +384,22 @@ private:
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr terrain_pose_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr localization_health_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr start_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stop_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr active_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr recovery_active_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr relocalization_request_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::optional<geometry_msgs::msg::PoseStamped> terrain_pose_;
-  std::unique_ptr<luxi_3d_navigation::LocalizationHealthMonitor>
-    localization_health_monitor_;
+  std::string localization_health_{"searching"};
+  double localization_health_received_at_{-1.0};
+  double last_path_turn_direction_{1.0};
+  double recovery_turn_direction_{1.0};
+  std::unique_ptr<luxi_3d_navigation::LocalizationRecoveryController>
+    localization_recovery_controller_;
 };
 
 int main(int argc, char ** argv)

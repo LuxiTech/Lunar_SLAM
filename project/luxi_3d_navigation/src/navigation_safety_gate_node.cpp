@@ -30,6 +30,10 @@ public:
       "obstacle_state_topic", "/navigation/local_obstacles/state");
     const auto planner_topic = declare_parameter<std::string>(
       "planner_state_topic", "/navigation/local_replan/status");
+    const auto localization_topic = declare_parameter<std::string>(
+      "localization_state_topic", "/luxi_location/health");
+    const auto recovery_active_topic = declare_parameter<std::string>(
+      "recovery_active_topic", "/navigation/localization_recovery_active");
     const auto state_topic = declare_parameter<std::string>(
       "state_topic", "/navigation/safety_gate/state");
     const auto limited_topic = declare_parameter<std::string>(
@@ -64,6 +68,16 @@ public:
       [this](const std_msgs::msg::String::SharedPtr message) {
         gate_.updatePlannerState(message->data, steadyNow());
       });
+    localization_sub_ = create_subscription<std_msgs::msg::String>(
+      localization_topic, rclcpp::QoS(1).reliable().transient_local(),
+      [this](const std_msgs::msg::String::SharedPtr message) {
+        gate_.updateLocalizationState(message->data, steadyNow());
+      });
+    recovery_active_sub_ = create_subscription<std_msgs::msg::Bool>(
+      recovery_active_topic, rclcpp::QoS(1).reliable().transient_local(),
+      [this](const std_msgs::msg::Bool::SharedPtr message) {
+        gate_.updateRecoveryActive(message->data, steadyNow());
+      });
     timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / publish_rate), [this]() {publish();});
     RCLCPP_INFO(
@@ -85,9 +99,15 @@ private:
     result.command_timeout = declare_parameter<double>("command_timeout", 0.20);
     result.obstacle_timeout = declare_parameter<double>("obstacle_timeout", 0.35);
     result.planner_timeout = declare_parameter<double>("planner_timeout", 1.0);
+    result.localization_timeout = declare_parameter<double>("localization_timeout", 1.5);
     result.slow_scale = declare_parameter<double>("slow_scale", 0.50);
     result.minimum_linear_speed = declare_parameter<double>("minimum_linear_speed", 0.0);
     result.healthy_resume_hold = declare_parameter<double>("healthy_resume_hold", 0.50);
+    result.dead_reckoning_duration =
+      declare_parameter<double>("dead_reckoning_duration", 0.80);
+    result.dead_reckoning_scale = declare_parameter<double>("dead_reckoning_scale", 0.50);
+    result.maximum_recovery_angular_speed =
+      declare_parameter<double>("maximum_recovery_angular_speed", 0.20);
     return result;
   }
 
@@ -100,6 +120,14 @@ private:
   void publish()
   {
     const auto result = gate_.evaluate(steadyNow(), monitor_only_);
+    if (result.state != last_state_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Safety gate state: %s -> %s (output linear.x=%.3f angular.z=%.3f)",
+        last_state_.c_str(), result.state.c_str(), result.command.linear.x,
+        result.command.angular.z);
+      last_state_ = result.state;
+    }
     output_pub_->publish(result.command);
     std_msgs::msg::String state;
     state.data = result.state;
@@ -114,6 +142,7 @@ private:
 
   NavigationSafetyGate gate_;
   bool monitor_only_{false};
+  std::string last_state_{"starting"};
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr output_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr limited_pub_;
@@ -122,6 +151,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr active_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr obstacle_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr localization_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr recovery_active_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

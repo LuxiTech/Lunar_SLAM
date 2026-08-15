@@ -2015,6 +2015,9 @@ class WebControlNode(Node):
         self.declare_parameter(
             "navigation_refined_status_topic", "/luxi_location/status"
         )
+        self.declare_parameter(
+            "navigation_localization_health_topic", "/luxi_location/health"
+        )
         self.declare_parameter("navigation_hloc_status_topic", "/luxi_hloc/status")
         self.declare_parameter(
             "navigation_hloc_diagnostics_topic", "/luxi_hloc/diagnostics"
@@ -2310,6 +2313,9 @@ class WebControlNode(Node):
         self.navigation_refined_status_topic = str(
             self.get_parameter("navigation_refined_status_topic").value
         )
+        self.navigation_localization_health_topic = str(
+            self.get_parameter("navigation_localization_health_topic").value
+        )
         self.navigation_hloc_status_topic = str(
             self.get_parameter("navigation_hloc_status_topic").value
         )
@@ -2440,6 +2446,8 @@ class WebControlNode(Node):
         self._terrain_pose_received_at: Optional[float] = None
         self._refined_localization_fitness: Optional[float] = None
         self._refined_localization_status = ""
+        self._localization_health = "searching"
+        self._localization_health_received_at: Optional[float] = None
         self._refined_localization_verified_at: Optional[float] = None
         self._hloc_status = ""
         self._hloc_status_received_at: Optional[float] = None
@@ -2455,6 +2463,7 @@ class WebControlNode(Node):
         self._path_frame_id = "map"
         self._path_received_at: Optional[float] = None
         self._last_valid_path_received_at: Optional[float] = None
+        self._planner_map_ready = False
         self._planning_state = "idle"
         self._planning_error = ""
         self._navigation_active = False
@@ -2621,6 +2630,12 @@ class WebControlNode(Node):
             self.navigation_refined_status_topic,
             self._on_navigation_refined_status,
             qos,
+        )
+        self.navigation_localization_health_subscription = self.create_subscription(
+            String,
+            self.navigation_localization_health_topic,
+            self._on_navigation_localization_health,
+            localization_qos,
         )
         self.navigation_hloc_status_subscription = self.create_subscription(
             String,
@@ -2994,6 +3009,7 @@ class WebControlNode(Node):
                 self._last_valid_path_points = list(points)
                 self._last_valid_path_frame_id = self._path_frame_id
                 self._last_valid_path_received_at = self._path_received_at
+                self._planner_map_ready = True
                 self._planning_state = "ready"
                 self._planning_error = ""
             elif self._planning_state != "failed":
@@ -3020,8 +3036,13 @@ class WebControlNode(Node):
                 self._planned_path_points = []
                 self._planning_state = "failed"
                 self._planning_error = errors[status]
-            elif status == "waiting_map":
-                self._planning_state = "idle"
+            elif status in {"waiting_map", "loading_map"}:
+                self._planner_map_ready = False
+                self._planning_state = "loading_map"
+                self._planning_error = ""
+            elif status == "map_ready":
+                self._planner_map_ready = True
+                self._planning_state = "map_ready"
                 self._planning_error = ""
 
     def _on_navigation_active(self, message: Bool) -> None:
@@ -3097,6 +3118,16 @@ class WebControlNode(Node):
                 self._refined_localization_received_at = None
                 self._refined_localization_verified_at = None
 
+    def _on_navigation_localization_health(self, message: String) -> None:
+        state = message.data.strip().lower()
+        if state not in {
+            "searching", "verifying", "tracking", "degraded", "dead_reckoning"
+        }:
+            return
+        with self._navigation_lock:
+            self._localization_health = state
+            self._localization_health_received_at = time.monotonic()
+
     def _on_navigation_hloc_status(self, message: String) -> None:
         """Expose the coarse localizer's actual state instead of hiding it."""
         with self._navigation_lock:
@@ -3163,6 +3194,8 @@ class WebControlNode(Node):
             self._refined_localization_fitness = None
             self._refined_localization_status = ""
             self._refined_localization_verified_at = None
+            self._localization_health = "searching"
+            self._localization_health_received_at = None
             self._hloc_status = ""
             self._hloc_status_received_at = None
             self._hloc_diagnostics = None
@@ -3176,6 +3209,7 @@ class WebControlNode(Node):
             self._last_valid_path_frame_id = "map"
             self._path_received_at = None
             self._last_valid_path_received_at = None
+            self._planner_map_ready = False
             self._planning_state = "idle"
             self._planning_error = ""
             self._navigation_active = False
@@ -3996,9 +4030,12 @@ class WebControlNode(Node):
             self._refined_localization_fitness = None
             self._refined_localization_status = ""
             self._refined_localization_verified_at = None
+            self._localization_health = "searching"
+            self._localization_health_received_at = None
             self._planned_path_points = []
             self._path_received_at = None
-            self._planning_state = "idle"
+            self._planner_map_ready = False
+            self._planning_state = "loading_map"
             self._planning_error = ""
         return self.navigation.start(
             map_id,
@@ -4027,10 +4064,13 @@ class WebControlNode(Node):
                 self._refined_localization_fitness = None
                 self._refined_localization_status = ""
                 self._refined_localization_verified_at = None
+                self._localization_health = "searching"
+                self._localization_health_received_at = None
                 self._hloc_status = ""
                 self._hloc_status_received_at = None
                 self._hloc_diagnostics = None
                 self._hloc_diagnostics_received_at = None
+                self._planner_map_ready = False
                 self._navigation_active = False
                 self._navigation_follower_state = "stopped"
         return stopped, message
@@ -4073,6 +4113,8 @@ class WebControlNode(Node):
             return False, "load a map and wait for navigation to start first"
         if not navigation["planning_localization_ready"]:
             return False, "wait for a recent accepted ICP localization before selecting a goal"
+        if not navigation["planner_map_ready"]:
+            return False, "wait for the 3D terrain map to finish loading before selecting a goal"
         self.halt_navigation_motion()
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
@@ -4142,6 +4184,7 @@ class WebControlNode(Node):
             status["path_point_count"] = len(self._planned_path_points)
             status["planning_state"] = self._planning_state
             status["planning_error"] = self._planning_error or None
+            status["planner_map_ready"] = running and self._planner_map_ready
             status["active"] = running and self._navigation_active
             status["follower_state"] = (
                 self._navigation_follower_state if running else "stopped"
@@ -4163,6 +4206,15 @@ class WebControlNode(Node):
             status["coarse_localization_age_seconds"] = coarse_age
             status["localization_fitness"] = self._refined_localization_fitness
             status["localization_status"] = self._refined_localization_status or None
+            health_age = (
+                None if self._localization_health_received_at is None else round(
+                    time.monotonic() - self._localization_health_received_at, 2
+                )
+            )
+            status["localization_health"] = (
+                self._localization_health if running else "stopped"
+            )
+            status["localization_health_age_seconds"] = health_age
             hloc_status_age = (
                 None if self._hloc_status_received_at is None else round(
                     time.monotonic() - self._hloc_status_received_at, 2

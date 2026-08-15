@@ -5,8 +5,9 @@ from pathlib import Path
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -38,6 +39,9 @@ def generate_launch_description() -> LaunchDescription:
     config_path = PathJoinSubstitution([
         FindPackageShare("luxi_3d_navigation"), "config", "navigation.yaml"
     ])
+    visual_odometry_config_path = PathJoinSubstitution([
+        FindPackageShare("luxi_visual_frontend"), "config", "visual_odometry.yaml"
+    ])
 
     return LaunchDescription([
         DeclareLaunchArgument("database_path", default_value=""),
@@ -47,6 +51,11 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("semantic_path", default_value=""),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/navigation/cmd_vel"),
         DeclareLaunchArgument("dynamic_monitor_only", default_value="false"),
+        DeclareLaunchArgument(
+            "odometry_backend",
+            default_value="learned",
+            description="Local odometry backend: learned (default) or rtabmap",
+        ),
         SetEnvironmentVariable("LD_LIBRARY_PATH", library_path),
         Node(
             package="rtabmap_odom",
@@ -70,6 +79,26 @@ def generate_launch_description() -> LaunchDescription:
             ],
             arguments=["--ros-args", "--log-level", "warn"],
             output="screen",
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration("odometry_backend"), "' == 'rtabmap'"
+            ])),
+        ),
+        Node(
+            package="luxi_visual_frontend",
+            executable="visual_odometry_node",
+            name="navigation_visual_odometry",
+            parameters=[visual_odometry_config_path, {
+                "device": "cuda",
+                "publish_tf": True,
+                "odom_topic": "/navigation/odom",
+                "odom_frame": "odom",
+                "status_topic": "/navigation/visual_odometry/status",
+                "diagnostics_topic": "/navigation/visual_odometry/diagnostics",
+            }],
+            output="screen",
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration("odometry_backend"), "' == 'learned'"
+            ])),
         ),
         IncludeLaunchDescription(
             localization_launch,

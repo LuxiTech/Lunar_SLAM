@@ -26,6 +26,19 @@ struct PathFollowerCommand
   double angular_z{0.0};
 };
 
+inline double updatedTurnDirection(
+  const double heading_error, const double previous_direction,
+  const double minimum_heading = 1e-3)
+{
+  if (std::isfinite(heading_error) && std::abs(heading_error) > minimum_heading) {
+    return std::copysign(1.0, heading_error);
+  }
+  if (std::isfinite(previous_direction) && std::abs(previous_direction) > 0.0) {
+    return std::copysign(1.0, previous_direction);
+  }
+  return 1.0;
+}
+
 inline bool pathGoalReached(
   const double robot_x, const double robot_y,
   const double previous_x, const double previous_y,

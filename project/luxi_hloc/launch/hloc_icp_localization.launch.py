@@ -6,7 +6,7 @@ from pathlib import Path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -48,6 +48,18 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("cloud_path", default_value=str(_latest_cloud())),
             DeclareLaunchArgument("device", default_value="cuda"),
             DeclareLaunchArgument("icp_publish_tf", default_value="false"),
+            DeclareLaunchArgument(
+                "hloc_config_file",
+                default_value=PathJoinSubstitution([
+                    FindPackageShare("luxi_hloc"), "config", "hloc_localization.yaml"
+                ]),
+            ),
+            DeclareLaunchArgument(
+                "icp_config_file",
+                default_value=PathJoinSubstitution([
+                    FindPackageShare("luxi_location"), "config", "icp_localization.yaml"
+                ]),
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     [FindPackageShare("luxi_hloc"), "/launch/hloc_localization.launch.py"]
@@ -55,6 +67,7 @@ def generate_launch_description() -> LaunchDescription:
                 launch_arguments={
                     "map_directory": LaunchConfiguration("map_directory"),
                     "device": LaunchConfiguration("device"),
+                    "config_file": LaunchConfiguration("hloc_config_file"),
                 }.items(),
             ),
             IncludeLaunchDescription(
@@ -63,6 +76,7 @@ def generate_launch_description() -> LaunchDescription:
                 ),
                 launch_arguments={
                     "map_path": LaunchConfiguration("cloud_path"),
+                    "config_file": LaunchConfiguration("icp_config_file"),
                     "initial_pose_topic": "/luxi_hloc/coarse_pose",
                     "initial_pose_max_variance": "0.5",
                     "publish_tf": LaunchConfiguration("icp_publish_tf"),

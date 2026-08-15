@@ -9,21 +9,33 @@ luxi_icp_localization:
     odom_frame: odom
     base_frame: base_link
 
-    # Continuous local motion comes from RTAB-Map RGB-D odometry. ICP only
+    # Continuous local motion comes from the selected RGB-D visual odometry. ICP only
     # estimates a bounded, slowly applied map-to-odom correction.
     odometry_topic: /navigation/odom
     navigation_active_topic: /navigation/active
-    maximum_odometry_age: 0.25
+    # Track both autonomous and manual motion. Without the final mux command,
+    # manual web rotation was mistaken for visual-odometry drift.
+    motion_command_topic: /cmd_vel
+    motion_command_timeout: 0.50
+    # Learned VO is nominally 5 Hz but real CUDA contention with HLoc produced
+    # occasional 0.56 s gaps. At the 0.10 m/s speed cap, 0.60 s is at most 6 cm.
+    maximum_odometry_age: 0.60
     # The current map's large uniform floor gives scan-to-map ICP a directional
     # bias even while stationary. Keep ICP as a health check for the 0.5 m
     # acceptance stage; do not let it rewrite the continuous odometry track.
     map_odom_correction_gain: 0.0
-    maximum_odometry_icp_translation_correction: 0.10
+    # map029 logs show 0.26-0.33 m planar ICP ambiguity after obstacle turns,
+    # while the recorded runaway was 1.9 m. Accept the former but not the latter.
+    # ICP does not rewrite odometry (gain=0); this is only a health threshold.
+    maximum_odometry_icp_translation_correction: 0.35
     maximum_odometry_icp_yaw_correction_deg: 10.0
-    # A scan that still overlaps the map but disagrees with local odometry must
-    # not reset into another HLoc hypothesis. Zero-overlap scans are handled
-    # separately by the node and restart HLoc after the configured failure count.
-    relocalize_on_tracking_icp_failure: false
+    # Repeated geometric disagreement is a localization failure, even when a
+    # large floor leaves a misleadingly high overlap score.
+    relocalize_on_tracking_icp_failure: true
+    # During avoidance a temporary object can dominate the depth image. A scan
+    # with too few static-map points may reject ICP, but it must not discard
+    # healthy visual odometry and start a global-localization loop.
+    relocalization_minimum_static_point_ratio: 0.90
     # map045 has a large uniform floor. Preserve the HLoc/manual translation at
     # initialization so planar ICP cannot slide to another high-fitness offset.
     preserve_initial_translation: true
@@ -54,6 +66,10 @@ luxi_icp_localization:
     maximum_yaw_correction_deg: 20.0
     initial_maximum_translation_correction: 1.50
     initial_maximum_yaw_correction_deg: 45.0
+    # During tracking, keep only points close to the static map. Temporary
+    # objects remain available to the rolling obstacle layer, not to ICP.
+    tracking_static_filter_distance: 0.30
+    tracking_minimum_static_point_ratio: 0.20
 
     # HLoc is only active while acquiring a global initialization.
     hloc_consistent_pose_count: 3
@@ -61,6 +77,7 @@ luxi_icp_localization:
     hloc_maximum_yaw_difference_deg: 20.0
     icp_failures_before_relocalization: 5
     hloc_enable_service: /luxi_hloc_localizer/enable
+    relocalization_request_topic: /luxi_location/relocalization_request
 
     # Reject geometrically plausible ICP local minima that imply motion beyond
     # the robot's physical envelope. A rejected frame never replaces the last

@@ -90,6 +90,7 @@ web_control:
     navigation_terrain_pose_topic: /navigation/terrain_pose
     navigation_refined_fitness_topic: /luxi_location/fitness
     navigation_refined_status_topic: /luxi_location/status
+    navigation_localization_health_topic: /luxi_location/health
     navigation_localization_max_variance: 0.5
     navigation_localization_timeout: 3.0
     # New goals require recent geometric overlap with the map. The configured

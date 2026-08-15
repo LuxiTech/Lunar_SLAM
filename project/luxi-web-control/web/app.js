@@ -737,14 +737,20 @@ function updateNavigation(navigation) {
     navigationUseFiltered = navigation.map_variant === "filtered";
   }
   let name = navigationStateNames[navigation.state] || navigation.state;
-  if (navigation.follower_state === "localization_degraded") {
-    name = "定位恢复中（已停车）";
+  if (navigation.follower_state === "localization_dead_reckoning") {
+    name = "定位短时推算中（限距 8 cm）";
+  } else if (navigation.follower_state === "localization_recovery_spin") {
+    name = "正沿原路径朝向持续旋转定位";
+  } else if (navigation.follower_state?.startsWith("localization_recovery_")) {
+    name = "定位恢复中（已停车验证）";
   } else if (navigation.active) {
     name = "行驶中";
   } else if (navigation.follower_state === "goal_reached") {
     name = "已到达";
   } else if (navigation.path_ready) {
     name = "规划完成";
+  } else if (navigation.planning_state === "loading_map") {
+    name = "正在构建三维地形图";
   } else if (navigation.planning_state === "pending") {
     name = "正在规划";
   } else if (navigation.planning_state === "failed") {
@@ -776,7 +782,8 @@ function updateNavigation(navigation) {
     Array.isArray(navigationTerrain.traversable_points) &&
     navigationTerrain.traversable_points.length > 0;
   navigationGoalButton.disabled =
-    navigation.state !== "running" || !hasTraversableTerrain;
+    navigation.state !== "running" || !hasTraversableTerrain ||
+    !navigation.planner_map_ready;
   if (!navigationGoalMode) {
     navigationGoalButton.textContent =
       selectedGoalPending
@@ -802,9 +809,15 @@ function updateNavigation(navigation) {
       ? ` x=${pose.x.toFixed(2)}m，y=${pose.y.toFixed(2)}m，` +
         `地表z=${pose.z.toFixed(2)}m，yaw=${pose.yaw_degrees.toFixed(1)}°`
       : "";
-    if (navigation.follower_state === "localization_degraded") {
+    if (navigation.follower_state === "localization_dead_reckoning") {
       navigationDetail.textContent =
-        `${mapName} 定位暂时失效，车辆保持零速度；可信定位恢复后将自动继续。`;
+        `${mapName} 暂时失去地图匹配，正使用视觉惯性里程计短时推算，最多续行约 8 cm；随后停车搜索。`;
+    } else if (navigation.follower_state === "localization_recovery_spin") {
+      navigationDetail.textContent =
+        `${mapName} 已停止平移，正在障碍安全门监控下沿丢失定位前的路径朝向持续同向旋转；匹配稳定后自动继续。`;
+    } else if (navigation.follower_state?.startsWith("localization_recovery_")) {
+      navigationDetail.textContent =
+        `${mapName} 发现定位候选，车辆保持零速度进行连续匹配验证；确认后自动继续。`;
     } else if (navigation.localization_stage === "localized") {
       const fitness = navigation.localization_fitness == null
         ? "" : `，fitness=${Number(navigation.localization_fitness).toFixed(3)}`;
@@ -816,6 +829,8 @@ function updateNavigation(navigation) {
             : "近期 ICP 未通过地图匹配验证，已暂停新的规划请求；可先选择目标，并调整相机视野等待定位恢复。"
         : navigation.follower_state === "goal_reached"
           ? "已到达目标点。"
+          : navigation.planning_state === "loading_map"
+            ? "正在构建三维地形图；完成前不会接受目标，以免请求长时间排队。"
           : navigation.planning_state === "pending"
             ? "正在计算新路径，请稍候。"
           : navigation.planning_state === "failed"
@@ -1482,7 +1497,8 @@ function setNavigationGoalMode(enabled) {
 navigationGoalButton.addEventListener("click", () => {
   if (navigationGoalButton.disabled) return;
   if (selectedGoalPending && !navigationGoalMode &&
-      navigationStatus.planning_localization_ready) {
+      navigationStatus.planning_localization_ready &&
+      navigationStatus.planner_map_ready) {
     sendNavigationGoal(selectedGoal);
     return;
   }

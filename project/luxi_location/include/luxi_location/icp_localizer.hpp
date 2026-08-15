@@ -8,6 +8,7 @@
 namespace open3d::geometry
 {
 class PointCloud;
+class KDTreeFlann;
 }
 
 namespace luxi_location
@@ -29,6 +30,8 @@ struct IcpParameters
   double maximum_yaw_correction{0.35};
   double initial_maximum_translation_correction{1.50};
   double initial_maximum_yaw_correction{0.79};
+  double tracking_static_filter_distance{0.30};
+  double tracking_minimum_static_point_ratio{0.20};
 };
 
 struct IcpResult
@@ -39,6 +42,7 @@ struct IcpResult
   double rmse{0.0};
   double translation_correction{0.0};
   double yaw_correction{0.0};
+  double static_point_ratio{1.0};
   std::string reason;
 };
 
@@ -62,6 +66,7 @@ private:
   IcpParameters parameters_;
   std::shared_ptr<open3d::geometry::PointCloud> map_;
   std::shared_ptr<open3d::geometry::PointCloud> coarse_map_;
+  std::shared_ptr<open3d::geometry::KDTreeFlann> map_index_;
 };
 
 }  // namespace luxi_location

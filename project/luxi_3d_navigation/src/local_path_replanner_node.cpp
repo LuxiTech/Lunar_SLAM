@@ -231,7 +231,6 @@ private:
         }
       }
       obstacle_frame_ = cloud.header.frame_id;
-      obstacle_stamp_ = cloud.header.stamp;
       dirty_ = true;
     } catch (const std::runtime_error & error) {
       RCLCPP_WARN(get_logger(), "Invalid dynamic obstacle cloud: %s", error.what());
@@ -249,8 +248,18 @@ private:
     tf2::Transform map_from_obstacle;
     map_from_obstacle.setIdentity();
     if (!obstacle_frame_.empty() && obstacle_frame_ != map_frame_) {
+      // The rolling cloud contains an odom-frame grid accumulated over many
+      // depth frames and is stamped when that grid is published.  The
+      // map->odom transform is produced from RGB-D odometry and can trail the
+      // cloud publication by one frame.  Looking it up at the cloud stamp
+      // therefore asks TF for a future transform and can prevent the initial
+      // global path from ever reaching the follower.  Transform the persistent
+      // odom grid with the latest available map alignment instead.  Near-field
+      // stop/slow decisions remain entirely in odom/base_link and do not depend
+      // on this global alignment.
       const auto transform = tf_buffer_.lookupTransform(
-        map_frame_, obstacle_frame_, obstacle_stamp_, rclcpp::Duration::from_seconds(0.05));
+        map_frame_, obstacle_frame_, tf2::TimePointZero,
+        tf2::durationFromSec(0.05));
       tf2::fromMsg(transform.transform, map_from_obstacle);
     }
     const double inflation = std::max(
@@ -492,7 +501,6 @@ private:
   std::vector<geometry_msgs::msg::Point> dynamic_points_;
   std::string map_frame_{"map"};
   std::string obstacle_frame_;
-  builtin_interfaces::msg::Time obstacle_stamp_;
   std::string obstacle_state_{"stale"};
   std::string last_status_;
   bool active_path_is_detour_{false};

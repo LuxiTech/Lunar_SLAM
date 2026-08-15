@@ -97,17 +97,26 @@ TrackingPoseDecision TrackingPoseGate::evaluate(
 TrackingPoseDecision TrackingPoseGate::evaluate_relocalization(
   const Eigen::Matrix4d & pose, const double stamp_seconds)
 {
-  TrackingPoseDecision decision;
   if (!accepted_pose_.has_value()) {
     return evaluate(pose, stamp_seconds);
   }
-  if (!finite_planar_pose(pose) || !std::isfinite(stamp_seconds)) {
+  return evaluate_relocalization(pose, *accepted_pose_, stamp_seconds);
+}
+
+TrackingPoseDecision TrackingPoseGate::evaluate_relocalization(
+  const Eigen::Matrix4d & pose, const Eigen::Matrix4d & continuity_reference,
+  const double stamp_seconds)
+{
+  TrackingPoseDecision decision;
+  if (!finite_planar_pose(pose) || !finite_planar_pose(continuity_reference) ||
+    !std::isfinite(stamp_seconds))
+  {
     decision.reason = "pose contains non-finite values";
     return decision;
   }
   decision.translation_delta =
-    (pose.block<2, 1>(0, 3) - accepted_pose_->block<2, 1>(0, 3)).norm();
-  decision.yaw_delta = std::abs(angle_difference(yaw(pose), yaw(*accepted_pose_)));
+    (pose.block<2, 1>(0, 3) - continuity_reference.block<2, 1>(0, 3)).norm();
+  decision.yaw_delta = std::abs(angle_difference(yaw(pose), yaw(continuity_reference)));
   if (decision.translation_delta > parameters_.maximum_relocalization_translation) {
     decision.reason = "relocalized translation is inconsistent with the last trusted pose";
     return decision;

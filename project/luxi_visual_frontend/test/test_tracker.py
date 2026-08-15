@@ -162,7 +162,6 @@ def test_tracker_reseed_propagates_from_last_accepted_visual_pose():
             minimum_depth_consistency_matches=6,
             maximum_consecutive_tracking_failures=2,
             maximum_frame_angular_rate=np.deg2rad(180.0),
-            use_imu_reseed_rotation=True,
         ),
     )
     depth = np.full((480, 640), 2000, dtype=np.uint16)
@@ -354,7 +353,7 @@ def test_tracker_does_not_reseed_from_impossible_imu_angular_rate():
     np.testing.assert_allclose(reseeded.odom_from_camera, np.eye(4), atol=1e-6)
 
 
-def test_tracker_default_reseed_never_inherits_unobservable_imu_yaw():
+def test_tracker_can_disable_imu_reseed_rotation():
     pixels = np.array(
         [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
     )
@@ -370,6 +369,7 @@ def test_tracker_default_reseed_never_inherits_unobservable_imu_yaw():
             minimum_grid_coverage=0.0,
             maximum_consecutive_tracking_failures=2,
             maximum_frame_angular_rate=np.deg2rad(180.0),
+            use_imu_reseed_rotation=False,
         ),
     )
     depth = np.full((480, 640), 2000, dtype=np.uint16)

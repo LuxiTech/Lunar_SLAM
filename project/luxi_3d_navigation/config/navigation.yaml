@@ -49,7 +49,8 @@ local_path_replanner:
 
 local_obstacle_map:
   ros__parameters:
-    target_frame: map
+    # Keep near-field sensing alive through a temporary global map relocalization.
+    target_frame: odom
     base_frame: base_link
     resolution: 0.05
     # Stored in map axes, so a 6 m square covers a 3 m radius at every yaw.
@@ -94,11 +95,19 @@ navigation_safety_gate:
     command_timeout: 0.20
     obstacle_timeout: 0.60
     planner_timeout: 1.0
+    localization_timeout: 1.5
     slow_scale: 0.50
     # D1's walking controller does not execute smaller translational commands.
     # Slow mode remains flagged/limited but preserves this hardware floor.
     minimum_linear_speed: 0.10
     healthy_resume_hold: 0.50
+    # Keep the odometry/IMU track for at most 0.8 s after ICP health drops.
+    # At D1's 0.10 m/s hardware floor this limits blind travel to about 8 cm.
+    dead_reckoning_duration: 0.80
+    dead_reckoning_scale: 0.50
+    # Recovery is angular-only. A fresh clear/slow rolling obstacle layer is
+    # required; a blocked or stale layer still forces zero velocity.
+    maximum_recovery_angular_speed: 0.20
     publish_rate: 20.0
 
 terrain_path_follower:
@@ -115,9 +124,12 @@ terrain_path_follower:
     # D1 gait does not respond predictably below 0.10 m/s. Keep enough stopping
     # margin even if a smaller runtime tolerance is requested accidentally.
     minimum_safe_goal_tolerance_m: 0.12
-    # ICP is 2 Hz and may briefly relocalize. Pause at zero speed first, then
-    # resume automatically if localization recovers within the grace period.
+    # Brief ICP loss keeps the continuous RGB-D odometry/IMU pose alive. If it
+    # persists, stop translation and keep turning toward the last path heading
+    # while HLoc searches for a confirmed global match.
     localization_timeout: 1.5
-    # Recent real logs show HLoc recovery taking up to about 26 seconds.
-    localization_recovery_grace_period: 45.0
+    dead_reckoning_duration: 0.80
+    localization_recovery_timeout: 45.0
+    localization_recovery_angular_speed: 0.20
+    localization_recovery_confirmation_time: 1.0
     max_path_deviation_m: 0.50

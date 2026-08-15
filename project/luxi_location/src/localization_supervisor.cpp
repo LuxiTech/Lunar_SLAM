@@ -34,10 +34,16 @@ bool should_retain_odometry_after_rejected_icp(
   const bool relocalize_on_tracking_icp_failure,
   const bool alignment_initialized,
   const double fitness,
-  const double minimum_fitness)
+  const double minimum_fitness,
+  const double static_point_ratio,
+  const double minimum_static_point_ratio_for_relocalization)
 {
+  const bool scan_is_dynamically_occluded =
+    std::isfinite(static_point_ratio) &&
+    static_point_ratio < minimum_static_point_ratio_for_relocalization;
   return !initial_alignment && !accepted &&
-         !relocalize_on_tracking_icp_failure && alignment_initialized &&
+         (!relocalize_on_tracking_icp_failure || scan_is_dynamically_occluded) &&
+         alignment_initialized &&
          std::isfinite(fitness) && fitness >= minimum_fitness;
 }
 
@@ -107,6 +113,13 @@ HlocAction LocalizationSupervisor::report_icp_result(bool accepted)
   consecutive_icp_failures_ = 0;
   reset_coarse_poses();
   return HlocAction::kEnable;
+}
+
+void LocalizationSupervisor::force_relocalization()
+{
+  phase_ = LocalizationPhase::kSearching;
+  consecutive_icp_failures_ = 0;
+  reset_coarse_poses();
 }
 
 LocalizationPhase LocalizationSupervisor::phase() const

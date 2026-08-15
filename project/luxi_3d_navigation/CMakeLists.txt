@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.8)
 project(luxi_3d_navigation)
 
+# Colcon leaves CMAKE_BUILD_TYPE empty unless the operator supplies one. The
+# terrain classifier and 5 cm cost-layer construction are CPU-bound and were
+# taking about a minute at -O0, delaying the first goal while later goals were
+# fast. Keep explicit Debug builds debuggable, but optimize the normal build.
+if(NOT CMAKE_BUILD_TYPE)
+  add_compile_options(-O3)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

@@ -523,7 +523,17 @@ def test_documented_cleanup_uses_the_bounded_workspace_script():
     assert "post_if_available /api/navigation/stop" in source
     assert "signal_matches INT" in source
     assert "signal_matches TERM" in source
-    assert "velocity_command_mux_node" in source
+    assert "luxi_[^/[:space:]]+" in source
+    assert "slam_d1_bridge" in source
+    assert "rtabmap_(slam|odom|sync|viz)" in source
+    assert "aved_map_navigation" in source
+    assert "request_robot_shutdown" in source
+    assert "/api/robot/control" in source
+    assert 'WEB_URLS=("http://127.0.0.1:8080")' in source
+    assert "ip -4 -o addr show scope global" in source
+    assert '"${candidate_url}/api/status"' in source
+    assert "--max-time 1" in source
+    assert "remove_stale_pid_files" in source
     assert "sport = :8080" in source
 
 
@@ -1066,6 +1076,20 @@ def test_icp_fitness_refreshes_map_verification():
     assert node._refined_localization_verified_at == verified_at
 
 
+def test_dead_reckoning_health_is_exposed_during_bounded_recovery():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._localization_health = "tracking"
+    node._localization_health_received_at = None
+
+    message = String()
+    message.data = "dead_reckoning"
+    node._on_navigation_localization_health(message)
+
+    assert node._localization_health == "dead_reckoning"
+    assert node._localization_health_received_at is not None
+
+
 def test_navigation_goal_is_blocked_without_recent_icp_verification():
     node = WebControlNode.__new__(WebControlNode)
     published = []
@@ -1081,6 +1105,44 @@ def test_navigation_goal_is_blocked_without_recent_icp_verification():
     assert accepted is False
     assert "recent accepted ICP" in message
     assert published == []
+
+
+def test_navigation_goal_is_blocked_until_terrain_map_is_ready():
+    node = WebControlNode.__new__(WebControlNode)
+    published = []
+    node.navigation_goal_publisher = SimpleNamespace(publish=published.append)
+    node.navigation_status = lambda: {
+        "state": "running",
+        "planning_localization_ready": True,
+        "planner_map_ready": False,
+    }
+
+    accepted, message = node.set_navigation_goal(1.5, 0.0, 0.0)
+
+    assert accepted is False
+    assert "terrain map" in message
+    assert published == []
+
+
+def test_planner_map_status_distinguishes_loading_from_ready():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._planned_path_points = []
+    node._planning_state = "idle"
+    node._planning_error = ""
+    node._planner_map_ready = False
+
+    loading = String()
+    loading.data = "loading_map"
+    node._on_navigation_planning_status(loading)
+    assert node._planning_state == "loading_map"
+    assert node._planner_map_ready is False
+
+    ready = String()
+    ready.data = "map_ready"
+    node._on_navigation_planning_status(ready)
+    assert node._planning_state == "map_ready"
+    assert node._planner_map_ready is True
 
 
 @pytest.mark.parametrize("value", ["fast", True, None, math.inf, math.nan])

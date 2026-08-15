@@ -65,7 +65,7 @@ public:
       get_parameter("octomap_topic").as_string(), rclcpp::QoS(1).reliable().transient_local(),
       std::bind(&Octomap3DAstarPlannerNode::onOctomap, this, std::placeholders::_1));
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-      get_parameter("goal_topic").as_string(), rclcpp::QoS(10).reliable(),
+      get_parameter("goal_topic").as_string(), rclcpp::QoS(1).reliable(),
       std::bind(&Octomap3DAstarPlannerNode::onGoal, this, std::placeholders::_1));
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local());
@@ -210,6 +210,8 @@ private:
 
   void onOctomap(const octomap_msgs::msg::Octomap::SharedPtr message)
   {
+    const auto started_at = std::chrono::steady_clock::now();
+    publishPlanningStatus("loading_map");
     std::unique_ptr<octomap::AbstractOcTree> abstract_tree(octomap_msgs::msgToMap(*message));
     auto * tree = dynamic_cast<octomap::OcTree *>(abstract_tree.get());
     if (tree == nullptr) {
@@ -244,9 +246,13 @@ private:
       map_frame_ = message->header.frame_id;
     }
     publishTerrainLayers();
+    publishPlanningStatus("map_ready");
+    const double elapsed_seconds = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - started_at).count();
     RCLCPP_INFO(
-      get_logger(), "Ground-supported 3D map ready: nodes=%zu resolution=%.3f frame=%s",
-      octree_->size(), octree_->getResolution(), map_frame_.c_str());
+      get_logger(),
+      "Ground-supported 3D map ready in %.3fs: nodes=%zu resolution=%.3f frame=%s",
+      elapsed_seconds, octree_->size(), octree_->getResolution(), map_frame_.c_str());
   }
 
   void onGoal(const geometry_msgs::msg::PoseStamped::SharedPtr goal)
@@ -302,6 +308,7 @@ private:
 
   void plan(double start_x, double start_y, double start_z, const geometry_msgs::msg::PoseStamped & goal)
   {
+    const auto started_at = std::chrono::steady_clock::now();
     const double terrain_start_z =
       start_z - get_parameter("body_reference_height").as_double();
     const auto start = terrain_->snapToTerrainAtXY(
@@ -325,6 +332,9 @@ private:
     }
     publishPath(cells);
     publishPlanningStatus("ready");
+    RCLCPP_INFO(
+      get_logger(), "Global A* planning completed in %.3fs",
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started_at).count());
   }
 
   void publishPlanningStatus(const std::string & status)

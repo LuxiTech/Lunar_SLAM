@@ -2,9 +2,36 @@
 
 set -euo pipefail
 
-readonly WEB_URL="http://127.0.0.1:8080"
+readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 readonly CURRENT_UID="$(id -u)"
-readonly PROCESS_PATTERN='[/](luxi_web_control/lib/luxi_web_control/web_control_node|luxi_3d_navigation/lib/luxi_3d_navigation/velocity_command_mux_node|luxi_visual_frontend/lib/luxi_visual_frontend/visual_odometry_node|rtabmap_slam/rtabmap|luxi_adapter/lib/luxi_adapter/sensor_adapter_node|realsense2_camera/lib/realsense2_camera/realsense2_camera_node|imu_filter_madgwick/lib/imu_filter_madgwick/imu_filter_madgwick_node|yesense_std_ros2/lib/yesense_std_ros2/yesense_node_publisher|stereo_depth/lib/stereo_depth/stereo_depth_node|hikrobot_camera_driver/lib/hikrobot_camera_driver/stereo_node)|__node:=[l]uxi_sensor_container|[s]ensor_bringup\.launch\.py|[d]435i\.launch\.py|[s]tereo_camera_bringup\.launch\.py|[l]ekiwi_web_control\.launch\.py|[w]eb_control\.launch\.py'
+# Match the complete Luxi/D1 package families instead of maintaining a fragile
+# executable-by-executable list. External sensor and RTAB-Map processes are
+# included explicitly because they are installed outside this workspace.
+readonly PROCESS_PATTERN='[/]lib[/](luxi_[^/[:space:]]+|slam_d1_bridge|rtabmap_(slam|odom|sync|viz)|realsense2_camera|imu_filter_madgwick|yesense_std_ros2|stereo_depth|hikrobot_camera_driver)[/]|[r]os2[[:space:]]+launch[[:space:]]+(luxi_[^[:space:]]+|slam_d1_bridge|lunar_realsense_bringup|hik_bringup)[[:space:]]|__node:=[l]uxi_sensor_container|__node:=[s]ensor_imu_filter|__node:=[b]ase_to_sensor_tf|__node:=[h]ik_base_to_left_camera_tf|__node:=[h]ik_left_camera_to_imu_tf|[s]ensor_bringup\.launch\.py|[d]435i\.launch\.py|[s]tereo_camera_bringup\.launch\.py|[s]aved_map_navigation\.launch\.py|[r]gbd_mapping(_learned)?\.launch\.py|[s]lam_d1_bridge\.launch\.py|[l]ekiwi_web_control\.launch\.py|[w]eb_control\.launch\.py'
+readonly PID_FILES=(
+    "/tmp/d1_web_control.pid"
+    "/tmp/luxi_web_control_launch.pid"
+    "/tmp/slam_d1_bridge_d15041873.pid"
+)
+
+WEB_URLS=("http://127.0.0.1:8080")
+while read -r local_address; do
+    [[ -n "${local_address}" ]] || continue
+    WEB_URLS+=("http://${local_address}:8080")
+done < <(
+    ip -4 -o addr show scope global 2>/dev/null |
+        awk '{sub(/\/.*/, "", $4); print $4}'
+)
+
+WEB_URL=""
+for candidate_url in "${WEB_URLS[@]}"; do
+    if curl --fail --silent --connect-timeout 0.2 --max-time 1 \
+            "${candidate_url}/api/status" >/dev/null 2>&1; then
+        WEB_URL="${candidate_url}"
+        break
+    fi
+done
 
 protected_pids=("$$")
 ancestor_pid="${PPID}"
@@ -17,12 +44,56 @@ post_if_available()
 {
     local path="$1"
     local body='{}'
+    [[ -n "${WEB_URL}" ]] || return 0
     if [[ "${path}" == "/api/stop" ]]; then
         body='{"client_id":"system-safety-stop","force":true}'
     fi
-    curl --fail --silent --show-error \
+    # Mapping/navigation shutdown can wait for child process groups and a map
+    # database flush, so allow more time after the live endpoint is identified.
+    curl --fail --silent --show-error --connect-timeout 0.2 --max-time 15 \
         -X POST -H "Content-Type: application/json" -d "${body}" \
         "${WEB_URL}${path}" >/dev/null 2>&1 || true
+    return 0
+}
+
+request_robot_shutdown()
+{
+    local response
+    local status
+    local attempt
+
+    # The endpoint starts the safe zero -> lie-down -> SDK-release transition.
+    # A missing/disabled web service is harmless; process cleanup still follows.
+    [[ -n "${WEB_URL}" ]] || return 0
+    response="$(
+        curl --fail --silent --show-error --connect-timeout 0.2 --max-time 2 \
+            -X POST -H "Content-Type: application/json" \
+            -d '{"active":false}' \
+            "${WEB_URL}/api/robot/control" 2>/dev/null || true
+    )"
+    [[ -n "${response}" ]] || return 0
+
+    for ((attempt=0; attempt<900; attempt++)); do
+        status="$(
+            curl --fail --silent --connect-timeout 0.2 --max-time 1 \
+                "${WEB_URL}/api/status" 2>/dev/null || true
+        )"
+        [[ -n "${status}" ]] || return 0
+        if python3 -c '
+import json, sys
+try:
+    control = json.load(sys.stdin).get("robot_control", {})
+except (json.JSONDecodeError, OSError):
+    raise SystemExit(1)
+raise SystemExit(0 if not control.get("transitioning", False)
+                 and not control.get("active", False) else 1)
+' <<<"${status}"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo "D1 safe shutdown did not finish within 90 seconds; forcing local process cleanup." >&2
 }
 
 matching_pids()
@@ -63,9 +134,24 @@ wait_for_exit()
     return 1
 }
 
+remove_stale_pid_files()
+{
+    local pid_file
+    local recorded_pid
+    for pid_file in "${PID_FILES[@]}"; do
+        [[ -f "${pid_file}" ]] || continue
+        recorded_pid="$(head -n 1 "${pid_file}" 2>/dev/null || true)"
+        if [[ ! "${recorded_pid}" =~ ^[0-9]+$ ]] || \
+                ! kill -0 "${recorded_pid}" 2>/dev/null; then
+            rm -f -- "${pid_file}"
+        fi
+    done
+}
+
 post_if_available /api/stop
 post_if_available /api/mapping/stop
 post_if_available /api/navigation/stop
+request_robot_shutdown
 sleep 2
 
 signal_matches INT
@@ -83,6 +169,8 @@ if [[ -n "${remaining}" ]]; then
     exit 1
 fi
 
+remove_stale_pid_files
+
 listener="$(ss -H -ltnp 'sport = :8080' 2>/dev/null || true)"
 if [[ -n "${listener}" ]]; then
     echo "Port 8080 is still occupied by a non-Luxi process:" >&2
@@ -90,4 +178,4 @@ if [[ -n "${listener}" ]]; then
     exit 1
 fi
 
-echo "Luxi processes stopped and port 8080 is available."
+echo "Luxi/D1 processes stopped, stale PID files removed, and port 8080 is available."

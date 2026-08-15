@@ -64,11 +64,11 @@ class TrackerConfig:
     maximum_depth_consistency_error: float = 0.08
     maximum_imu_rotation_error: float = math.radians(12.0)
     maximum_imu_gravity_error: float = math.radians(10.0)
-    # D435i has no magnetometer. Its AHRS yaw may assist diagnostics, but must
-    # not silently replace visually verified yaw or become the new keyframe
-    # orientation after tracking loss.
-    use_imu_depth_translation: bool = False
-    use_imu_reseed_rotation: bool = False
+    # Absolute AHRS yaw is never used. A bounded relative rotation is required
+    # to preserve motion across a short visual gap, while PnP keeps authority
+    # whenever visual geometry is available.
+    use_imu_depth_translation: bool = True
+    use_imu_reseed_rotation: bool = True
 
 
 @dataclass(frozen=True)

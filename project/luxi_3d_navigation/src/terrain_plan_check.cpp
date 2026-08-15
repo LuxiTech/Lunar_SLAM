@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -17,6 +18,7 @@
 
 int main(int argc, char ** argv)
 {
+  const auto started_at = std::chrono::steady_clock::now();
   if (argc < 2 || argc > 4) {
     std::cerr << "usage: terrain_plan_check MAP.bt|MAP.ot [cloud.ply] [--dynamic-test]\n";
     return 2;
@@ -46,13 +48,19 @@ int main(int argc, char ** argv)
   luxi_3d_navigation::TerrainParameters parameters;
   std::optional<luxi_3d_navigation::TerrainObservation> observation;
   if (cloud_argument > 0) {
+    const auto classification_started_at = std::chrono::steady_clock::now();
     luxi_3d_navigation::TerrainCloudParameters cloud_parameters;
     cloud_parameters.resolution = tree->getResolution();
     observation = luxi_3d_navigation::classifyTerrainCloudFile(
       argv[cloud_argument], cloud_parameters);
+    std::cout << "classification_seconds=" << std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - classification_started_at).count() << '\n';
   }
+  const auto terrain_started_at = std::chrono::steady_clock::now();
   luxi_3d_navigation::TerrainModel terrain(
     *tree, parameters, {}, std::move(observation));
+  std::cout << "terrain_seconds=" << std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - terrain_started_at).count() << '\n';
   std::map<std::pair<int, int>, luxi_3d_navigation::GridCell3D> lowest_cells;
   for (const auto & entry : terrain.layers().traversable_cells) {
     const auto & cell = entry.cell;
@@ -131,6 +139,8 @@ int main(int argc, char ** argv)
   std::cout << "path_cells=" << path.size() << " start=[" << start_world.x() << ','
             << start_world.y() << ',' << start_world.z() << "] goal=[" << goal_world.x()
             << ',' << goal_world.y() << ',' << goal_world.z() << "]\n";
+  std::cout << "total_seconds=" << std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - started_at).count() << '\n';
   if (!dynamic_test) {
     return 0;
   }

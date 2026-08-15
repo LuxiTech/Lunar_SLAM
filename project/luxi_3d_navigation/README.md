@@ -4,7 +4,11 @@
 
 动态避障的实现架构、`demo/SCAN-Planner-Ros2` 方法分析、备选方案对比、首轮参数和从离线回放到 10～20 m 真机路线的分级测试门槛，见 [D1 动态避障设计与分阶段测试方案](DYNAMIC_OBSTACLE_AVOIDANCE.md)。当前实现保留保存地图全局 A*，用 D435i 建立带时间衰减的滚动 3D 障碍层，局部重规划后重新接回全局路径，并由独立速度安全门处理障碍、无路、命令超时和传感器故障。
 
+针对 map022～map025 的地图质量、避障后失定位和安全停车问题，现行改造项、参数门槛及从本机零运动测试到 1 m 实物绕行的验收步骤，见 [D1 建图、定位、导航与动态避障系统性修改及测试文档](NAVIGATION_ROBUSTNESS_MODIFICATION_AND_TEST_PLAN.md)。
+
 `saved_map_navigation.launch.py` 已完整接入动态避障。全局路径改为 `/navigation/global_path`，局部规划输出仍为 `/navigation/planned_path`；跟随器先发布 `/navigation/cmd_vel_raw`，安全门检查后才发布 `/navigation/cmd_vel`。因此现有网页和 D1 速度仲裁接口不变。默认 `dynamic_monitor_only:=false`，深度、CameraInfo、TF 或局部规划状态不健康时导航速度为零；首次相机外参与实物障碍测试可显式设为 `true`，只观察而不触发动态限速。
+
+定位恢复采用有界状态机：单帧 ICP 异常先保留视觉惯性里程计 0.8 秒，随后停止平移，锁存丢失定位前最后一个路径航向的左右方向，并以 0.20 rad/s 持续同向旋转，同时通过 `/luxi_location/relocalization_request` 明确重启 HLoc。HLoc 候选进入 ICP 验证时保持静止，连续确认后才恢复原路径；45 秒仍未恢复则结束导航。定位节点随里程计持续刷新健康心跳，避免低频 ICP 间隔被误判为失联；速度安全门只放行带恢复标志的纯旋转，滚动障碍层为 `clear` 或 `slow` 时可转动，`blocked`、深度断流或障碍层超时仍输出零速度。相关参数位于 `config/navigation.yaml` 的 `terrain_path_follower` 和 `navigation_safety_gate` 段。
 
 2026-08-15 曾记录一次 map023 + 前方垃圾桶运行遥测：D435i 障碍层约 10 Hz，日志显示局部路径热更新、净移动约 1.417 m，最终速度为零。但现场用户明确反馈尚未完成可见、可重复的实物绕障验收，因此该记录只算“链路遥测”，**不能标记为避障测试通过**。D1 低于 0.10 m/s 基本不产生有效步态，跟随器和安全门暂保留 0.10 m/s 的硬件最小有效平移速度；下一次必须按设计文档第 8、11 节重新完成有人监护的分级实测。
 

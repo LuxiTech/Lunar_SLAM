@@ -12,9 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <limits>
+
 #include <gtest/gtest.h>
 
 #include "luxi_3d_navigation/path_follower_control.hpp"
+
+TEST(PathFollowerControl, RecoveryDirectionFollowsLatestNonzeroHeading)
+{
+  EXPECT_DOUBLE_EQ(luxi_3d_navigation::updatedTurnDirection(0.5, -1.0), 1.0);
+  EXPECT_DOUBLE_EQ(luxi_3d_navigation::updatedTurnDirection(-0.2, 1.0), -1.0);
+  EXPECT_DOUBLE_EQ(luxi_3d_navigation::updatedTurnDirection(0.0, -1.0), -1.0);
+  EXPECT_DOUBLE_EQ(
+    luxi_3d_navigation::updatedTurnDirection(
+      std::numeric_limits<double>::quiet_NaN(), 0.0),
+    1.0);
+}
 
 TEST(PathFollowerControl, SmallHeadingErrorDrivesStraight)
 {

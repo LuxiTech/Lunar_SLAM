@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <queue>
 #include <tuple>
 #include <unordered_set>
 
@@ -254,31 +255,87 @@ void TerrainModel::buildLayers()
       }
     }
   }
-  std::vector<std::tuple<int, int, double>> edge_offsets;
-  edge_offsets.reserve(static_cast<std::size_t>(
-    (2 * margin_cells + 1) * (2 * margin_cells + 1)));
-  for (int dx = -margin_cells; dx <= margin_cells; ++dx) {
-    for (int dy = -margin_cells; dy <= margin_cells; ++dy) {
-      const double distance = std::hypot(static_cast<double>(dx), static_cast<double>(dy));
-      if (distance >= 1.0 && distance <= static_cast<double>(margin_cells)) {
-        edge_offsets.emplace_back(dx, dy, distance);
+  struct EdgeDistance
+  {
+    double distance;
+    GridCell3D cell;
+  };
+  struct GreaterEdgeDistance
+  {
+    bool operator()(const EdgeDistance & lhs, const EdgeDistance & rhs) const
+    {
+      return lhs.distance > rhs.distance;
+    }
+  };
+  std::priority_queue<
+    EdgeDistance, std::vector<EdgeDistance>, GreaterEdgeDistance> pending_edges;
+  std::unordered_map<GridCell3D, double, GridCell3DHash> edge_distances;
+  edge_distances.reserve(surface_cells_.size());
+
+  // Seed cells at the outer edge. Point-cloud maps tolerate a one-cell hole,
+  // so probe one cell beyond the expanded support set before declaring an edge.
+  const int edge_probe_radius = point_cloud_hole_tolerance + 1;
+  for (const auto & cell : surface_cells_) {
+    bool is_edge = false;
+    for (int dx = -edge_probe_radius; dx <= edge_probe_radius && !is_edge; ++dx) {
+      for (int dy = -edge_probe_radius; dy <= edge_probe_radius; ++dy) {
+        if (std::max(std::abs(dx), std::abs(dy)) != edge_probe_radius) {
+          continue;
+        }
+        if (nearby_surface_cells.find(
+            GridCell3D{cell.x + dx, cell.y + dy, cell.z}) == nearby_surface_cells.end())
+        {
+          is_edge = true;
+          break;
+        }
+      }
+    }
+    if (is_edge) {
+      edge_distances[cell] = 1.0;
+      pending_edges.push(EdgeDistance{1.0, cell});
+    }
+  }
+
+  // Propagate the nearest boundary distance once instead of scanning hundreds
+  // of offsets independently for every terrain cell.
+  const double maximum_edge_distance = static_cast<double>(margin_cells + 1);
+  while (!pending_edges.empty()) {
+    const auto current = pending_edges.top();
+    pending_edges.pop();
+    const auto current_distance = edge_distances.find(current.cell);
+    if (current_distance == edge_distances.end() ||
+      current.distance > current_distance->second + 1e-9 ||
+      current.distance >= maximum_edge_distance)
+    {
+      continue;
+    }
+    for (int dx = -1; dx <= 1; ++dx) {
+      for (int dy = -1; dy <= 1; ++dy) {
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        for (int dz = -height_search_cells; dz <= height_search_cells; ++dz) {
+          const GridCell3D neighbor{
+            current.cell.x + dx, current.cell.y + dy, current.cell.z + dz};
+          if (surface_cells_.find(neighbor) == surface_cells_.end()) {
+            continue;
+          }
+          const double candidate_distance = current.distance +
+            std::hypot(static_cast<double>(dx), static_cast<double>(dy));
+          const auto known = edge_distances.find(neighbor);
+          if (known == edge_distances.end() || candidate_distance < known->second) {
+            edge_distances[neighbor] = candidate_distance;
+            pending_edges.push(EdgeDistance{candidate_distance, neighbor});
+          }
+        }
       }
     }
   }
-  std::sort(
-    edge_offsets.begin(), edge_offsets.end(),
-    [](const auto & lhs, const auto & rhs) {return std::get<2>(lhs) < std::get<2>(rhs);});
+
   for (const auto & cell : surface_cells_) {
-    double nearest_edge = std::numeric_limits<double>::infinity();
-    for (const auto & [dx, dy, distance] : edge_offsets) {
-      const bool neighbor_surface = nearby_surface_cells.find(
-        GridCell3D{cell.x + dx, cell.y + dy, cell.z}) != nearby_surface_cells.end();
-      if (!neighbor_surface) {
-        nearest_edge = std::max(
-          1.0, distance - static_cast<double>(point_cloud_hole_tolerance));
-        break;
-      }
-    }
+    const auto edge = edge_distances.find(cell);
+    const double nearest_edge = edge == edge_distances.end() ?
+      std::numeric_limits<double>::infinity() : edge->second;
     double cost = 0.0;
     if (margin_cells > 0 && std::isfinite(nearest_edge)) {
       cost = std::max(

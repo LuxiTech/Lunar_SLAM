@@ -31,6 +31,7 @@ bool IcpLocalizer::load_map(const std::string & path, std::string & error)
     coarse_map_.reset();
     return false;
   }
+  map_index_ = std::make_shared<open3d::geometry::KDTreeFlann>(*map_);
   error.clear();
   return true;
 }
@@ -47,7 +48,7 @@ IcpResult IcpLocalizer::register_scan(
     return output;
   }
 
-  const auto fine_scan = scan.VoxelDownSample(parameters_.scan_voxel_size);
+  auto fine_scan = scan.VoxelDownSample(parameters_.scan_voxel_size);
   if (!fine_scan ||
     fine_scan->points_.size() < static_cast<std::size_t>(parameters_.minimum_scan_points))
   {
@@ -55,7 +56,37 @@ IcpResult IcpLocalizer::register_scan(
     return output;
   }
 
-  const auto coarse_scan = scan.VoxelDownSample(parameters_.coarse_voxel_size);
+  if (!initial_alignment && parameters_.tracking_static_filter_distance > 0.0) {
+    auto static_scan = std::make_shared<open3d::geometry::PointCloud>();
+    static_scan->points_.reserve(fine_scan->points_.size());
+    const double maximum_distance_squared =
+      parameters_.tracking_static_filter_distance *
+      parameters_.tracking_static_filter_distance;
+    for (const auto & point : fine_scan->points_) {
+      const Eigen::Vector3d predicted_map_point =
+        initial_pose.block<3, 3>(0, 0) * point + initial_pose.block<3, 1>(0, 3);
+      std::vector<int> indices;
+      std::vector<double> distances_squared;
+      if (map_index_->SearchKNN(
+          predicted_map_point, 1, indices, distances_squared) > 0 &&
+        !distances_squared.empty() && distances_squared.front() <= maximum_distance_squared)
+      {
+        static_scan->points_.push_back(point);
+      }
+    }
+    output.static_point_ratio = static_cast<double>(static_scan->points_.size()) /
+      static_cast<double>(fine_scan->points_.size());
+    if (static_scan->points_.size() <
+      static_cast<std::size_t>(parameters_.minimum_scan_points) ||
+      output.static_point_ratio < parameters_.tracking_minimum_static_point_ratio)
+    {
+      output.reason = "scan has too few map-consistent static points";
+      return output;
+    }
+    fine_scan = std::move(static_scan);
+  }
+
+  const auto coarse_scan = fine_scan->VoxelDownSample(parameters_.coarse_voxel_size);
   const open3d::pipelines::registration::TransformationEstimationPointToPoint estimation(false);
   const open3d::pipelines::registration::ICPConvergenceCriteria coarse_criteria(
     1e-5, 1e-5, parameters_.coarse_iterations);

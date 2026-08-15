@@ -127,6 +127,47 @@ TEST(IcpLocalizer, RejectsScanWithTooFewPoints)
   EXPECT_EQ(result.reason, "scan has too few points");
 }
 
+TEST(IcpLocalizer, FiltersTemporaryObjectsDuringTracking)
+{
+  open3d::geometry::PointCloud map;
+  for (int x = 0; x < 30; ++x) {
+    for (int y = 0; y < 20; ++y) {
+      map.points_.emplace_back(
+        0.05 * x, 0.05 * y, 0.015 * ((3 * x + 2 * y) % 9));
+    }
+  }
+  const auto map_path =
+    std::filesystem::temp_directory_path() / "luxi_location_dynamic_filter_test.ply";
+  ASSERT_TRUE(open3d::io::WritePointCloud(map_path.string(), map));
+
+  luxi_location::IcpParameters parameters;
+  parameters.map_voxel_size = 0.03;
+  parameters.scan_voxel_size = 0.03;
+  parameters.coarse_voxel_size = 0.08;
+  parameters.minimum_scan_points = 100;
+  parameters.minimum_fitness = 0.70;
+  parameters.maximum_rmse = 0.08;
+  parameters.tracking_static_filter_distance = 0.10;
+  parameters.tracking_minimum_static_point_ratio = 0.30;
+  luxi_location::IcpLocalizer localizer(parameters);
+  std::string error;
+  ASSERT_TRUE(localizer.load_map(map_path.string(), error)) << error;
+
+  open3d::geometry::PointCloud scan = map;
+  for (int x = 0; x < 15; ++x) {
+    for (int y = 0; y < 15; ++y) {
+      scan.points_.emplace_back(4.0 + 0.03 * x, -1.0 + 0.03 * y, 0.30);
+    }
+  }
+  const auto result = localizer.register_scan(scan, Eigen::Matrix4d::Identity(), false);
+
+  EXPECT_TRUE(result.accepted) << result.reason;
+  EXPECT_GT(result.static_point_ratio, 0.50);
+  EXPECT_LT(result.static_point_ratio, 0.90);
+  EXPECT_NEAR(result.pose(0, 3), 0.0, 0.02);
+  EXPECT_NEAR(result.pose(1, 3), 0.0, 0.02);
+}
+
 TEST(LocalizationSupervisor, RequiresThreeMutuallyConsistentHlocPoses)
 {
   luxi_location::LocalizationSupervisorParameters parameters;
@@ -228,25 +269,55 @@ TEST(LocalizationSupervisor, SuccessfulTrackingResetsFailureCount)
   EXPECT_EQ(supervisor.consecutive_icp_failures(), 0);
 }
 
+TEST(LocalizationSupervisor, ExplicitRecoveryRestartsHlocFromTracking)
+{
+  luxi_location::LocalizationSupervisor supervisor;
+  const auto pose =
+    luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0);
+  supervisor.add_coarse_pose(pose);
+  supervisor.add_coarse_pose(pose);
+  ASSERT_TRUE(supervisor.add_coarse_pose(pose).has_value());
+  ASSERT_EQ(
+    supervisor.report_icp_result(true),
+    luxi_location::HlocAction::kDisable);
+
+  supervisor.report_icp_result(false);
+  supervisor.force_relocalization();
+
+  EXPECT_EQ(supervisor.phase(), luxi_location::LocalizationPhase::kSearching);
+  EXPECT_EQ(supervisor.consistent_pose_count(), 0);
+  EXPECT_EQ(supervisor.consecutive_icp_failures(), 0);
+  EXPECT_FALSE(supervisor.add_coarse_pose(pose).has_value());
+  EXPECT_EQ(supervisor.consistent_pose_count(), 1);
+}
+
 TEST(LocalizationRecovery, KeepsOdometryOnlyWhenRejectedScanStillOverlapsMap)
 {
   EXPECT_TRUE(luxi_location::should_retain_odometry_after_rejected_icp(
-    false, false, false, true, 0.61, 0.25));
+    false, false, false, true, 0.61, 0.25, 1.0, 0.65));
   EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
-    false, false, false, true, 0.0, 0.25));
+    false, false, false, true, 0.0, 0.25, 1.0, 0.65));
   EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
     false, false, false, true,
-    std::numeric_limits<double>::quiet_NaN(), 0.25));
+    std::numeric_limits<double>::quiet_NaN(), 0.25, 1.0, 0.65));
 }
 
 TEST(LocalizationRecovery, DoesNotBypassExplicitRelocalizationPolicy)
 {
   EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
-    false, false, true, true, 0.80, 0.25));
+    false, false, true, true, 0.80, 0.25, 1.0, 0.65));
   EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
-    true, false, false, true, 0.80, 0.25));
+    true, false, false, true, 0.80, 0.25, 1.0, 0.65));
   EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
-    false, true, false, true, 0.80, 0.25));
+    false, true, false, true, 0.80, 0.25, 1.0, 0.65));
+}
+
+TEST(LocalizationRecovery, DynamicOcclusionDoesNotRestartGlobalLocalization)
+{
+  EXPECT_TRUE(luxi_location::should_retain_odometry_after_rejected_icp(
+    false, false, true, true, 1.0, 0.25, 0.44, 0.65));
+  EXPECT_FALSE(luxi_location::should_retain_odometry_after_rejected_icp(
+    false, false, true, true, 1.0, 0.25, 0.90, 0.65));
 }
 
 TEST(TrackingPoseGate, RejectsSinglePhysicallyImpossibleJumpAndAcceptsRecovery)
@@ -315,6 +386,24 @@ TEST(TrackingPoseGate, AcceptsNearbyPoseAfterLongMeasurementGap)
   const auto recovered = gate.evaluate(
     luxi_location::IcpLocalizer::planar_pose(0.25, 0.0, 0.0, 0.1), 6.0);
   EXPECT_TRUE(recovered.accepted) << recovered.reason;
+}
+
+TEST(TrackingPoseGate, RelocalizationUsesContinuousOdometryDuringOutage)
+{
+  luxi_location::TrackingPoseGateParameters parameters;
+  parameters.maximum_relocalization_translation = 0.40;
+  luxi_location::TrackingPoseGate gate(parameters);
+  gate.reset(luxi_location::IcpLocalizer::planar_pose(0.0, 0.0, 0.0, 0.0), 1.0);
+
+  const auto odometry_prediction =
+    luxi_location::IcpLocalizer::planar_pose(1.0, 0.0, 0.0, 0.0);
+  const auto global_recovery =
+    luxi_location::IcpLocalizer::planar_pose(1.06, 0.0, 0.0, 0.02);
+  const auto decision = gate.evaluate_relocalization(
+    global_recovery, odometry_prediction, 8.0);
+
+  EXPECT_TRUE(decision.accepted) << decision.reason;
+  EXPECT_NEAR(decision.translation_delta, 0.06, 1e-9);
 }
 
 TEST(YawMotionPredictor, AppliesWrappedImuYawDeltaWithoutChangingPosition)

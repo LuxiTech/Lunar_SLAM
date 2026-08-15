@@ -18,6 +18,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("config_file", default_value=default_config),
             DeclareLaunchArgument("device", default_value="cuda"),
             DeclareLaunchArgument("publish_tf", default_value="true"),
+            DeclareLaunchArgument(
+                "odom_topic", default_value="/luxi_visual_frontend/odom"
+            ),
+            DeclareLaunchArgument("odom_frame", default_value="odom"),
+            DeclareLaunchArgument(
+                "status_topic", default_value="/luxi_visual_frontend/status"
+            ),
+            DeclareLaunchArgument(
+                "diagnostics_topic",
+                default_value="/luxi_visual_frontend/diagnostics",
+            ),
             Node(
                 package="luxi_visual_frontend",
                 executable="visual_odometry_node",
@@ -28,6 +39,10 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "device": LaunchConfiguration("device"),
                         "publish_tf": LaunchConfiguration("publish_tf"),
+                        "odom_topic": LaunchConfiguration("odom_topic"),
+                        "odom_frame": LaunchConfiguration("odom_frame"),
+                        "status_topic": LaunchConfiguration("status_topic"),
+                        "diagnostics_topic": LaunchConfiguration("diagnostics_topic"),
                     },
                 ],
             ),

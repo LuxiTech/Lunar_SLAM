@@ -36,6 +36,9 @@ public:
   TrackingPoseDecision evaluate(const Eigen::Matrix4d & pose, double stamp_seconds);
   TrackingPoseDecision evaluate_relocalization(
     const Eigen::Matrix4d & pose, double stamp_seconds);
+  TrackingPoseDecision evaluate_relocalization(
+    const Eigen::Matrix4d & pose, const Eigen::Matrix4d & continuity_reference,
+    double stamp_seconds);
 
 private:
   TrackingPoseGateParameters parameters_;
