@@ -2877,7 +2877,7 @@ class WebControlNode(Node):
         if navigation["state"] == "running" or navigation["active"]:
             return False, "请先停止定位和导航，再校准 IMU"
         if not self.imu_calibration_client.service_is_ready():
-            return False, "IMU 校准服务未连接，请先启动 D435i 硬件"
+            return False, "IMU 校准服务未连接，请先启动 D435i/D455 等带 IMU 的硬件"
         d1_status = self.d1_control_status()
         if d1_status["enabled"] and d1_status["posture"] != "standing":
             return False, "请先让机器人站立并保持静止，再校准 IMU"
@@ -3781,7 +3781,7 @@ class WebControlNode(Node):
             return False, (
                 "建图传感器链路必须各有且只有一个发布者："
                 + "，".join(invalid_inputs)
-                + "；请停止重复或残留的 D435i/IMU 进程"
+                + "；请停止重复或残留的 RealSense/IMU 进程"
             )
         if self.mapping.status()["state"] != "running":
             conflicts = mapping_graph_conflicts(

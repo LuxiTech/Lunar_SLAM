@@ -31,3 +31,7 @@ __pycache__/
 
 # Vendor SDK archives are installed locally and exceed remote single-file limits.
 /device/Hik_MV-CH120-60UC/SDK/*.zip
+
+# D455 upstream SDK/wrapper clones are pinned locally; project integration stays tracked.
+/device/D455/ros2_ws/3parts/librealsense/
+/device/D455/ros2_ws/src/realsense-ros/

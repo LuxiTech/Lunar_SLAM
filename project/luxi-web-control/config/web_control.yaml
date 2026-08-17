@@ -39,7 +39,7 @@ web_control:
     # Covers worst-case DDS discovery, SDK service response and posture change.
     d1_transition_timeout: 90.0
 
-    # C++ D435i level calibrator controlled by the web button.
+    # C++ RealSense IMU level calibrator controlled by the web button.
     imu_level_calibration_service: /sensors/imu/calibrate_level
     imu_level_status_topic: /sensors/imu/level_calibration_status
 

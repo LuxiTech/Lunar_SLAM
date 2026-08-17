@@ -135,14 +135,17 @@ def test_drive_page_prioritizes_control_over_large_previews():
     assert 'window.addEventListener("blur"' not in app
 
 
-def test_d435i_web_preview_has_headroom_for_ten_hz_delivery():
-    config = yaml.safe_load(
-        (WORKSPACE_ROOT / "project/luxi_adapter/config/sensor_bringup.yaml").read_text(
-            encoding="utf-8"
+def test_realsense_web_previews_have_headroom_for_ten_hz_delivery():
+    for config_name in ("sensor_bringup.yaml", "d455_sensor_bringup.yaml"):
+        config = yaml.safe_load(
+            (
+                WORKSPACE_ROOT
+                / "project/luxi_adapter/config"
+                / config_name
+            ).read_text(encoding="utf-8")
         )
-    )
-    parameters = config["luxi_adapter"]["ros__parameters"]
-    assert parameters["compressed_color_rate"] == 12.0
+        parameters = config["luxi_adapter"]["ros__parameters"]
+        assert parameters["compressed_color_rate"] == 12.0
 
     source = (
         WORKSPACE_ROOT / "project/luxi_adapter/src/sensor_adapter.cpp"
@@ -526,6 +529,8 @@ def test_documented_cleanup_uses_the_bounded_workspace_script():
     assert "luxi_[^/[:space:]]+" in source
     assert "slam_d1_bridge" in source
     assert "rtabmap_(slam|odom|sync|viz)" in source
+    assert "lunar_d455_bringup" in source
+    assert "[d]455\\.launch\\.py" in source
     assert "aved_map_navigation" in source
     assert "request_robot_shutdown" in source
     assert "/api/robot/control" in source

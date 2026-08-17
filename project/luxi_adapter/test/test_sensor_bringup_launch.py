@@ -56,6 +56,22 @@ def test_d435i_argument_selects_d435i_driver_and_complete_config():
     assert selection.config_path == PACKAGE_ROOT / "config" / "sensor_bringup.yaml"
 
 
+def test_d455_argument_selects_d455_driver_and_complete_config():
+    module = _load_launch_module()
+
+    selection = module.resolve_hardware_selection(
+        hardware="D455",
+        config_path="",
+        package_share=PACKAGE_ROOT,
+    )
+
+    assert selection.profile == "d455"
+    assert selection.launch_path == PACKAGE_ROOT / "launch" / "d455.launch.py"
+    assert selection.config_path == (
+        PACKAGE_ROOT / "config" / "d455_sensor_bringup.yaml"
+    )
+
+
 def test_sensor_bringup_detects_residual_components(tmp_path):
     module = _load_launch_module()
     current = tmp_path / str(1234)
@@ -148,13 +164,18 @@ def test_mapping_rviz_uses_only_canonical_adapter_images():
     assert topics["DepthPreview"] == "/sensors/rgbd/depth/image_raw"
 
 
-def test_hik_and_d435i_configs_share_the_algorithm_facing_topics():
+def test_all_sensor_configs_share_the_algorithm_facing_topics():
     yaml = pytest.importorskip("yaml")
     d435i = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "sensor_bringup.yaml").read_text(encoding="utf-8")
     )["luxi_adapter"]["ros__parameters"]
     hik = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "hik_sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["luxi_adapter"]["ros__parameters"]
+    d455 = yaml.safe_load(
+        (PACKAGE_ROOT / "config" / "d455_sensor_bringup.yaml").read_text(
             encoding="utf-8"
         )
     )["luxi_adapter"]["ros__parameters"]
@@ -169,6 +190,39 @@ def test_hik_and_d435i_configs_share_the_algorithm_facing_topics():
 
     for topic_name in public_topics:
         assert hik[topic_name] == d435i[topic_name]
+        assert d455[topic_name] == d435i[topic_name]
+
+
+def test_d455_uses_wide_matched_profiles_and_aligned_depth():
+    yaml = pytest.importorskip("yaml")
+    adapter = yaml.safe_load(
+        (PACKAGE_ROOT / "config" / "d455_sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["luxi_adapter"]["ros__parameters"]
+    device_config = (
+        PACKAGE_ROOT.parents[1]
+        / "device"
+        / "D455"
+        / "ros2_ws"
+        / "src"
+        / "lunar_d455_bringup"
+        / "config"
+        / "d455.yaml"
+    )
+    device = yaml.safe_load(device_config.read_text(encoding="utf-8"))[
+        "/camera/camera"
+    ]["ros__parameters"]
+
+    assert adapter["depth_input_topic"] == (
+        "/camera/camera/aligned_depth_to_color/image_raw"
+    )
+    assert adapter["d455_color_profile"] == "848,480,30"
+    assert adapter["d455_depth_profile"] == "848,480,30"
+    assert device["device_type"] == "d455"
+    assert device["align_depth.enable"] is True
+    assert device["rgb_camera.color_profile"] == "848,480,30"
+    assert device["depth_module.depth_profile"] == "848,480,30"
 
 
 def test_hik_empty_stereo_override_uses_hik_profile_default(tmp_path):

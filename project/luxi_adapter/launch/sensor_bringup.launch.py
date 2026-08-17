@@ -149,7 +149,7 @@ def generate_launch_description():
             "hardware",
             default_value="auto",
             description=(
-                "Hardware profile to start (for example hik or d435i). "
+                "Hardware profile to start (for example hik, d435i or d455). "
                 "auto preserves config-driven selection."
             ),
         ),

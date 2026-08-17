@@ -1,0 +1,27 @@
+/camera/camera:
+  ros__parameters:
+    camera_namespace: camera
+    camera_name: camera
+    # Reject a connected D435/D435i instead of silently using its narrower RGB FOV.
+    device_type: d455
+    enable_color: true
+    enable_depth: true
+    enable_infra1: false
+    enable_infra2: false
+    enable_gyro: true
+    enable_accel: true
+    unite_imu_method: 2
+    enable_sync: true
+    align_depth.enable: true
+    # D455's optimal depth profile and wide global-shutter RGB profile.
+    rgb_camera.color_profile: 848,480,30
+    depth_module.depth_profile: 848,480,30
+    spatial_filter.enable: true
+    temporal_filter.enable: true
+    hole_filling_filter.enable: false
+    pointcloud.enable: false
+    publish_tf: true
+    tf_publish_rate: 0.0
+    initial_reset: false
+    reconnect_timeout: 6.0
+    rgb_camera.power_line_frequency: 2

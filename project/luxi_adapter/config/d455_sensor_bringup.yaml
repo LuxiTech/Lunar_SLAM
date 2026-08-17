@@ -1,0 +1,59 @@
+luxi_adapter:
+  ros__parameters:
+    hardware_profile: d455
+    input_mode: separate
+    rgbd_output_topic: /sensors/rgbd/rgbd_image
+    maximum_sensor_time_difference: 0.05
+
+    # D455 vendor inputs. Depth is registered into the wide RGB optical frame.
+    color_input_topic: /camera/camera/color/image_raw
+    depth_input_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_input_topic: /camera/camera/color/camera_info
+    imu_input_topic: /camera/camera/imu
+    compressed_color_input_topic: /camera/camera/color/image_raw/compressed
+
+    # Hardware-independent contract used by mapping, navigation and the web UI.
+    color_output_topic: /sensors/rgbd/color/image_raw
+    depth_output_topic: /sensors/rgbd/depth/image_raw
+    camera_info_output_topic: /sensors/rgbd/color/camera_info
+    imu_output_topic: /sensors/imu/data_raw
+    compressed_color_output_topic: /sensors/rgbd/color/image_raw/compressed
+    generate_compressed_color_from_raw: true
+    compressed_color_rate: 12.0
+    compressed_color_jpeg_quality: 80
+    enable_imu: true
+
+    # Empty selects device/D455/ros2_ws/install/setup.bash.
+    d455_setup: ""
+    rmw_implementation: rmw_fastrtps_cpp
+    ros_domain_id: 42
+    d455_color_profile: 848,480,30
+    d455_depth_profile: 848,480,30
+    d455_initial_reset: false
+    d455_unite_imu_method: 2
+
+    # Provisional replacement-camera transform. Measure camera_x/y/z and yaw
+    # on the final bracket; roll and pitch are solved by stationary calibration.
+    base_frame: base_link
+    camera_frame: camera_link
+    camera_x: 0.14
+    camera_y: 0.0
+    camera_z: 0.0
+    camera_roll: 0.0
+    camera_pitch: 0.0
+    camera_yaw: 0.0
+    auto_level_imu: true
+    auto_level_start_automatically: false
+    imu_level_calibration_service: /sensors/imu/calibrate_level
+    imu_level_status_topic: /sensors/imu/level_calibration_status
+    auto_level_samples: 200
+    auto_level_gravity_tolerance: 0.8
+    auto_level_maximum_angular_speed: 0.05
+    auto_level_maximum_tilt_degrees: 40.0
+
+sensor_imu_filter:
+  ros__parameters:
+    use_mag: false
+    world_frame: enu
+    publish_tf: false
+    gain: 0.03

@@ -1,7 +1,7 @@
 # Lunar SLAM 算法项目
 
-`project/` 存放与具体相机解耦的 ROS 2 算法包。当前主链路支持海康双目相机与
-Intel RealSense D435i 替换接入；两类设备经过 `luxi_adapter` 后使用相同的 RGB-D、
+`project/` 存放与具体相机解耦的 ROS 2 算法包。当前主链路支持海康双目相机、
+Intel RealSense D435i 与宽视场 D455 替换接入；各设备经过 `luxi_adapter` 后使用相同的 RGB-D、
 IMU 和 TF 接口。正式建图使用 `luxi_visual_frontend` 和项目维护的
 `luxi_rtab_map`，不使用海康工程附带的 RTAB-Map 前端或建图配置。
 
@@ -18,7 +18,7 @@ IMU 和 TF 接口。正式建图使用 `luxi_visual_frontend` 和项目维护的
 ## 系统链路
 
 ```text
-Hik 双目 + H30                         D435i
+Hik 双目 + H30                    D435i / D455
        │                                 │
        └────────── luxi_adapter ─────────┘
                          │
@@ -56,7 +56,7 @@ Hik 双目 + H30                         D435i
 
 | 包 | 职责 |
 | --- | --- |
-| `luxi_adapter` | 选择 Hik/D435i 硬件 profile，发布统一 RGB-D、IMU 和 TF |
+| `luxi_adapter` | 选择 Hik/D435i/D455 硬件 profile，发布统一 RGB-D、IMU 和 TF |
 | `luxi_visual_frontend` | SuperPoint + LightGlue RGB-D 视觉里程计与 RTAB 外部特征 |
 | `luxi_RTAB_Map` | 同步门禁、RTAB-Map 建图/定位、数据库保护和 RViz |
 | `luxi_hloc` | NetVLAD/HLoc 全局检索与粗定位，不参与实时建图前端 |
@@ -88,7 +88,7 @@ source install/setup.bash
 
 ## 统一硬件选择与建图
 
-正式链路只在 `luxi_adapter` 启动时选择硬件。Hik 与 D435i 后面的视觉前端、RTAB、
+正式链路只在 `luxi_adapter` 启动时选择硬件。Hik、D435i 与 D455 后面的视觉前端、RTAB、
 RViz、定位和导航命令完全一致。终端一启动所选硬件：
 
 ```bash
@@ -97,6 +97,7 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 # 或：hardware:=d435i
+# 或：hardware:=d455
 ```
 
 终端二启动通用学习前端、RTAB 后端和 RViz：
@@ -150,7 +151,7 @@ rtabmap subscribed to (exact sync)
 
 `external_trigger:=false` 只用于排查无硬件触发时能否取流，不作为正式建图配置。
 
-同一时刻只能启动一个硬件 profile，不能让 Hik 和 D435i 同时发布统一传感器话题。
+同一时刻只能启动一个硬件 profile，不能让 Hik、D435i 和 D455 同时发布统一传感器话题。
 以后增加型号时，新增 `luxi_adapter/launch/<profile>.launch.py` 和
 `luxi_adapter/config/<profile>_sensor_bringup.yaml`；后续算法包不增加硬件分支。
 
