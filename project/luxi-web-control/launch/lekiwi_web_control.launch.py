@@ -69,7 +69,10 @@ def generate_launch_description():
                     ),
                     "bind_address": LaunchConfiguration("bind_address"),
                     "http_port": LaunchConfiguration("http_port"),
-                    "restrict_http_to_d1_lan": "true",
+                    # DDS still uses the D1 domain/network settings below, but
+                    # the HTTP UI must remain reachable through every address
+                    # selected by bind_address (including 0.0.0.0).
+                    "restrict_http_to_d1_lan": "false",
                     "config": LaunchConfiguration("config"),
                 }.items(),
             )],

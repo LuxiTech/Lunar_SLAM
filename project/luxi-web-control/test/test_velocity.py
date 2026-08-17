@@ -212,7 +212,7 @@ def test_d1_control_scripts_resolve_the_current_workspace():
     assert "/home/nvidia/Desktop/lunar_slam" not in web_script
 
 
-def test_d1_control_is_restricted_to_the_wired_lan():
+def test_d1_dds_is_restricted_without_restricting_the_http_server():
     bridge = WORKSPACE_ROOT / "project/slam_d1_bridge"
     setup_source = (bridge / "scripts/setup_d1_lan_dds.sh").read_text(
         encoding="utf-8"
@@ -232,7 +232,7 @@ def test_d1_control_is_restricted_to_the_wired_lan():
     assert "<useBuiltinTransports>false</useBuiltinTransports>" in profile
     assert "FASTDDS_BUILTIN_TRANSPORTS" not in launch_source
     assert 'DeclareLaunchArgument("bind_address", default_value="127.0.0.1")' in launch_source
-    assert '"restrict_http_to_d1_lan": "true"' in launch_source
+    assert '"restrict_http_to_d1_lan": "false"' in launch_source
 
 
 def test_d1_web_control_is_enabled_and_exposes_switch():
@@ -483,6 +483,12 @@ def test_wildcard_bind_address_expands_to_lan_urls():
         "http://10.0.0.2:8080",
         "http://192.168.123.66:8080",
     ]
+
+    source = (
+        WORKSPACE_ROOT
+        / "project/luxi-web-control/luxi_web_control/web_control_node.py"
+    ).read_text(encoding="utf-8")
+    assert "self.access_urls = make_access_urls(" in source
 
 
 def test_specific_bind_address_is_printed_directly():

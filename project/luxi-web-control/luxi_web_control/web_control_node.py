@@ -2692,10 +2692,13 @@ class WebControlNode(Node):
             raise
         self.http_server = self.http_servers[0]
         self.http_port = int(self.http_server.server_address[1])
-        self.access_urls = [
-            f"http://{server.server_address[0]}:{server.server_address[1]}"
-            for server in self.http_servers
-        ]
+        if bind_address == "0.0.0.0" and not restrict_http_to_d1_lan:
+            self.access_urls = make_access_urls(bind_address, self.http_port)
+        else:
+            self.access_urls = [
+                f"http://{server.server_address[0]}:{server.server_address[1]}"
+                for server in self.http_servers
+            ]
         self._http_threads = []
         for index, server in enumerate(self.http_servers):
             thread = threading.Thread(
