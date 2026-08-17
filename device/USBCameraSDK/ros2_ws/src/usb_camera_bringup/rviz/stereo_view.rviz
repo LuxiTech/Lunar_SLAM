@@ -1,0 +1,58 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Left Camera
+      Normalize Range: false
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Transport Override: raw
+        Value: /left_camera/image
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Right Camera
+      Normalize Range: false
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Transport Override: raw
+        Value: /right_camera/image
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 32; 32; 32
+    Fixed Frame: left_camera_optical_frame
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 5
+      Name: Current View
+      Pitch: 0.785
+      Yaw: 0.785
+Window Geometry:
+  Height: 900
+  Width: 1600
+  X: 20
+  Y: 40

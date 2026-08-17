@@ -1,0 +1,11 @@
+opencv_exposure_gain_tuner:
+  ros__parameters:
+    camera_topic: /left_camera/image/compressed
+    left_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.1:1.0-video-index0
+    right_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.3:1.0-video-index0
+    display_scale: 0.65
+    # Keep the useful range compact so small slider changes are controllable.
+    exposure_slider_max: 300
+    # This camera has a measured gain discontinuity at 70: values at and above
+    # it severely overexpose the image instead of increasing gain smoothly.
+    gain_slider_max: 68
