@@ -97,10 +97,10 @@ TEST(TerrainModel, DetoursAroundDynamicBlockedColumns)
   }));
 }
 
-TEST(TerrainModel, UsesTenCentimeterDefaultRobotRadius)
+TEST(TerrainModel, UsesMeasuredTwentyFiveCentimeterDefaultRobotRadius)
 {
   const luxi_3d_navigation::TerrainParameters parameters;
-  EXPECT_DOUBLE_EQ(parameters.robot_radius, 0.10);
+  EXPECT_DOUBLE_EQ(parameters.robot_radius, 0.25);
 }
 
 TEST(TerrainModel, RequiresGroundSupport)

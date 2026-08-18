@@ -75,6 +75,56 @@ TEST(NavigationSafetyGate, SensorTimeoutLatchesHardStopUntilNavigationRestarts)
   EXPECT_FALSE(gate.evaluate(1.44).emergency_stop);
 }
 
+TEST(NavigationSafetyGate, BriefSensorTimeoutStopsThenRecoversWithoutRestart)
+{
+  luxi_3d_navigation::SafetyGateParameters parameters;
+  parameters.command_timeout = 5.0;
+  parameters.obstacle_timeout = 0.20;
+  parameters.obstacle_hard_stop_latch_delay = 1.0;
+  parameters.planner_timeout = 5.0;
+  parameters.localization_timeout = 5.0;
+  parameters.healthy_resume_hold = 0.10;
+  luxi_3d_navigation::NavigationSafetyGate gate(parameters);
+  gate.setNavigationActive(true, 1.0);
+  gate.updateCommand(movingCommand(), 1.0);
+  gate.updateObstacleState("clear", 1.0);
+  gate.updatePlannerState("clear", 1.0);
+  gate.updateLocalizationState("tracking", 1.0);
+  EXPECT_EQ(gate.evaluate(1.0).state, "recovery_hold");
+  EXPECT_DOUBLE_EQ(gate.evaluate(1.15).command.linear.x, 0.10);
+
+  const auto stopped = gate.evaluate(1.21);
+  EXPECT_EQ(stopped.state, "sensor_stale_stop");
+  EXPECT_DOUBLE_EQ(stopped.command.linear.x, 0.0);
+  EXPECT_FALSE(stopped.emergency_stop);
+
+  gate.updateObstacleState("clear", 1.80);
+  EXPECT_EQ(gate.evaluate(1.81).state, "recovery_hold");
+  EXPECT_DOUBLE_EQ(gate.evaluate(1.92).command.linear.x, 0.10);
+}
+
+TEST(NavigationSafetyGate, PersistentSensorTimeoutStillLatchesHardStop)
+{
+  luxi_3d_navigation::SafetyGateParameters parameters;
+  parameters.command_timeout = 5.0;
+  parameters.obstacle_timeout = 0.20;
+  parameters.obstacle_hard_stop_latch_delay = 1.0;
+  parameters.planner_timeout = 5.0;
+  parameters.localization_timeout = 5.0;
+  luxi_3d_navigation::NavigationSafetyGate gate(parameters);
+  gate.setNavigationActive(true, 1.0);
+  gate.updateCommand(movingCommand(), 1.0);
+  gate.updateObstacleState("clear", 1.0);
+  gate.updatePlannerState("clear", 1.0);
+  gate.updateLocalizationState("tracking", 1.0);
+  EXPECT_EQ(gate.evaluate(1.21).state, "sensor_stale_stop");
+  const auto latched = gate.evaluate(2.22);
+  EXPECT_EQ(latched.state, "hard_stop");
+  EXPECT_TRUE(latched.emergency_stop);
+  gate.updateObstacleState("clear", 2.23);
+  EXPECT_EQ(gate.evaluate(2.24).state, "hard_stop");
+}
+
 TEST(NavigationSafetyGate, UnknownSensorAndPlannerStatesFailClosed)
 {
   auto gate = readyGate();

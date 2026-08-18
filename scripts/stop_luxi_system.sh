@@ -151,6 +151,7 @@ remove_stale_pid_files()
 post_if_available /api/stop
 post_if_available /api/mapping/stop
 post_if_available /api/navigation/stop
+post_if_available /api/camera/stop
 request_robot_shutdown
 sleep 2
 

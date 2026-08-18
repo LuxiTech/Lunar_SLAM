@@ -1,6 +1,7 @@
 octomap_3d_astar_planner:
   ros__parameters:
-    robot_radius: 0.10
+    # Measured center-to-wheel distance. The camera/rear extents are smaller.
+    robot_radius: 0.25
     robot_height: 0.35
     # base_link is near the body/rotation reference. Terrain cells represent
     # support-surface clearance, so start snapping must remove this height.
@@ -20,7 +21,7 @@ octomap_3d_astar_planner:
 
 local_path_replanner:
   ros__parameters:
-    robot_radius: 0.10
+    robot_radius: 0.25
     robot_height: 0.35
     body_reference_height: 0.35
     max_step_height: 0.15
@@ -76,13 +77,18 @@ local_obstacle_map:
     stale_entry_ttl: 35.0
     minimum_obstacle_z: -0.32
     maximum_obstacle_z: 0.30
-    self_filter_x_min: -0.25
-    self_filter_x_max: 0.20
-    self_filter_half_width: 0.20
+    # Measured footprint relative to the rotation center: rear 0.15 m,
+    # front-mounted camera 0.18 m, wheel radius envelope 0.25 m laterally.
+    self_filter_x_min: -0.15
+    self_filter_x_max: 0.18
+    self_filter_half_width: 0.25
     corridor_half_width: 0.25
     stop_distance: 0.45
     slow_distance: 0.70
-    # At D1's 0.10 m/s minimum gait speed, 0.6 s permits at most 6 cm of travel.
+    # D455 occasionally has a 1-2 s UVC recovery gap. The rolling layer marks
+    # itself stale after this interval; the safety gate immediately outputs
+    # zero, so increasing the permanent-latch delay below does not permit blind
+    # travel.
     sensor_timeout: 0.60
     tf_timeout: 0.05
     # More dangerous transitions are immediate; clearing must remain stable.
@@ -94,8 +100,14 @@ navigation_safety_gate:
     monitor_only: false
     command_timeout: 0.20
     obstacle_timeout: 0.60
+    # Stop immediately on a stale/invalid depth layer, but latch the stop only
+    # when the D455 fault lasts long enough to be a real disconnect. A normal
+    # short UVC watchdog recovery therefore resumes after healthy_resume_hold.
+    obstacle_hard_stop_latch_delay: 2.5
     planner_timeout: 1.0
-    localization_timeout: 1.5
+    # The D455 RGB-D odometry stream showed occasional 1.8 s gaps. Obstacle
+    # sensing still fail-stops immediately during those gaps.
+    localization_timeout: 2.2
     slow_scale: 0.50
     # D1's walking controller does not execute smaller translational commands.
     # Slow mode remains flagged/limited but preserves this hardware floor.
@@ -127,7 +139,7 @@ terrain_path_follower:
     # Brief ICP loss keeps the continuous RGB-D odometry/IMU pose alive. If it
     # persists, stop translation and keep turning toward the last path heading
     # while HLoc searches for a confirmed global match.
-    localization_timeout: 1.5
+    localization_timeout: 2.2
     dead_reckoning_duration: 0.80
     localization_recovery_timeout: 45.0
     localization_recovery_angular_speed: 0.20

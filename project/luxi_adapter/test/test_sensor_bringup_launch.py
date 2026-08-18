@@ -200,6 +200,14 @@ def test_d455_uses_wide_matched_profiles_and_aligned_depth():
             encoding="utf-8"
         )
     )["luxi_adapter"]["ros__parameters"]
+    driver = yaml.safe_load(
+        (
+            PACKAGE_ROOT.parents[1]
+            / "device/D455/ros2_ws/src/lunar_d455_bringup/config/d455.yaml"
+        ).read_text(encoding="utf-8")
+    )["/camera/camera"]["ros__parameters"]
+    assert driver["rgb_camera.enable_auto_white_balance"] is False
+    assert driver["rgb_camera.white_balance"] == pytest.approx(3450.0)
     device_config = (
         PACKAGE_ROOT.parents[1]
         / "device"
@@ -217,12 +225,13 @@ def test_d455_uses_wide_matched_profiles_and_aligned_depth():
     assert adapter["depth_input_topic"] == (
         "/camera/camera/aligned_depth_to_color/image_raw"
     )
-    assert adapter["d455_color_profile"] == "848,480,30"
-    assert adapter["d455_depth_profile"] == "848,480,30"
+    assert adapter["d455_color_profile"] == "848,480,15"
+    assert adapter["d455_depth_profile"] == "848,480,15"
+    assert adapter["camera_x"] == pytest.approx(0.18)
     assert device["device_type"] == "d455"
     assert device["align_depth.enable"] is True
-    assert device["rgb_camera.color_profile"] == "848,480,30"
-    assert device["depth_module.depth_profile"] == "848,480,30"
+    assert device["rgb_camera.color_profile"] == "848,480,15"
+    assert device["depth_module.depth_profile"] == "848,480,15"
 
 
 def test_hik_empty_stereo_override_uses_hik_profile_default(tmp_path):

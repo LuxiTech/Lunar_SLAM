@@ -16,7 +16,7 @@ namespace luxi_3d_navigation
 
 struct TerrainParameters
 {
-  double robot_radius{0.10};
+  double robot_radius{0.25};
   double robot_height{0.35};
   double max_step_height{0.15};
   double max_slope_degrees{50.0};

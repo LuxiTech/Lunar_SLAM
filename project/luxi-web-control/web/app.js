@@ -31,6 +31,11 @@ const mappingState = $("#mappingState");
 const mappingDetail = $("#mappingDetail");
 const mappingStartButton = $("#mappingStartButton");
 const mappingStopButton = $("#mappingStopButton");
+const cameraState = $("#cameraState");
+const cameraDetail = $("#cameraDetail");
+const cameraProfileSelect = $("#cameraProfileSelect");
+const cameraStartButton = $("#cameraStartButton");
+const cameraStopButton = $("#cameraStopButton");
 const imuCalibrationState = $("#imuCalibrationState");
 const imuCalibrationDetail = $("#imuCalibrationDetail");
 const imuCalibrationButton = $("#imuCalibrationButton");
@@ -90,6 +95,8 @@ let bodyHeightDragging = false;
 let bodyHeightTimer = null;
 let imuCalibrationRequestPending = false;
 let currentImuCalibration = {};
+let currentCameraStatus = {};
+let cameraRequestPending = false;
 let joystickPointerId = null;
 let joystickX = 0;
 let joystickY = 0;
@@ -672,6 +679,17 @@ const mappingStateNames = {
   failed: "启动失败",
 };
 
+const cameraStateNames = {
+  disabled: "不可用",
+  stopped: "未启动",
+  starting: "启动中",
+  waiting: "等待数据",
+  running: "运行中",
+  failed: "启动失败",
+  external: "外部启动",
+  conflict: "链路冲突",
+};
+
 const imuCalibrationStateNames = {
   offline: "服务离线",
   idle: "等待校准",
@@ -873,11 +891,12 @@ function updateNavigationMaps(maps) {
   navigationMapRecords = new Map(maps.map((item) => [item.id, item]));
   navigationMapSelect.replaceChildren();
   for (const item of maps) {
+    const hasCloud = (item.files || []).some((file) => file.layer === "cloud");
     const option = document.createElement("option");
     option.value = item.id;
     option.disabled = !item.convertible;
     option.textContent = item.loadable
-      ? `${item.id}${item.cloud_path ? "（完整彩色点云 + 体素地图" : "（体素地图；未导出彩色点云"}${item.localizable ? " + HLoc）" : "；未构建 HLoc）"}`
+      ? `${item.id}${hasCloud ? "（完整彩色点云 + 体素地图" : "（体素地图；未导出彩色点云"}${item.localizable ? " + HLoc）" : "；未构建 HLoc）"}`
       : item.convertible
         ? `${item.id}（选择后自动转换）`
         : `${item.id}（缺少 .db，无法转换）`;
@@ -902,7 +921,7 @@ async function refreshNavigationMaps() {
   if (navigationMapsRefreshPending) return;
   navigationMapsRefreshPending = true;
   try {
-    const response = await fetch("/api/navigation/maps", {cache: "no-store"});
+    const response = await fetch("/api/maps", {cache: "no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json();
     updateNavigationMaps(Array.isArray(result.maps) ? result.maps : []);
@@ -1871,6 +1890,103 @@ semanticSaveButton.addEventListener("click", async () => {
   }
 });
 
+function updateCamera(camera) {
+  if (!camera) return;
+  currentCameraStatus = camera;
+  const profiles = Array.isArray(camera.profiles) ? camera.profiles : [];
+  const profileKey = profiles.map((profile) => profile.id).join(",");
+  if (cameraProfileSelect.dataset.profiles !== profileKey) {
+    const selected = cameraProfileSelect.value;
+    cameraProfileSelect.replaceChildren(...profiles.map((profile) => {
+      const option = document.createElement("option");
+      option.value = profile.id;
+      option.textContent = profile.label;
+      return option;
+    }));
+    cameraProfileSelect.dataset.profiles = profileKey;
+    const available = profiles.some((profile) => profile.id === selected);
+    cameraProfileSelect.value = available
+      ? selected
+      : (camera.profile || camera.default_profile || profiles[0]?.id || "");
+  }
+  const stateName = cameraStateNames[camera.state] || camera.state;
+  cameraState.textContent = stateName;
+  cameraState.className = `mapping-state ${camera.state}`;
+  const selectedProfile = cameraProfileSelect.value;
+  const sameManagedProfile = Boolean(camera.managed)
+    && camera.profile === selectedProfile;
+  cameraProfileSelect.disabled = !camera.enabled || cameraRequestPending;
+  cameraStartButton.disabled = !camera.enabled || cameraRequestPending
+    || !selectedProfile || sameManagedProfile;
+  cameraStopButton.disabled = !camera.enabled || cameraRequestPending
+    || !camera.managed;
+  if (camera.last_error) {
+    cameraDetail.textContent = camera.last_error;
+  } else if (camera.external) {
+    cameraDetail.textContent = "检测到终端启动的相机；请先停止旧进程，再由网页接管。";
+  } else if (camera.state === "running") {
+    const uptime = camera.uptime_seconds == null
+      ? "" : ` · ${camera.uptime_seconds}s`;
+    cameraDetail.textContent = `${camera.profile} 图像、内参与 RGB-D 已就绪${uptime}`;
+  } else if (camera.state === "starting" || camera.state === "waiting") {
+    const counts = camera.publisher_counts || {};
+    cameraDetail.textContent =
+      `${camera.profile} 正在等待传感器：RGB ${counts.color || 0} · `
+      + `内参 ${counts.camera_info || 0} · RGB-D ${counts.rgbd || 0}`;
+  } else if (camera.state === "conflict") {
+    cameraDetail.textContent = "检测到重复传感器发布者，已禁止继续切换和建图。";
+  } else if (!camera.enabled) {
+    cameraDetail.textContent = "当前启动配置未启用网页相机管理。";
+  } else {
+    cameraDetail.textContent = "选择相机后启动；切换会先安全停止建图和定位。";
+  }
+}
+
+async function startCamera() {
+  const profile = cameraProfileSelect.value;
+  if (!profile) return;
+  if (currentCameraStatus.managed && currentCameraStatus.profile !== profile
+    && !window.confirm("切换相机会先停止建图和定位，并关闭当前相机。确认继续？")) return;
+  stop();
+  cameraRequestPending = true;
+  updateCamera(currentCameraStatus);
+  try {
+    const result = await api(
+      "/api/camera/start", {profile}, {timeoutMs: 60000},
+    );
+    updateCamera(result.camera);
+    showToast(`${profile} 正在启动，请等待实时画面`);
+  } catch (error) {
+    showToast(`相机启动失败：${error.message}`);
+  } finally {
+    cameraRequestPending = false;
+    updateCamera(currentCameraStatus);
+  }
+}
+
+async function stopCamera() {
+  if (!window.confirm("关闭相机会同时停止建图和定位。确认继续？")) return;
+  stop();
+  cameraRequestPending = true;
+  updateCamera(currentCameraStatus);
+  try {
+    const result = await api("/api/camera/stop", {}, {timeoutMs: 60000});
+    updateCamera(result.camera);
+    showToast("相机已经关闭");
+  } catch (error) {
+    showToast(`相机关闭失败：${error.message}`);
+  } finally {
+    cameraRequestPending = false;
+    updateCamera(currentCameraStatus);
+  }
+}
+
+cameraProfileSelect.addEventListener("change", () => {
+  updateCamera(currentCameraStatus);
+});
+cameraStartButton.addEventListener("click", startCamera);
+cameraStopButton.addEventListener("click", stopCamera);
+
 function updateMapping(mapping) {
   if (!mapping) return;
   const mappingStateName = mappingStateNames[mapping.state] || mapping.state;
@@ -1878,8 +1994,9 @@ function updateMapping(mapping) {
   mappingState.className = `mapping-state ${mapping.state}`;
   const calibrationRequired = currentImuCalibration.service_available
     && currentImuCalibration.state !== "calibrated";
+  const cameraReady = Boolean(currentCameraStatus.ready);
   mappingStartButton.disabled = !mapping.enabled || mapping.state === "running"
-    || calibrationRequired;
+    || calibrationRequired || !cameraReady;
   mappingStopButton.disabled = !mapping.enabled || mapping.state !== "running";
   if (mapping.last_error) {
     mappingDetail.textContent = mapping.last_error;
@@ -1889,9 +2006,11 @@ function updateMapping(mapping) {
   } else if (!mapping.enabled) {
     mappingDetail.textContent = "当前节点未启用建图控制。";
   } else {
-    mappingDetail.textContent = calibrationRequired
-      ? "请先将机器人放在水平面并完成 IMU 一键校准。"
-      : "开始前请确认 luxi_adapter 硬件 profile 已运行。";
+    mappingDetail.textContent = !cameraReady
+      ? "请先在上方启动相机并等待图像、内参与 RGB-D 就绪。"
+      : (calibrationRequired
+        ? "请先将机器人放在水平面并完成 IMU 一键校准。"
+        : "相机链路已就绪，可以开始建图。");
   }
 }
 
@@ -1967,6 +2086,7 @@ async function refreshStatus() {
     state.textContent = stateNames[data.state] || data.state;
     setEstopUi(Boolean(data.estop_active));
     updateRobotControl(data.robot_control);
+    updateCamera(data.camera);
     updateImuCalibration(data.imu_calibration);
     updateMapping(data.mapping);
     updateNavigation(data.navigation);

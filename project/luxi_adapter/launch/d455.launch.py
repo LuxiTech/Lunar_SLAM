@@ -57,8 +57,8 @@ def _launch_d455(context):
         f"enable_imu:={'true' if enable_imu else 'false'}",
         "enable_pointcloud:=false",
         f"unite_imu_method:={settings.get('d455_unite_imu_method', 2)}",
-        f"color_profile:={settings.get('d455_color_profile', '848,480,30')}",
-        f"depth_profile:={settings.get('d455_depth_profile', '848,480,30')}",
+        f"color_profile:={settings.get('d455_color_profile', '848,480,15')}",
+        f"depth_profile:={settings.get('d455_depth_profile', '848,480,15')}",
         "initial_reset:=" + (
             "true" if _as_bool(settings.get("d455_initial_reset", False), "d455_initial_reset")
             else "false"

@@ -34,6 +34,7 @@ from std_msgs.msg import Float32, String
 from luxi_web_control.web_control_node import discover_navigation_maps
 from luxi_web_control.web_control_node import D1ControlManager
 from luxi_web_control.web_control_node import classify_d1_posture
+from luxi_web_control.web_control_node import CameraController
 from luxi_web_control.web_control_node import extract_colored_ply_points
 from luxi_web_control.web_control_node import extract_sparse_cloud
 from luxi_web_control.web_control_node import HlocIndexBuilder
@@ -50,10 +51,13 @@ from luxi_web_control.web_control_node import parse_control_client_id
 from luxi_web_control.web_control_node import parse_octomap_point_output
 from luxi_web_control.web_control_node import parse_terrain_point_output
 from luxi_web_control.web_control_node import parse_navigation_goal
+from luxi_web_control.web_control_node import parse_http_byte_range
 from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
+from luxi_web_control.web_control_node import public_navigation_maps
 from luxi_web_control.web_control_node import resolve_d1_http_bind_address
 from luxi_web_control.web_control_node import resolve_d1_http_bind_addresses
 from luxi_web_control.web_control_node import validate_d1_http_bind_address
+from luxi_web_control.web_control_node import web_api_capabilities
 from luxi_web_control.web_control_node import WebControlNode
 
 
@@ -83,7 +87,7 @@ def test_live_mapping_cloud_is_disabled_and_bounded_if_reenabled():
     assert parameters["command_timeout"] == 0.8
 
 
-def test_navigation_preview_uses_ten_centimeter_robot_radius():
+def test_navigation_preview_uses_measured_twenty_five_centimeter_robot_radius():
     config = yaml.safe_load(
         (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml").read_text(
             encoding="utf-8"
@@ -92,7 +96,7 @@ def test_navigation_preview_uses_ten_centimeter_robot_radius():
     radius = config["web_control"]["ros__parameters"][
         "navigation_robot_radius"
     ]
-    assert radius == 0.10
+    assert radius == 0.25
 
 
 def test_mapping_keeps_3d_cloud_with_planar_test_trajectory():
@@ -530,6 +534,7 @@ def test_documented_cleanup_uses_the_bounded_workspace_script():
     assert "post_if_available /api/stop" in source
     assert "post_if_available /api/mapping/stop" in source
     assert "post_if_available /api/navigation/stop" in source
+    assert "post_if_available /api/camera/stop" in source
     assert "signal_matches INT" in source
     assert "signal_matches TERM" in source
     assert "luxi_[^/[:space:]]+" in source
@@ -546,6 +551,61 @@ def test_documented_cleanup_uses_the_bounded_workspace_script():
     assert "--max-time 1" in source
     assert "remove_stale_pid_files" in source
     assert "sport = :8080" in source
+
+
+def test_system_restart_script_stops_everything_before_relaunching_web():
+    restart = WORKSPACE_ROOT / "scripts/restart_luxi_system.sh"
+    source = restart.read_text(encoding="utf-8")
+
+    assert os.access(restart, os.X_OK)
+    stop_position = source.index('bash "${WORKSPACE}/scripts/stop_luxi_system.sh"')
+    launch_position = source.index(
+        "setsid ros2 launch luxi_web_control lekiwi_web_control.launch.py"
+    )
+    assert stop_position < launch_position
+    assert '"bind_address:=${BIND_ADDRESS}"' in source
+    assert '"http_port:=${HTTP_PORT}"' in source
+    assert '"web_ui_mode:=${WEB_UI_MODE}"' in source
+    assert 'source "${WORKSPACE}/install/setup.bash"' in source
+    assert 'echo "${launch_pid}" >"${PID_FILE}"' in source
+
+
+def test_system_restart_worker_is_detached_and_preserves_web_arguments(
+    tmp_path, monkeypatch
+):
+    restart = tmp_path / "scripts/restart_luxi_system.sh"
+    restart.parent.mkdir()
+    restart.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    restart.chmod(0o755)
+    node = WebControlNode.__new__(WebControlNode)
+    node.workspace_root = tmp_path
+    node.bind_address = "0.0.0.0"
+    node.http_port = 8080
+    node.web_ui_mode = "map_portal"
+    node._restart_lock = threading.Lock()
+    node._restart_requested = False
+    stops = []
+    node.stop_motion = lambda force: stops.append(force)
+    calls = []
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda command, **options: calls.append((command, options)),
+    )
+
+    accepted, message = node.request_system_restart()
+
+    assert accepted is True
+    assert "安全重启" in message
+    assert stops == [True]
+    command, options = calls[0]
+    assert command[:3] == ["/bin/bash", "-c", command[2]]
+    assert str(restart) in command
+    assert "--bind-address" in command and "0.0.0.0" in command
+    assert "--http-port" in command and "8080" in command
+    assert "--web-ui-mode" in command and "map_portal" in command
+    assert options["start_new_session"] is True
+    assert options["close_fds"] is True
 
 
 def test_map_export_sanitizes_camera_sdk_libraries():
@@ -586,6 +646,45 @@ def test_mapping_start_only_requires_workspace_setup(tmp_path):
     assert "device/D435i" not in command
     assert "new_map:=true" in command
     assert "planar_motion:=true" in command
+
+
+def test_camera_controller_uses_allow_list_and_project_sensor_bringup(tmp_path):
+    workspace_setup = Path(tmp_path / "setup.bash")
+    workspace_setup.touch()
+    controller = CameraController(
+        enabled=True,
+        profiles=("d455", "d435i", "hik"),
+        default_profile="d455",
+        package="luxi_adapter",
+        launch_file="sensor_bringup.launch.py",
+        workspace_setup=workspace_setup,
+        log_path=Path(tmp_path / "camera.log"),
+        rmw_implementation="rmw_fastrtps_cpp",
+    )
+
+    command = controller._command("d455")[-1]
+    assert f"source {workspace_setup}" in command
+    assert "ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d455" in command
+    assert "export ROS_DOMAIN_ID=42" in command
+    assert "export RMW_IMPLEMENTATION=rmw_fastrtps_cpp" in command
+    started, message = controller.switch("unknown")
+    assert started is False
+    assert "unsupported camera profile" in message
+    status = controller.status()
+    assert [profile["id"] for profile in status["profiles"]] == [
+        "d455", "d435i", "hik",
+    ]
+
+
+def test_camera_controls_are_in_the_first_web_column():
+    page = (
+        WORKSPACE_ROOT / "project/luxi-web-control/web/index.html"
+    ).read_text(encoding="utf-8")
+
+    camera = page.index('class="mapping-panel camera-control-panel"')
+    preview = page.index('class="drive-rgb-preview"')
+    settings = page.index('class="panel settings-panel"')
+    assert camera < preview < settings
 
 
 def test_mapping_graph_conflicts_detects_external_slam_nodes():
@@ -826,6 +925,167 @@ def test_navigation_maps_require_database_and_octomap_pair(tmp_path):
     ]
 
 
+def test_public_map_catalog_hides_paths_and_lists_downloads(tmp_path):
+    database = tmp_path / "rtab_maps" / "map007.db"
+    octomap = tmp_path / "octo_maps" / "map007_octomap" / "map007.bt"
+    cloud = tmp_path / "octo_maps" / "map007_octomap" / "map007_cloud.ply"
+    metadata = tmp_path / "hloc_maps" / "map007" / "metadata.yaml"
+    annotations = tmp_path / "semantic_maps" / "map007" / "annotations.json"
+    for path, content in (
+        (database, b"database"),
+        (octomap, b"octomap"),
+        (cloud, b"ply"),
+        (metadata, b"schema_version: 1\n"),
+        (annotations, b"{}"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    catalog = public_navigation_maps(tmp_path)
+
+    assert len(catalog) == 1
+    assert catalog[0]["id"] == "map007"
+    assert catalog[0]["default_variant"] == "original"
+    assert "database_path" not in catalog[0]
+    assert "cloud_path" not in catalog[0]
+    assert {file["layer"] for file in catalog[0]["files"]} == {
+        "database", "cloud", "octomap", "annotations", "hloc_metadata",
+    }
+    assert all(
+        file["download_url"].startswith("/api/maps/map007/download/")
+        for file in catalog[0]["files"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "size", "expected"),
+    [
+        ("", 100, None),
+        ("bytes=0-9", 100, (0, 9)),
+        ("bytes=90-", 100, (90, 99)),
+        ("bytes=-10", 100, (90, 99)),
+        ("bytes=0-999", 100, (0, 99)),
+    ],
+)
+def test_http_byte_ranges_support_resumable_map_downloads(value, size, expected):
+    assert parse_http_byte_range(value, size) == expected
+
+
+@pytest.mark.parametrize("value", ["items=0-1", "bytes=", "bytes=101-102"])
+def test_invalid_http_byte_ranges_are_rejected(value):
+    with pytest.raises(ValueError):
+        parse_http_byte_range(value, 100)
+
+
+def test_map_portal_is_the_configured_public_ui():
+    package = WORKSPACE_ROOT / "project/luxi-web-control"
+    config = yaml.safe_load(
+        (package / "config/web_control.yaml").read_text(encoding="utf-8")
+    )["web_control"]["ros__parameters"]
+    launch_source = (package / "launch/web_control.launch.py").read_text(
+        encoding="utf-8"
+    )
+    page = (package / "web/map_portal.html").read_text(encoding="utf-8")
+    app = (package / "web/map_portal.js").read_text(encoding="utf-8")
+
+    assert config["web_ui_mode"] == "map_portal"
+    assert 'DeclareLaunchArgument("web_ui_mode", default_value="map_portal")' in launch_source
+    assert 'id="mapCanvas"' in page
+    assert 'id="mapLoading"' in page
+    assert 'id="mapLoadingText"' in page
+    assert 'id="mapSelect" class="map-select" size="10"' in page
+    assert 'id="mapFiles"' in page
+    assert '<script src="/map_projection.js"></script>' in page
+    assert 'id="filteredToggle" type="checkbox" checked' in page
+    assert 'id="showCostmap" type="checkbox" checked' in page
+    assert 'id="cameraProfileSelect"' in page
+    assert 'id="rgbPreview"' in page
+    assert 'id="robotControlToggle"' in page
+    assert 'id="robotBatteryState"' in page
+    assert 'id="imuCalibrationState"' in page
+    assert 'id="imuCalibrationButton"' in page
+    assert 'id="joystickPad"' in page
+    assert 'id="manualControlState"' in page
+    assert 'id="restartSystemButton"' in page
+    assert 'id="restartOverlay"' in page
+    assert "选择并发送目标点" in page
+    assert "开始运动前：请开启相机、开启机器人控制，并完成 IMU 校准" in page
+    assert "机器人请确保已开启并保持完全静止" in page
+    assert page.index('class="map-panel"') < page.index('class="panel navigation-panel"')
+    navigation_panel = page.index('class="panel navigation-panel"')
+    manual_panel = page.index('class="panel manual-control-panel"')
+    rgb_panel = page.index('class="panel rgb-panel"')
+    assert navigation_panel < manual_panel < rgb_panel
+    assert page.index('class="panel rgb-panel"') < page.index('class="panel camera-panel"')
+    assert page.index('class="panel camera-panel"') < page.index('class="panel robot-panel"')
+    assert page.index('class="panel robot-panel"') < page.index('class="panel status-panel"')
+    assert page.index('class="panel status-panel"') < page.index('class="panel imu-panel"')
+    assert 'post("/api/navigation/goal", target)' in app
+    assert 'post("/api/navigation/start")' in app
+    assert 'post("/api/navigation/halt")' in app
+    assert 'post("/api/cmd_vel", {...command, client_id: controlClientId})' in app
+    assert 'fetch("/api/stop"' in app
+    assert 'setInterval(sendManualCommand, 100)' in app
+    assert 'manualKeyActions' in app
+    assert 'elements.joystickPad.addEventListener("pointerdown"' in app
+    assert 'elements.sendGoal.addEventListener("click", chooseGoalOnMap)' in app
+    assert 'sendNavigationGoal(goal)' in app
+    assert 'latestFiltered?.id' in app
+    assert 'setMapLoading(true, `正在加载 ${record.id}' in app
+    assert 'setMapLoading(true, "地图数据已准备，正在加载三维图层…")' in app
+    assert 'setMapLoading(false)' in app
+    assert 'loadInitialFilteredPreview' not in app
+    assert 'post("/api/system/restart", {confirm: "restart_all_services"})' in app
+    assert 'elements.restartSystem.addEventListener("click", restartSystem)' in app
+    assert 'refreshMaps();' in app
+    assert "file.download_url" in app
+    assert "record.default_variant" in app
+    assert "elements.mapSelect.addEventListener(\"change\"" in app
+    assert "elements.mapFiles.append(...record.files.map(createDownloadLink))" in app
+    assert "elements.canvas.addEventListener(\"pointermove\"" in app
+    assert "state.view.yaw = state.pointer.yaw" in app
+    assert "state.view.pitch = Math.max(" in app
+    assert "mapProjection.projectMapPoint(" in app
+    assert 'post("/api/camera/start", {profile})' in app
+    assert 'post("/api/camera/stop")' in app
+    assert 'post("/api/robot/control", {active: requested})' in app
+    assert 'post("/api/imu/calibrate")' in app
+    assert 'elements.imuButton.addEventListener("click", startImuCalibration)' in app
+    assert "state.robotControl.active" in app
+    assert 'fetch(`/api/preview/rgb?t=${Date.now()}`' in app
+    assert "elements.showCostmap.checked" in app
+    assert "`/api/maps/${state.loadedMapId}/preview`" in app
+
+
+def test_web_api_capabilities_cover_all_map_and_control_actions():
+    capabilities = web_api_capabilities()
+    operations = {
+        (item["method"], item["path"])
+        for item in capabilities["operations"]
+    }
+    assert ("GET", "/api/maps") in operations
+    assert ("GET", "/api/preview/rgb") in operations
+    assert ("POST", "/api/maps/{map_id}/preview") in operations
+    assert ("GET", "/api/maps/{map_id}/download/{layer}") in operations
+    assert ("POST", "/api/navigation/goal") in operations
+    assert ("POST", "/api/navigation/start") in operations
+    assert ("POST", "/api/navigation/halt") in operations
+    assert ("POST", "/api/cmd_vel") in operations
+    assert ("POST", "/api/stop") in operations
+    assert ("POST", "/api/system/restart") in operations
+    assert ("POST", "/api/mapping/start") in operations
+    assert ("POST", "/api/camera/start") in operations
+    assert ("POST", "/api/imu/calibrate") in operations
+
+
+def test_filtered_map_is_the_default_preview_variant():
+    node = WebControlNode.__new__(WebControlNode)
+    node.public_navigation_map = lambda _map_id: {"filtered_loadable": True}
+    assert node.default_map_preview_filtered("map037")
+    node.public_navigation_map = lambda _map_id: {"filtered_loadable": False}
+    assert not node.default_map_preview_filtered("map037")
+
+
 def test_colored_ply_points_extracts_xyzrgb_from_ascii_export(tmp_path):
     cloud_path = tmp_path / "map011_cloud.ply"
     cloud_path.write_text(
@@ -1028,6 +1288,58 @@ def test_navigation_motion_requires_localization_and_path():
     assert not started
     assert "valid path" in message
     assert len(published) == 1
+
+
+def test_navigation_halt_clears_paths_but_retains_localization():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._navigation_active = True
+    node._navigation_follower_state = "active"
+    node._planned_path_points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+    node._last_valid_path_points = list(node._planned_path_points)
+    node._path_received_at = 1.0
+    node._last_valid_path_received_at = 1.0
+    node._planner_map_ready = True
+    node._planning_state = "ready"
+    node._planning_error = "old error"
+    node._refined_localization_pose = {"x": 2.0, "y": 3.0}
+    published = []
+    node.navigation_stop_publisher = SimpleNamespace(publish=published.append)
+
+    node.halt_navigation_motion(clear_path=True)
+
+    assert len(published) == 1
+    assert published[0].data is True
+    assert node._navigation_active is False
+    assert node._navigation_follower_state == "stopped"
+    assert node._planned_path_points == []
+    assert node._last_valid_path_points == []
+    assert node._path_received_at is None
+    assert node._last_valid_path_received_at is None
+    assert node._planning_state == "map_ready"
+    assert node._planning_error == ""
+    assert node._refined_localization_pose == {"x": 2.0, "y": 3.0}
+
+
+@pytest.mark.parametrize(
+    ("navigation_active", "path_ready"),
+    [(True, False), (False, True)],
+)
+def test_manual_velocity_is_rejected_until_navigation_is_halted(
+    navigation_active, path_ready
+):
+    node = WebControlNode.__new__(WebControlNode)
+    node.d1_control_status = lambda: {"enabled": False, "control_ready": False}
+    node.navigation_status = lambda: {
+        "active": navigation_active, "path_ready": path_ready,
+    }
+
+    accepted, message = node.accept_command(
+        VelocityCommand(linear_x=0.1), "browser-12345678"
+    )
+
+    assert accepted is False
+    assert "halt it first" in message
 
 
 def test_failed_replan_keeps_only_a_stale_preview():

@@ -104,7 +104,7 @@ public:
 private:
   void declareTerrainParameters()
   {
-    declare_parameter<double>("robot_radius", 0.10);
+    declare_parameter<double>("robot_radius", 0.25);
     declare_parameter<double>("robot_height", 0.35);
     declare_parameter<double>("max_step_height", 0.15);
     declare_parameter<double>("max_slope_degrees", 50.0);

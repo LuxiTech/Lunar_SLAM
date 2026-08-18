@@ -45,6 +45,25 @@
           <span class="hint">键盘 W A S D</span>
         </div>
 
+        <section class="mapping-panel camera-control-panel" aria-label="相机硬件控制">
+          <div class="mapping-heading">
+            <div>
+              <p class="eyebrow">CAMERA</p>
+              <h2>相机选择与开关</h2>
+            </div>
+            <strong id="cameraState" class="mapping-state stopped">未启动</strong>
+          </div>
+          <label class="camera-profile-row" for="cameraProfileSelect">
+            <span>硬件类型</span>
+            <select id="cameraProfileSelect" aria-label="选择相机硬件"></select>
+          </label>
+          <p id="cameraDetail" class="mapping-detail">请选择相机并启动。</p>
+          <div class="mapping-actions">
+            <button id="cameraStartButton" class="mapping-start">启动 / 切换</button>
+            <button id="cameraStopButton" class="mapping-stop" disabled>关闭相机</button>
+          </div>
+        </section>
+
         <div class="drive-rgb-preview">
           <div class="drive-preview-heading">
             <span>机器人 RGB 画面</span>

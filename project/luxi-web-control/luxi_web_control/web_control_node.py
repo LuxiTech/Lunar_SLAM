@@ -15,6 +15,7 @@
 """Serve a browser controller and publish safe, standard Twist commands."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
@@ -51,6 +52,13 @@ from visualization_msgs.msg import Marker
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 SIOCGIFADDR = 0x8915
 MAP_IDENTIFIER = re.compile(r"^map\d+$")
+MAP_DOWNLOAD_LAYERS = {
+    "database": ("database_path", "application/vnd.sqlite3"),
+    "cloud": ("cloud_path", "application/octet-stream"),
+    "octomap": ("octomap_path", "application/octet-stream"),
+    "filtered_cloud": ("filtered_cloud_path", "application/octet-stream"),
+    "filtered_octomap": ("filtered_octomap_path", "application/octet-stream"),
+}
 CONTROL_CLIENT_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 LEGACY_CONTROL_CLIENT_ID = "legacy-http-client"
 CONTROL_DEFERRED_GET_PATHS = frozenset({
@@ -333,6 +341,132 @@ def discover_navigation_maps(maps_root: Path) -> list:
             ),
         })
     return maps
+
+
+def _download_file_record(path: Path, layer: str, map_id: str) -> dict:
+    """Return public metadata for one allow-listed map file."""
+    stat = path.stat()
+    modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+    return {
+        "layer": layer,
+        "filename": path.name,
+        "size_bytes": stat.st_size,
+        "modified_at": modified.isoformat().replace("+00:00", "Z"),
+        "download_url": f"/api/maps/{map_id}/download/{layer}",
+    }
+
+
+def public_navigation_maps(
+    maps_root: Path, semantic_root: Optional[Path] = None
+) -> list:
+    """Describe saved maps without exposing host filesystem paths."""
+    public_maps = []
+    semantic_root = semantic_root or maps_root / "semantic_maps"
+    for record in discover_navigation_maps(maps_root):
+        map_id = record["id"]
+        files = []
+        for layer, (path_key, _content_type) in MAP_DOWNLOAD_LAYERS.items():
+            raw_path = record.get(path_key)
+            if raw_path and Path(raw_path).is_file():
+                files.append(_download_file_record(Path(raw_path), layer, map_id))
+        optional_files = (
+            ("annotations", semantic_root / map_id / "annotations.json"),
+            ("hloc_metadata", maps_root / "hloc_maps" / map_id / "metadata.yaml"),
+        )
+        for layer, path in optional_files:
+            if path.is_file():
+                files.append(_download_file_record(path, layer, map_id))
+        public_maps.append({
+            "id": map_id,
+            "default_variant": (
+                "filtered" if record["filtered_loadable"] else "original"
+            ),
+            "convertible": record["convertible"],
+            "loadable": record["loadable"],
+            "localizable": record["localizable"],
+            "filtered_loadable": record["filtered_loadable"],
+            "filtered_localizable": record["filtered_localizable"],
+            "api": {
+                "detail": f"/api/maps/{map_id}",
+                "preview": f"/api/maps/{map_id}/preview",
+                "cloud": f"/api/maps/{map_id}/preview/cloud",
+                "voxels": f"/api/maps/{map_id}/preview/voxels",
+                "terrain": f"/api/maps/{map_id}/preview/terrain",
+                "path": f"/api/maps/{map_id}/preview/path",
+            },
+            "files": files,
+        })
+    return public_maps
+
+
+def parse_http_byte_range(value: str, file_size: int) -> Optional[Tuple[int, int]]:
+    """Parse one RFC 7233 byte range; multiple ranges are not supported."""
+    if not value:
+        return None
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
+    if not match or file_size <= 0:
+        raise ValueError("invalid byte range")
+    first, last = match.groups()
+    if not first and not last:
+        raise ValueError("invalid byte range")
+    if not first:
+        suffix_length = int(last)
+        if suffix_length <= 0:
+            raise ValueError("invalid byte range")
+        start = max(0, file_size - suffix_length)
+        end = file_size - 1
+    else:
+        start = int(first)
+        end = file_size - 1 if not last else int(last)
+        if start >= file_size or end < start:
+            raise ValueError("byte range is outside the file")
+        end = min(end, file_size - 1)
+    return start, end
+
+
+def web_api_capabilities() -> dict:
+    """Describe every HTTP operation used by the bundled web pages."""
+    operations = [
+        ("status", "GET", "/api/status"),
+        ("rgb_preview", "GET", "/api/preview/rgb"),
+        ("map_catalog", "GET", "/api/maps"),
+        ("map_detail", "GET", "/api/maps/{map_id}"),
+        ("map_preview", "POST", "/api/maps/{map_id}/preview"),
+        ("map_cloud", "GET", "/api/maps/{map_id}/preview/cloud"),
+        ("map_voxels", "GET", "/api/maps/{map_id}/preview/voxels"),
+        ("map_terrain", "GET", "/api/maps/{map_id}/preview/terrain"),
+        ("map_costmap", "GET", "/api/maps/{map_id}/preview/terrain"),
+        ("map_path", "GET", "/api/maps/{map_id}/preview/path"),
+        ("map_download", "GET", "/api/maps/{map_id}/download/{layer}"),
+        ("semantic_annotations", "GET", "/api/semantic/annotations"),
+        ("semantic_save", "POST", "/api/semantic/save"),
+        ("navigation_localize", "POST", "/api/navigation/localize"),
+        ("navigation_stop", "POST", "/api/navigation/stop"),
+        ("navigation_goal", "POST", "/api/navigation/goal"),
+        ("navigation_start", "POST", "/api/navigation/start"),
+        ("navigation_halt", "POST", "/api/navigation/halt"),
+        ("mapping_start", "POST", "/api/mapping/start"),
+        ("mapping_stop", "POST", "/api/mapping/stop"),
+        ("camera_start", "POST", "/api/camera/start"),
+        ("camera_stop", "POST", "/api/camera/stop"),
+        ("imu_calibrate", "POST", "/api/imu/calibrate"),
+        ("robot_control", "POST", "/api/robot/control"),
+        ("robot_height", "POST", "/api/robot/height"),
+        ("manual_velocity", "POST", "/api/cmd_vel"),
+        ("manual_stop", "POST", "/api/stop"),
+        ("emergency_stop", "POST", "/api/estop"),
+        ("system_restart", "POST", "/api/system/restart"),
+    ]
+    return {
+        "version": 1,
+        "operations": [
+            {"id": operation_id, "method": method, "path": path}
+            for operation_id, method, path in operations
+        ],
+        "map_layers": [
+            *MAP_DOWNLOAD_LAYERS.keys(), "annotations", "hloc_metadata"
+        ],
+    }
 
 
 def extract_colored_ply_points(path: Path, max_points: int) -> list:
@@ -1075,6 +1209,240 @@ class D1ControlManager:
         }
 
 
+class CameraController:
+    """Own the one hardware-profile launch selected from the web UI."""
+
+    PROFILE_LABELS = {
+        "d455": "D455 / D455F",
+        "d435i": "D435i",
+        "hik": "HIK 双目 + H30 IMU",
+    }
+
+    def __init__(
+        self,
+        enabled: bool,
+        profiles: Tuple[str, ...],
+        default_profile: str,
+        package: str,
+        launch_file: str,
+        workspace_setup: Path,
+        log_path: Path,
+        rmw_implementation: str,
+        startup_grace_seconds: float = 4.0,
+    ) -> None:
+        normalized_profiles = tuple(
+            dict.fromkeys(profile.strip().lower() for profile in profiles)
+        )
+        if not normalized_profiles or any(
+            profile not in self.PROFILE_LABELS
+            for profile in normalized_profiles
+        ):
+            raise ValueError("camera profiles contain an unsupported value")
+        normalized_default = default_profile.strip().lower()
+        if normalized_default not in normalized_profiles:
+            raise ValueError("default camera profile is not available")
+        self.enabled = enabled
+        self.profiles = normalized_profiles
+        self.default_profile = normalized_default
+        self.package = package
+        self.launch_file = launch_file
+        self.workspace_setup = workspace_setup
+        self.log_path = log_path
+        self.rmw_implementation = rmw_implementation
+        self.startup_grace_seconds = max(0.0, startup_grace_seconds)
+        self._lock = threading.Lock()
+        self._process: Optional[subprocess.Popen] = None
+        self._profile: Optional[str] = None
+        self._started_at: Optional[float] = None
+        self._last_exit_code: Optional[int] = None
+        self._last_error = ""
+        self._stop_requested = False
+
+    def _command(self, profile: str) -> list:
+        """Build a source-aware, allow-listed hardware launch command."""
+        launch_command = shlex.join([
+            "ros2",
+            "launch",
+            self.package,
+            self.launch_file,
+            f"hardware:={profile}",
+        ])
+        script = "; ".join([
+            "set -e",
+            f"source {shlex.quote(str(self.workspace_setup))}",
+            "export ROS_LOCALHOST_ONLY=0",
+            "export ROS_DOMAIN_ID=42",
+            "export RMW_IMPLEMENTATION="
+            + shlex.quote(self.rmw_implementation),
+            f"exec {launch_command}",
+        ])
+        return ["/bin/bash", "-c", script]
+
+    def has_running_process(self) -> bool:
+        """Return whether the managed profile launch is still alive."""
+        with self._lock:
+            self._update_exit_state_locked()
+            return self._process is not None
+
+    def start(self, profile: str) -> Tuple[bool, str]:
+        """Start one validated profile when no managed camera is running."""
+        normalized = profile.strip().lower()
+        with self._lock:
+            if not self.enabled:
+                return False, "camera control is disabled"
+            if normalized not in self.profiles:
+                return False, f"unsupported camera profile: {profile}"
+            self._update_exit_state_locked()
+            if self._process is not None:
+                return False, "a managed camera profile is already running"
+            if not self.workspace_setup.is_file():
+                return False, (
+                    "camera workspace setup file is missing: "
+                    + str(self.workspace_setup)
+                )
+            try:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(
+                        "\n===== Camera profile " + normalized
+                        + " started by luxi_web_control =====\n"
+                    )
+                    self._process = subprocess.Popen(
+                        self._command(normalized),
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        env=os.environ.copy(),
+                    )
+            except OSError as exc:
+                self._process = None
+                self._last_error = str(exc)
+                return False, f"unable to start camera profile: {exc}"
+            self._profile = normalized
+            self._started_at = time.monotonic()
+            self._last_exit_code = None
+            self._last_error = ""
+            self._stop_requested = False
+            return True, f"camera profile {normalized} is starting"
+
+    def switch(self, profile: str) -> Tuple[bool, str]:
+        """Gracefully replace the managed profile with another one."""
+        normalized = profile.strip().lower()
+        if normalized not in self.profiles:
+            return False, f"unsupported camera profile: {profile}"
+        with self._lock:
+            self._update_exit_state_locked()
+            same_running = (
+                self._process is not None and self._profile == normalized
+            )
+        if same_running:
+            return True, f"camera profile {normalized} is already running"
+        stopped, message = self.stop()
+        if not stopped:
+            return False, message
+        return self.start(normalized)
+
+    def stop(self) -> Tuple[bool, str]:
+        """Gracefully stop only the camera process group owned here."""
+        with self._lock:
+            self._update_exit_state_locked()
+            process = self._process
+            if process is None:
+                return True, "managed camera is already stopped"
+            self._stop_requested = True
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                self._update_exit_state_locked()
+                return True, "managed camera is already stopped"
+
+        try:
+            process.wait(timeout=8.0)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2.0)
+
+        with self._lock:
+            self._update_exit_state_locked()
+        return True, "managed camera stopped"
+
+    def _update_exit_state_locked(self) -> None:
+        if self._process is None:
+            return
+        exit_code = self._process.poll()
+        if exit_code is None:
+            return
+        self._last_exit_code = exit_code
+        if not self._stop_requested:
+            self._last_error = self._latest_log_error()
+        self._stop_requested = False
+        self._process = None
+
+    def _latest_log_error(self) -> str:
+        try:
+            with self.log_path.open("rb") as log_file:
+                log_file.seek(0, os.SEEK_END)
+                size = log_file.tell()
+                log_file.seek(max(0, size - 16384))
+                lines = log_file.read().decode(
+                    "utf-8", errors="replace"
+                ).splitlines()
+        except OSError:
+            return "camera launch exited; camera log is unavailable"
+        for line in reversed(lines):
+            clean_line = line.strip()
+            if (
+                "[ERROR]" in clean_line
+                or "RuntimeError:" in clean_line
+                or "process has died" in clean_line
+            ):
+                return clean_line[:1000]
+        return "camera launch exited; inspect the camera log"
+
+    def status(self) -> Dict[str, Any]:
+        """Return managed process state and the selectable profile list."""
+        with self._lock:
+            self._update_exit_state_locked()
+            running = self._process is not None
+            started_at = self._started_at
+            uptime = (
+                None if started_at is None or not running
+                else max(0.0, time.monotonic() - started_at)
+            )
+            if not self.enabled:
+                state = "disabled"
+            elif running and uptime < self.startup_grace_seconds:
+                state = "starting"
+            elif running:
+                state = "running"
+            elif self._last_error:
+                state = "failed"
+            else:
+                state = "stopped"
+            return {
+                "enabled": self.enabled,
+                "state": state,
+                "profile": self._profile,
+                "default_profile": self.default_profile,
+                "profiles": [
+                    {"id": profile, "label": self.PROFILE_LABELS[profile]}
+                    for profile in self.profiles
+                ],
+                "pid": self._process.pid if running else None,
+                "uptime_seconds": (
+                    None if uptime is None else round(uptime, 1)
+                ),
+                "last_exit_code": self._last_exit_code,
+                "last_error": self._last_error,
+                "log_path": str(self.log_path),
+                "managed": running,
+            }
+
+
 class MappingController:
     """Own the RTAB-Map launch process started from the web interface."""
 
@@ -1492,6 +1860,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         content_type: str,
         content_length: int,
         cache_control: str = "no-store",
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -1499,8 +1868,14 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header(
+            "Access-Control-Expose-Headers",
+            "Content-Length, Content-Range, Content-Disposition, Accept-Ranges",
+        )
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
 
     def _send_json(self, status: int, body: Dict[str, Any]) -> None:
@@ -1532,6 +1907,53 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return payload
 
+    def _send_map_file(self, path: Path, content_type: str) -> None:
+        """Stream an allow-listed map file, including single-range resumes."""
+        try:
+            file_size = path.stat().st_size
+            byte_range = parse_http_byte_range(
+                self.headers.get("Range", ""), file_size
+            )
+        except OSError:
+            self._send_error_json(HTTPStatus.NOT_FOUND, "map file unavailable")
+            return
+        except ValueError:
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{file_size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        start, end = byte_range or (0, file_size - 1)
+        length = max(0, end - start + 1)
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'attachment; filename="{path.name}"',
+        }
+        status = HTTPStatus.OK
+        if byte_range is not None:
+            status = HTTPStatus.PARTIAL_CONTENT
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        self._send_headers(
+            status,
+            content_type,
+            length,
+            cache_control="private, no-store",
+            extra_headers=headers,
+        )
+        try:
+            with path.open("rb") as stream:
+                stream.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         """Answer browser CORS preflight requests."""
         self._send_headers(HTTPStatus.NO_CONTENT, "text/plain", 0)
@@ -1542,6 +1964,63 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         path = parsed_url.path
         if path == "/api/status":
             self._send_json(HTTPStatus.OK, self.server.control_node.status())
+            return
+        if path in {"/api", "/api/capabilities"}:
+            self._send_json(
+                HTTPStatus.OK, {"ok": True, **web_api_capabilities()}
+            )
+            return
+        if path == "/api/maps":
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "maps": self.server.control_node.public_navigation_maps(),
+                    "navigation": self.server.control_node.navigation_status(),
+                },
+            )
+            return
+        map_preview_match = re.fullmatch(
+            r"/api/maps/(map\d+)/preview/(cloud|voxels|terrain|path)",
+            path,
+        )
+        if map_preview_match:
+            layer = map_preview_match.group(2)
+            try:
+                preview = self.server.control_node.map_preview_layer(
+                    map_preview_match.group(1), layer
+                )
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.CONFLICT, str(exc))
+                return
+            self._send_json(
+                HTTPStatus.OK, {"ok": True, layer: preview}
+            )
+            return
+        map_detail_match = re.fullmatch(r"/api/maps/(map\d+)", path)
+        if map_detail_match:
+            record = self.server.control_node.public_navigation_map(
+                map_detail_match.group(1)
+            )
+            if record is None:
+                self._send_error_json(HTTPStatus.NOT_FOUND, "map not found")
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, "map": record})
+            return
+        download_match = re.fullmatch(
+            r"/api/maps/(map\d+)/download/([a-z_]+)", path
+        )
+        if download_match:
+            try:
+                file_path, content_type = (
+                    self.server.control_node.resolve_map_download(
+                        download_match.group(1), download_match.group(2)
+                    )
+                )
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                return
+            self._send_map_file(file_path, content_type)
             return
         if (
             path in CONTROL_DEFERRED_GET_PATHS
@@ -1579,7 +2058,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/navigation/maps":
             self._send_json(
                 HTTPStatus.OK,
-                {"ok": True, "maps": self.server.control_node.navigation_maps(),
+                {"ok": True,
+                 "maps": self.server.control_node.public_navigation_maps(),
                  "navigation": self.server.control_node.navigation_status()},
             )
             return
@@ -1617,10 +2097,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"ok": True, **result})
             return
 
+        selected_index = self.server.control_node.selected_web_index
         assets = {
-            "/": ("index.html", "text/html; charset=utf-8"),
-            "/index.html": ("index.html", "text/html; charset=utf-8"),
+            "/": (selected_index, "text/html; charset=utf-8"),
+            "/index.html": (selected_index, "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+            "/map_portal.js": (
+                "map_portal.js", "text/javascript; charset=utf-8"
+            ),
+            "/map_portal.css": ("map_portal.css", "text/css; charset=utf-8"),
             "/map_projection.js": (
                 "map_projection.js",
                 "text/javascript; charset=utf-8",
@@ -1664,6 +2149,31 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             return
 
         node = self.server.control_node
+        preview_match = re.fullmatch(r"/api/maps/(map\d+)/preview", path)
+        if preview_match:
+            filtered = payload.get("filtered")
+            if filtered is None:
+                filtered = node.default_map_preview_filtered(
+                    preview_match.group(1)
+                )
+            if not isinstance(filtered, bool):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST, "filtered must be boolean"
+                )
+                return
+            loaded, message = node.load_navigation_preview(
+                preview_match.group(1), filtered
+            )
+            if not loaded:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.OK, {
+                "ok": True,
+                "message": message,
+                "map_id": preview_match.group(1),
+                "map_variant": "filtered" if filtered else "original",
+            })
+            return
         if path == "/api/cmd_vel":
             try:
                 command = parse_velocity(payload, node.limits)
@@ -1775,6 +2285,41 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/api/camera/start":
+            profile = payload.get("profile")
+            if not isinstance(profile, str):
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST,
+                    "camera profile must be a string",
+                )
+                return
+            started, message = node.start_camera(profile)
+            if not started:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.ACCEPTED,
+                {
+                    "ok": True,
+                    "message": message,
+                    "camera": node.camera_status(),
+                },
+            )
+            return
+        if path == "/api/camera/stop":
+            stopped, message = node.stop_camera()
+            if not stopped:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "message": message,
+                    "camera": node.camera_status(),
+                },
+            )
+            return
         if path == "/api/mapping/start":
             started, message = node.start_mapping()
             if not started:
@@ -1879,11 +2424,28 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             })
             return
         if path == "/api/navigation/halt":
-            node.halt_navigation_motion()
+            node.halt_navigation_motion(clear_path=True)
             self._send_json(HTTPStatus.OK, {
                 "ok": True,
-                "message": "navigation motion stopped",
+                "message": "navigation stopped and path cleared; localization retained",
                 "navigation": node.navigation_status(),
+            })
+            return
+        if path == "/api/system/restart":
+            if payload.get("confirm") != "restart_all_services":
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST,
+                    "confirm must be restart_all_services",
+                )
+                return
+            accepted, message = node.request_system_restart()
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "ok": True,
+                "message": message,
+                "reconnect_timeout_seconds": 120,
             })
             return
         if path == "/api/semantic/save":
@@ -1917,6 +2479,7 @@ class WebControlNode(Node):
         self.declare_parameter("max_angular_z", 0.8)
         self.declare_parameter("enable_output", True)
         self.declare_parameter("web_root", "")
+        self.declare_parameter("web_ui_mode", "developer")
         self.declare_parameter("enable_d1_control", False)
         self.declare_parameter("d1_start_script", "")
         self.declare_parameter("d1_stop_script", "")
@@ -1956,6 +2519,30 @@ class WebControlNode(Node):
         )
         self.declare_parameter(
             "imu_level_status_topic", "/sensors/imu/level_calibration_status"
+        )
+        self.declare_parameter("enable_camera_control", True)
+        self.declare_parameter(
+            "camera_profiles", ["d455", "d435i", "hik"]
+        )
+        self.declare_parameter("camera_default_profile", "d455")
+        self.declare_parameter("camera_launch_package", "luxi_adapter")
+        self.declare_parameter(
+            "camera_launch_file", "sensor_bringup.launch.py"
+        )
+        self.declare_parameter("camera_workspace_setup", "")
+        self.declare_parameter("camera_log_path", "")
+        self.declare_parameter(
+            "camera_rmw_implementation", "rmw_fastrtps_cpp"
+        )
+        self.declare_parameter("camera_startup_grace_seconds", 4.0)
+        self.declare_parameter(
+            "camera_color_topic", "/sensors/rgbd/color/image_raw"
+        )
+        self.declare_parameter(
+            "camera_info_topic", "/sensors/rgbd/color/camera_info"
+        )
+        self.declare_parameter(
+            "camera_rgbd_topic", "/sensors/rgbd/rgbd_image"
         )
         self.declare_parameter("enable_mapping_control", True)
         self.declare_parameter("mapping_launch_package", "luxi_rtab_map")
@@ -2028,7 +2615,7 @@ class WebControlNode(Node):
         self.declare_parameter("navigation_icp_minimum_fitness", 0.25)
         self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("max_terrain_points", 12000)
-        self.declare_parameter("navigation_robot_radius", 0.10)
+        self.declare_parameter("navigation_robot_radius", 0.25)
         self.declare_parameter("navigation_costmap_margin", 0.60)
         self.declare_parameter("navigation_ground_normal_radius", 0.30)
         self.declare_parameter("navigation_ground_max_slope_degrees", 35.0)
@@ -2079,8 +2666,19 @@ class WebControlNode(Node):
         if not web_root:
             web_root = str(package_share / "web")
         self.web_root = Path(web_root).resolve()
+        self.bind_address = bind_address
+        self.web_ui_mode = str(self.get_parameter("web_ui_mode").value)
+        if self.web_ui_mode not in {"developer", "map_portal"}:
+            raise ValueError("web_ui_mode must be developer or map_portal")
+        self.selected_web_index = (
+            "index.html" if self.web_ui_mode == "developer"
+            else "map_portal.html"
+        )
+        self._restart_lock = threading.Lock()
+        self._restart_requested = False
 
         workspace_root = package_share.parents[3]
+        self.workspace_root = workspace_root
         d1_start_script = str(self.get_parameter("d1_start_script").value)
         d1_stop_script = str(self.get_parameter("d1_stop_script").value)
         d1_bridge_pid_file = str(
@@ -2165,6 +2763,46 @@ class WebControlNode(Node):
         self._d1_body_height_received_at: Optional[float] = None
         self._d1_controller_future = None
         self._d1_parameter_future = None
+        camera_workspace_setup = str(
+            self.get_parameter("camera_workspace_setup").value
+        )
+        camera_log_path = str(self.get_parameter("camera_log_path").value)
+        self.camera = CameraController(
+            enabled=bool(self.get_parameter("enable_camera_control").value),
+            profiles=tuple(
+                str(profile)
+                for profile in self.get_parameter("camera_profiles").value
+            ),
+            default_profile=str(
+                self.get_parameter("camera_default_profile").value
+            ),
+            package=str(self.get_parameter("camera_launch_package").value),
+            launch_file=str(self.get_parameter("camera_launch_file").value),
+            workspace_setup=Path(
+                camera_workspace_setup
+                or workspace_root / "install/setup.bash"
+            ).resolve(),
+            log_path=Path(
+                camera_log_path
+                or workspace_root / "log/luxi_web_control_camera.log"
+            ).resolve(),
+            rmw_implementation=str(
+                self.get_parameter("camera_rmw_implementation").value
+            ),
+            startup_grace_seconds=float(
+                self.get_parameter("camera_startup_grace_seconds").value
+            ),
+        )
+        self.camera_color_topic = str(
+            self.get_parameter("camera_color_topic").value
+        )
+        self.camera_info_topic = str(
+            self.get_parameter("camera_info_topic").value
+        )
+        self.camera_rgbd_topic = str(
+            self.get_parameter("camera_rgbd_topic").value
+        )
+        self._camera_transition_lock = threading.Lock()
         mapping_sensor_setup = str(
             self.get_parameter("mapping_sensor_setup").value
         )
@@ -2767,6 +3405,10 @@ class WebControlNode(Node):
             raise ValueError("velocity limits must be finite and non-negative")
         if not self.web_root.is_dir():
             raise ValueError(f"web_root is not a directory: {self.web_root}")
+        if not (self.web_root / self.selected_web_index).is_file():
+            raise ValueError(
+                f"selected web page is missing: {self.selected_web_index}"
+            )
 
     def _twist(self, command: VelocityCommand) -> Twist:
         message = Twist()
@@ -3182,6 +3824,12 @@ class WebControlNode(Node):
             self._cloud_frame_id = ""
             self._cloud_received_at = None
 
+    def _clear_rgb_preview(self) -> None:
+        """Discard the last frame when a hardware profile is replaced."""
+        with self._preview_lock:
+            self._rgb_image = None
+            self._rgb_received_at = None
+
     def _clear_navigation_preview(self) -> None:
         with self._navigation_lock:
             self._voxel_points = []
@@ -3473,6 +4121,11 @@ class WebControlNode(Node):
             and command.moving
         ):
             return False, "D1 is not standing with SDK control and bridge ready"
+        navigation = self.navigation_status()
+        if command.moving and (
+            navigation.get("active") or navigation.get("path_ready")
+        ):
+            return False, "navigation task or path is active; halt it first"
         with self._lock:
             if self._estop_active and command.moving:
                 return False, "emergency stop is active"
@@ -3761,6 +4414,93 @@ class WebControlNode(Node):
             },
         }
 
+    def camera_status(self) -> Dict[str, Any]:
+        """Combine managed camera state with observed canonical publishers."""
+        status = self.camera.status()
+        publisher_counts = {
+            "color": self.count_publishers(self.camera_color_topic),
+            "camera_info": self.count_publishers(self.camera_info_topic),
+            "rgbd": self.count_publishers(self.camera_rgbd_topic),
+        }
+        ready = all(count == 1 for count in publisher_counts.values())
+        duplicate = any(count > 1 for count in publisher_counts.values())
+        external = not status["managed"] and any(
+            count > 0 for count in publisher_counts.values()
+        )
+        if external:
+            status["state"] = "external"
+        elif status["managed"] and duplicate:
+            status["state"] = "conflict"
+        elif status["managed"] and ready:
+            status["state"] = "running"
+        elif status["state"] == "running":
+            status["state"] = "waiting"
+        status.update({
+            "ready": ready and status["managed"] and not duplicate,
+            "external": external,
+            "publisher_counts": publisher_counts,
+        })
+        return status
+
+    def start_camera(self, profile: str) -> Tuple[bool, str]:
+        """Stop dependent workloads and start or switch camera profile."""
+        normalized = profile.strip().lower()
+        initial = self.camera.status()
+        available = {record["id"] for record in initial["profiles"]}
+        if not initial["enabled"]:
+            return False, "camera control is disabled"
+        if normalized not in available:
+            return False, f"unsupported camera profile: {profile}"
+        if initial["managed"] and initial["profile"] == normalized:
+            return True, f"camera profile {normalized} is already running"
+        if not self._camera_transition_lock.acquire(blocking=False):
+            return False, "camera transition is already in progress"
+        try:
+            observed = self.camera_status()
+            if observed["external"]:
+                return False, (
+                    "检测到网页之外启动的相机链；请先执行 "
+                    "bash scripts/stop_luxi_system.sh，再只启动网页"
+                )
+            self.stop_motion(force=True)
+            mapping_stopped, mapping_message = self.stop_mapping()
+            if not mapping_stopped:
+                return False, "停止建图失败：" + mapping_message
+            navigation_stopped, navigation_message = self.stop_navigation()
+            if not navigation_stopped:
+                return False, "停止定位失败：" + navigation_message
+            self._clear_rgb_preview()
+            return self.camera.switch(normalized)
+        finally:
+            self._camera_transition_lock.release()
+
+    def stop_camera(self) -> Tuple[bool, str]:
+        """Stop dependent workloads and the web-owned camera process."""
+        initial = self.camera_status()
+        if initial["external"]:
+            return False, (
+                "当前相机不是由网页启动，网页不会终止未知进程；"
+                "请执行 bash scripts/stop_luxi_system.sh"
+            )
+        if not initial["managed"]:
+            return True, "managed camera is already stopped"
+        if not self._camera_transition_lock.acquire(blocking=False):
+            return False, "camera transition is already in progress"
+        try:
+            self.stop_motion(force=True)
+            mapping_stopped, mapping_message = self.stop_mapping()
+            if not mapping_stopped:
+                return False, "停止建图失败：" + mapping_message
+            navigation_stopped, navigation_message = self.stop_navigation()
+            if not navigation_stopped:
+                return False, "停止定位失败：" + navigation_message
+            stopped, message = self.camera.stop()
+            if stopped:
+                self._clear_rgb_preview()
+            return stopped, message
+        finally:
+            self._camera_transition_lock.release()
+
     def start_mapping(self) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
         d1_status = self.d1_control_status()
@@ -3814,6 +4554,157 @@ class WebControlNode(Node):
     def navigation_maps(self) -> list:
         """Discover selectable pairs without exposing arbitrary filesystem paths."""
         return discover_navigation_maps(self.maps_root)
+
+    def public_navigation_maps(self) -> list:
+        """Return the map catalog intended for external pages and API clients."""
+        return public_navigation_maps(
+            self.maps_root, self.semantic_annotation_store.output_root
+        )
+
+    def public_navigation_map(self, map_id: str) -> Optional[dict]:
+        """Return one public map record."""
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            return None
+        return next(
+            (item for item in self.public_navigation_maps()
+             if item["id"] == map_id),
+            None,
+        )
+
+    def default_map_preview_filtered(self, map_id: str) -> bool:
+        """Prefer a saved filtered export when one exists for this map."""
+        record = self.public_navigation_map(map_id)
+        return bool(record and record["filtered_loadable"])
+
+    def map_preview_layer(self, map_id: str, layer: str) -> dict:
+        """Return one cached preview layer through a map-scoped API."""
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            raise ValueError("map_id must use the mapNNN format")
+        readers = {
+            "cloud": self.navigation_cloud_preview,
+            "voxels": self.voxel_preview,
+            "terrain": self.terrain_preview,
+            "path": self.path_preview,
+        }
+        reader = readers.get(layer)
+        if reader is None:
+            raise ValueError(f"unknown preview layer: {layer}")
+        preview = reader()
+        loaded_map_id = preview.get("map_id")
+        if layer == "path":
+            cloud = self.navigation_cloud_preview()
+            voxels = self.voxel_preview()
+            loaded_map_id = cloud.get("map_id") or voxels.get("map_id")
+            preview["map_id"] = loaded_map_id
+        if loaded_map_id != map_id:
+            raise ValueError(
+                f"map {map_id} preview is not loaded; POST its preview API first"
+            )
+        return preview
+
+    def resolve_map_download(
+        self, map_id: str, layer: str
+    ) -> Tuple[Path, str]:
+        """Resolve only named files belonging to a discovered map."""
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            raise ValueError("map_id must use the mapNNN format")
+        record = next(
+            (item for item in self.navigation_maps() if item["id"] == map_id),
+            None,
+        )
+        if record is None:
+            raise ValueError("map not found")
+        if layer in MAP_DOWNLOAD_LAYERS:
+            path_key, content_type = MAP_DOWNLOAD_LAYERS[layer]
+            raw_path = record.get(path_key)
+            if not raw_path or not Path(raw_path).is_file():
+                raise ValueError(f"map layer is unavailable: {layer}")
+            return Path(raw_path), content_type
+        optional_layers = {
+            "annotations": (
+                self.semantic_annotation_store.output_root
+                / map_id / "annotations.json",
+                "application/json; charset=utf-8",
+            ),
+            "hloc_metadata": (
+                self.maps_root / "hloc_maps" / map_id / "metadata.yaml",
+                "application/yaml; charset=utf-8",
+            ),
+        }
+        resolved = optional_layers.get(layer)
+        if resolved is None or not resolved[0].is_file():
+            raise ValueError(f"map layer is unavailable: {layer}")
+        return resolved
+
+    def load_navigation_preview(
+        self, map_id: str, filtered: bool = False
+    ) -> Tuple[bool, str]:
+        """Load browser layers without starting localization or building HLoc."""
+        if not MAP_IDENTIFIER.fullmatch(map_id):
+            return False, "map_id must use the mapNNN format"
+        if not self._navigation_map_operation_lock.acquire(blocking=False):
+            return False, "another map is already being converted or loaded"
+        try:
+            record = next(
+                (item for item in self.navigation_maps() if item["id"] == map_id),
+                None,
+            )
+            if record is None:
+                return False, f"map {map_id} does not exist under {self.maps_root}"
+            if self.mapping_status()["state"] == "running":
+                return False, "stop mapping and save the database before previewing it"
+
+            navigation_process = self.navigation.status()
+            if (
+                navigation_process["state"] == "running"
+                and navigation_process.get("map_id") != map_id
+            ):
+                return False, (
+                    "stop the current localization before previewing a different map"
+                )
+
+            loadable_key = "filtered_loadable" if filtered else "loadable"
+            cloud_key = "filtered_cloud_path" if filtered else "cloud_path"
+            octomap_key = (
+                "filtered_octomap_path" if filtered else "octomap_path"
+            )
+            messages = []
+            if not record[loadable_key] or not record.get(cloud_key):
+                converted, message = self._convert_navigation_map(record, filtered)
+                if not converted:
+                    return False, message
+                messages.append(message)
+                record = next(
+                    (item for item in self.navigation_maps()
+                     if item["id"] == map_id),
+                    None,
+                )
+                if record is None or not record[loadable_key]:
+                    return False, f"map {map_id} has no preview layers"
+
+            if navigation_process["state"] != "running":
+                self._clear_navigation_preview()
+            variant = "filtered" if filtered else "original"
+            errors = [
+                self._load_navigation_cloud(
+                    map_id, record.get(cloud_key), variant
+                ),
+                self._load_navigation_voxels(
+                    map_id, record[octomap_key], variant
+                ),
+                self._load_navigation_terrain(
+                    map_id, record[octomap_key], record.get(cloud_key), variant
+                ),
+            ]
+            errors = [error for error in errors if error]
+            detail = f"map {map_id} {variant} preview loaded"
+            if messages:
+                detail = "; ".join(messages + [detail])
+            if errors:
+                detail += "; some layers failed: " + "; ".join(errors)
+            return True, detail
+        finally:
+            self._navigation_map_operation_lock.release()
 
     def _semantic_map_record(self, map_id: str) -> Dict[str, Any]:
         if not MAP_IDENTIFIER.fullmatch(map_id):
@@ -4115,14 +5006,23 @@ class WebControlNode(Node):
             self._navigation_follower_state = "starting"
         return True, "navigation start command sent"
 
-    def halt_navigation_motion(self) -> None:
-        """Stop path following while leaving localization and the path loaded."""
+    def halt_navigation_motion(self, clear_path: bool = False) -> None:
+        """Stop path following, optionally clearing its path but not localization."""
         message = Bool()
         message.data = True
         self.navigation_stop_publisher.publish(message)
         with self._navigation_lock:
             self._navigation_active = False
             self._navigation_follower_state = "stopped"
+            if clear_path:
+                self._planned_path_points = []
+                self._last_valid_path_points = []
+                self._path_received_at = None
+                self._last_valid_path_received_at = None
+                self._planning_state = (
+                    "map_ready" if self._planner_map_ready else "idle"
+                )
+                self._planning_error = ""
 
     def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
         """Publish a map-frame goal only after HLoc and ICP localization is ready."""
@@ -4302,6 +5202,7 @@ class WebControlNode(Node):
         return {
             "ok": True,
             "node": self.get_name(),
+            "web_ui_mode": self.web_ui_mode,
             "state": state,
             "cmd_vel_topic": self.cmd_vel_topic,
             "http_port": self.http_port,
@@ -4317,10 +5218,54 @@ class WebControlNode(Node):
             "subscriber_count": self.publisher.get_subscription_count(),
             "robot_control": self.d1_control_status(),
             "imu_calibration": self.imu_calibration_status(),
+            "camera": self.camera_status(),
             "mapping": self.mapping_status(),
             "navigation": self.navigation_status(),
             "preview": self.preview_status(),
         }
+
+    def request_system_restart(self) -> Tuple[bool, str]:
+        """Launch an orphaned safe-stop/restart worker for the full system."""
+        restart_script = self.workspace_root / "scripts/restart_luxi_system.sh"
+        if not restart_script.is_file() or not os.access(restart_script, os.X_OK):
+            return False, f"restart script is unavailable: {restart_script}"
+        with self._restart_lock:
+            if self._restart_requested:
+                return False, "system restart is already in progress"
+            self._restart_requested = True
+        self.stop_motion(force=True)
+        restart_log = self.workspace_root / "log/luxi_system_restart.log"
+        restart_log.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            str(restart_script),
+            "--bind-address", self.bind_address,
+            "--http-port", str(self.http_port),
+            "--web-ui-mode", self.web_ui_mode,
+        ]
+        launcher = (
+            'restart_log="$1"; shift; '
+            'nohup setsid "$@" >>"${restart_log}" 2>&1 </dev/null &'
+        )
+        try:
+            subprocess.Popen(
+                [
+                    "/bin/bash", "-c", launcher, "luxi-restart-launcher",
+                    str(restart_log), *command,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as exc:
+            with self._restart_lock:
+                self._restart_requested = False
+            return False, f"failed to launch system restart: {exc}"
+        return True, (
+            "安全重启已启动：将关闭全部 Luxi 服务并重新拉起网页；"
+            "机器人会先停车并趴下"
+        )
 
     def close(self) -> None:
         """Stop the HTTP service and leave the robot with a zero command."""
@@ -4330,6 +5275,7 @@ class WebControlNode(Node):
         try:
             self.stop_mapping()
             self.stop_navigation()
+            self.camera.stop()
             if rclpy.ok():
                 for _ in range(3):
                     self.stop_motion()

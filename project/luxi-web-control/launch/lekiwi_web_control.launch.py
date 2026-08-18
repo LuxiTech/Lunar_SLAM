@@ -43,6 +43,7 @@ def generate_launch_description():
             default_value="/d1/cmd_vel_standard",
         ),
         DeclareLaunchArgument("bind_address", default_value="127.0.0.1"),
+        DeclareLaunchArgument("web_ui_mode", default_value="map_portal"),
         DeclareLaunchArgument("http_port", default_value="8080"),
         DeclareLaunchArgument(
             "config",
@@ -68,6 +69,7 @@ def generate_launch_description():
                         "standard_cmd_vel_topic"
                     ),
                     "bind_address": LaunchConfiguration("bind_address"),
+                    "web_ui_mode": LaunchConfiguration("web_ui_mode"),
                     "http_port": LaunchConfiguration("http_port"),
                     # DDS still uses the D1 domain/network settings below, but
                     # the HTTP UI must remain reachable through every address

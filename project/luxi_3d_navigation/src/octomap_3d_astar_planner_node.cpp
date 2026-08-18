@@ -38,7 +38,7 @@ public:
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<std::string>("semantic_path", "");
     declare_parameter<std::string>("cloud_path", "");
-    declare_parameter<double>("robot_radius", 0.10);
+    declare_parameter<double>("robot_radius", 0.25);
     declare_parameter<double>("robot_height", 0.35);
     declare_parameter<double>("body_reference_height", 0.35);
     declare_parameter<double>("max_step_height", 0.15);

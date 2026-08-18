@@ -6,7 +6,8 @@ D455 mapping profile and verifies the streams consumed by `luxi_adapter`.
 
 Upstream source: <https://github.com/realsenseai/realsense-ros.git>
 
-The selected `848x480@30` color/depth profiles retain the D455 wide RGB field
+The selected `848x480@15` color/depth profiles retain the D455 wide RGB field
 of view after depth-to-color alignment while keeping the RGB-D mapping load
-bounded.  Do not replace the D455 profile with the D435i `640x480` profile.
-
+bounded. The deployed Jetson showed repeated UVC watchdog recovery at 30 Hz;
+15 Hz is advertised by both D455 streams and still supplies the web UI's 10 Hz
+preview. Do not replace the D455 profile with the D435i `640x480` profile.

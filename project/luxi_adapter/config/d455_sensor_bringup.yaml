@@ -27,16 +27,19 @@ luxi_adapter:
     d455_setup: ""
     rmw_implementation: rmw_fastrtps_cpp
     ros_domain_id: 42
-    d455_color_profile: 848,480,30
-    d455_depth_profile: 848,480,30
+    # Keep the D455 wide FOV but halve USB/processing load. On this Jetson the
+    # 30 Hz pair repeatedly triggered UVC watchdog recovery and 1.6-1.8 s depth
+    # gaps; the device explicitly supports both streams at 848x480@15 Hz.
+    d455_color_profile: 848,480,15
+    d455_depth_profile: 848,480,15
     d455_initial_reset: false
     d455_unite_imu_method: 2
 
-    # Provisional replacement-camera transform. Measure camera_x/y/z and yaw
-    # on the final bracket; roll and pitch are solved by stationary calibration.
+    # The front-mounted D455 is measured 0.18 m ahead of the rotation center;
+    # roll and pitch are solved by stationary calibration.
     base_frame: base_link
     camera_frame: camera_link
-    camera_x: 0.14
+    camera_x: 0.18
     camera_y: 0.0
     camera_z: 0.0
     camera_roll: 0.0

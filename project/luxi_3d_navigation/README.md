@@ -54,4 +54,4 @@ ros2 run luxi_3d_navigation terrain_plan_check \
   /absolute/map.bt /absolute/map.ply --dynamic-test
 ```
 
-`config/navigation.yaml` 中当前暂定 `robot_radius=0.10m`、`costmap_margin=0.60m`、`costmap_weight=8.0`，局部法向半径为 0.30 m、地面法向最大倾角为 35°、障碍最小离地高度为 0.15 m。这里的 35° 是允许地图整体倾斜和法向噪声的分割阈值，不是底盘最终可爬坡角；机器人尺寸与运动坡度必须在真机运动前实测。没有确认路径和定位方向前不要发布 `/navigation/start=true`。
+`config/navigation.yaml` 中按实测中心到轮子距离设置 `robot_radius=0.25m`，后缘为 0.15 m，最前端相机为 0.18 m；`costmap_margin=0.60m`、`costmap_weight=8.0`。局部法向半径为 0.30 m、地面法向最大倾角为 35°、障碍最小离地高度为 0.15 m。这里的 35° 是允许地图整体倾斜和法向噪声的分割阈值，不是底盘最终可爬坡角。没有确认路径和定位方向前不要发布 `/navigation/start=true`。

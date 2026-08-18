@@ -85,7 +85,9 @@ ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 
 The D455 profile starts the independently pinned workspace under
 `device/D455/ros2_ws`.  It requires a D455 (`device_type=d455`) and publishes
-aligned color/depth at `848x480@30 Hz`.  Unlike D435i's approximately 69 by 42
+aligned color/depth at `848x480@15 Hz`. This retains the wide image while
+avoiding the UVC watchdog gaps observed at 30 Hz on the deployed Jetson.
+Unlike D435i's approximately 69 by 42
 degree RGB field of view, D455 RGB is approximately 90 by 65 degrees, so
 aligning depth to color no longer crops the useful depth view to the narrow
 D435i RGB image.  The adapter republishes the exact same `/sensors/*` contract;
@@ -98,9 +100,9 @@ source install/setup.bash
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d455
 ```
 
-The configured `camera_x=0.14 m` is provisional because no final D455 bracket
-measurement was supplied.  Measure x/y/z and yaw on the installed bracket;
-stationary web calibration determines only roll and pitch.
+The front-mounted D455 is measured at `camera_x=0.18 m` from the robot rotation
+center. Measure y/z and yaw again if the bracket changes; stationary web
+calibration determines only roll and pitch.
 
 ## Hik stereo + H30 profile
 

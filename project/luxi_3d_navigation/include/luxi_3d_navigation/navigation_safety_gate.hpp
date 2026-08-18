@@ -13,6 +13,10 @@ struct SafetyGateParameters
 {
   double command_timeout{0.20};
   double obstacle_timeout{0.35};
+  // A missing/invalid obstacle layer always stops output immediately.  Only
+  // latch that stop after the fault persists for this long, so a brief USB
+  // camera dropout can recover without requiring navigation to be restarted.
+  double obstacle_hard_stop_latch_delay{0.0};
   double planner_timeout{1.0};
   double localization_timeout{1.5};
   double slow_scale{0.50};
@@ -46,6 +50,7 @@ public:
       healthy_since_ = -1.0;
       recovery_active_ = false;
       localization_fault_started_at_ = -1.0;
+      obstacle_fault_started_at_ = -1.0;
     } else if (!active_) {
       healthy_since_ = -1.0;
     }
@@ -111,7 +116,16 @@ public:
       obstacle_state_ == "slow" || obstacle_state_ == "blocked";
     const bool obstacle_hard_fault = obstacle_stale || !recognized_obstacle_state;
     if (obstacle_hard_fault) {
-      hard_stop_latched_ = true;
+      if (obstacle_fault_started_at_ < 0.0) {
+        obstacle_fault_started_at_ = now_seconds;
+      }
+      if (now_seconds - obstacle_fault_started_at_ >=
+        std::max(0.0, parameters_.obstacle_hard_stop_latch_delay))
+      {
+        hard_stop_latched_ = true;
+      }
+    } else {
+      obstacle_fault_started_at_ = -1.0;
     }
 
     if (monitor_only) {
@@ -125,6 +139,11 @@ public:
     if (hard_stop_latched_) {
       result.state = "hard_stop";
       result.emergency_stop = true;
+      return result;
+    }
+    if (obstacle_hard_fault) {
+      healthy_since_ = -1.0;
+      result.state = obstacle_stale ? "sensor_stale_stop" : "sensor_fault_stop";
       return result;
     }
     if (command_stale) {
@@ -230,6 +249,7 @@ private:
   double planner_time_{};
   double localization_time_{};
   double localization_fault_started_at_{-1.0};
+  double obstacle_fault_started_at_{-1.0};
   double recovery_time_{};
   double last_active_change_{};
   double healthy_since_{-1.0};

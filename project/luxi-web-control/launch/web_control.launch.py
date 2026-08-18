@@ -34,6 +34,7 @@ def generate_launch_description():
         DeclareLaunchArgument("config", default_value=default_config),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),
         DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
+        DeclareLaunchArgument("web_ui_mode", default_value="map_portal"),
         DeclareLaunchArgument("restrict_http_to_d1_lan", default_value="false"),
         DeclareLaunchArgument("http_port", default_value="8080"),
         Node(
@@ -51,6 +52,10 @@ def generate_launch_description():
                     ),
                     "bind_address": ParameterValue(
                         LaunchConfiguration("bind_address"),
+                        value_type=str,
+                    ),
+                    "web_ui_mode": ParameterValue(
+                        LaunchConfiguration("web_ui_mode"),
                         value_type=str,
                     ),
                     "http_port": ParameterValue(

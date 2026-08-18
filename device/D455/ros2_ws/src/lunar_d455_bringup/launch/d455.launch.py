@@ -82,8 +82,8 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         DeclareLaunchArgument("config", default_value=str(default_config)),
-        DeclareLaunchArgument("color_profile", default_value="848,480,30"),
-        DeclareLaunchArgument("depth_profile", default_value="848,480,30"),
+        DeclareLaunchArgument("color_profile", default_value="848,480,15"),
+        DeclareLaunchArgument("depth_profile", default_value="848,480,15"),
         DeclareLaunchArgument("initial_reset", default_value="false"),
         DeclareLaunchArgument("enable_imu", default_value="true"),
         DeclareLaunchArgument("enable_pointcloud", default_value="false"),

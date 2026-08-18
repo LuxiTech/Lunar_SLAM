@@ -2,7 +2,7 @@
 
 This package starts only an Intel RealSense D455 and publishes the vendor
 streams consumed by `luxi_adapter`.  Depth is aligned into the D455 wide-FOV
-RGB optical frame at `848x480@30 Hz`; infrared and point-cloud streams are off
+RGB optical frame at `848x480@15 Hz`; infrared and point-cloud streams are off
 by default to leave USB and CPU headroom for mapping.
 
 ## Build

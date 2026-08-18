@@ -96,9 +96,9 @@ public:
     maximum_depth_ = declare_parameter<double>("maximum_depth", 2.5);
     minimum_obstacle_z_ = declare_parameter<double>("minimum_obstacle_z", -0.32);
     maximum_obstacle_z_ = declare_parameter<double>("maximum_obstacle_z", 0.30);
-    self_filter_x_min_ = declare_parameter<double>("self_filter_x_min", -0.25);
-    self_filter_x_max_ = declare_parameter<double>("self_filter_x_max", 0.20);
-    self_filter_half_width_ = declare_parameter<double>("self_filter_half_width", 0.20);
+    self_filter_x_min_ = declare_parameter<double>("self_filter_x_min", -0.15);
+    self_filter_x_max_ = declare_parameter<double>("self_filter_x_max", 0.18);
+    self_filter_half_width_ = declare_parameter<double>("self_filter_half_width", 0.25);
     corridor_half_width_ = declare_parameter<double>("corridor_half_width", 0.25);
     stop_distance_ = declare_parameter<double>("stop_distance", 0.45);
     slow_distance_ = declare_parameter<double>("slow_distance", 0.70);

@@ -98,6 +98,8 @@ private:
     SafetyGateParameters result;
     result.command_timeout = declare_parameter<double>("command_timeout", 0.20);
     result.obstacle_timeout = declare_parameter<double>("obstacle_timeout", 0.35);
+    result.obstacle_hard_stop_latch_delay =
+      declare_parameter<double>("obstacle_hard_stop_latch_delay", 0.0);
     result.planner_timeout = declare_parameter<double>("planner_timeout", 1.0);
     result.localization_timeout = declare_parameter<double>("localization_timeout", 1.5);
     result.slow_scale = declare_parameter<double>("slow_scale", 0.50);

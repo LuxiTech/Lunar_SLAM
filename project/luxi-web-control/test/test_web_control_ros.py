@@ -54,7 +54,13 @@ def _wait_for(predicate, timeout=2.5):
 
 def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
     source_web = Path(__file__).parents[1] / "web"
-    static_cloud = tmp_path / "map011_cloud.ply"
+    maps_root = tmp_path / "maps"
+    static_cloud = maps_root / "octo_maps/map011_octomap/map011_cloud.ply"
+    static_cloud.parent.mkdir(parents=True)
+    database = maps_root / "rtab_maps/map011.db"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"0123456789abcdef")
+    (static_cloud.parent / "map011.bt").write_bytes(b"octomap")
     static_cloud.write_text(
         "ply\nformat ascii 1.0\nelement vertex 2\n"
         "property float x\nproperty float y\nproperty float z\n"
@@ -71,6 +77,7 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
         Parameter("max_linear_x", value=0.2),
         Parameter("max_angular_z", value=0.5),
         Parameter("web_root", value=str(source_web)),
+        Parameter("maps_root", value=str(maps_root)),
         Parameter("enable_mapping_control", value=False),
         Parameter("enable_preview", value=False),
     ])
@@ -99,6 +106,36 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert response.status == 200
             assert b"unprojectGround" in response.read()
 
+        with urlopen(base_url + "/map_portal.js", timeout=2.0) as response:
+            assert response.status == 200
+            assert b"/api/maps" in response.read()
+
+        with urlopen(base_url + "/api/maps", timeout=2.0) as response:
+            catalog = json.load(response)
+            assert catalog["maps"][0]["id"] == "map011"
+            assert "database_path" not in catalog["maps"][0]
+            assert any(
+                item["layer"] == "database"
+                for item in catalog["maps"][0]["files"]
+            )
+
+        with urlopen(base_url + "/api/capabilities", timeout=2.0) as response:
+            capabilities = json.load(response)
+            assert any(
+                operation["path"] == "/api/maps/{map_id}/preview/cloud"
+                for operation in capabilities["operations"]
+            )
+
+        range_request = Request(
+            base_url + "/api/maps/map011/download/database",
+            headers={"Range": "bytes=4-9"},
+        )
+        with urlopen(range_request, timeout=2.0) as response:
+            assert response.status == 206
+            assert response.headers["Content-Range"] == "bytes 4-9/16"
+            assert response.headers["Accept-Ranges"] == "bytes"
+            assert response.read() == b"456789"
+
         with urlopen(base_url + "/", timeout=2.0) as response:
             page = response.read()
             assert b"semanticSaveButton" in page
@@ -113,6 +150,9 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"robotBatteryState" in page
             assert b"bodyHeight" in page
             assert b"imuCalibrationButton" in page
+            assert b"cameraProfileSelect" in page
+            assert b"cameraStartButton" in page
+            assert b"cameraStopButton" in page
 
         with urlopen(base_url + "/app.js", timeout=2.0) as response:
             assert response.headers["Cache-Control"] == "no-store"
@@ -135,6 +175,8 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b'api("/api/robot/control", {active: requested})' in app
             assert b'api("/api/robot/height", {height: Number(bodyHeightInput.value)})' in app
             assert b'api("/api/imu/calibrate")' in app
+            assert b'"/api/camera/start"' in app
+            assert b'api("/api/camera/stop"' in app
             assert b"controlClientId" in app
             assert b"MATCHES_LOW" in app
 
@@ -143,6 +185,16 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
         try:
             _post(base_url, "/api/imu/calibrate", {})
             assert False, "unavailable IMU calibration must reject requests"
+        except HTTPError as error:
+            assert error.code == 409
+
+        camera = node.status()["camera"]
+        assert [profile["id"] for profile in camera["profiles"]] == [
+            "d455", "d435i", "hik",
+        ]
+        try:
+            _post(base_url, "/api/camera/start", {"profile": "unknown"})
+            assert False, "an unknown camera profile must be rejected"
         except HTTPError as error:
             assert error.code == 409
 
@@ -174,6 +226,11 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert error.code == 404
 
         assert node._load_navigation_cloud("map011", str(static_cloud)) == ""
+        with urlopen(
+            base_url + "/api/maps/map011/preview/cloud", timeout=2.0
+        ) as response:
+            assert response.status == 200
+            assert json.load(response)["cloud"]["map_id"] == "map011"
         with urlopen(base_url + "/api/navigation/cloud", timeout=2.0) as response:
             assert response.status == 200
             saved_cloud = json.load(response)["cloud"]
