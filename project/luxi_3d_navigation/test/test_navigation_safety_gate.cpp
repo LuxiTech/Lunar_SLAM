@@ -234,6 +234,38 @@ TEST(NavigationSafetyGate, RecoveryRotationIsAngularOnlyAndObstacleGated)
   EXPECT_DOUBLE_EQ(gate.evaluate(1.31).command.angular.z, 0.0);
 }
 
+TEST(NavigationSafetyGate, BlockedCorridorPermitsOnlyClearanceCheckedInPlaceTurn)
+{
+  luxi_3d_navigation::SafetyGateParameters parameters;
+  parameters.command_timeout = 1.0;
+  parameters.obstacle_timeout = 1.0;
+  parameters.planner_timeout = 1.0;
+  parameters.localization_timeout = 1.0;
+  parameters.minimum_obstacle_rotation_clearance = 0.30;
+  parameters.maximum_obstacle_recovery_angular_speed = 0.20;
+  luxi_3d_navigation::NavigationSafetyGate gate(parameters);
+  geometry_msgs::msg::Twist rotation;
+  rotation.angular.z = -0.35;
+  gate.setNavigationActive(true, 1.0);
+  gate.updateCommand(rotation, 1.0);
+  gate.updateObstacleState("blocked", 1.0);
+  gate.updateRotationClearance(0.40, 1.0);
+  gate.updatePlannerState("ready", 1.0);
+  gate.updateLocalizationState("tracking", 1.0);
+
+  const auto turning = gate.evaluate(1.1);
+  EXPECT_EQ(turning.state, "obstacle_recovery_spin");
+  EXPECT_DOUBLE_EQ(turning.command.linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(turning.command.angular.z, -0.20);
+
+  gate.updateRotationClearance(0.29, 1.2);
+  EXPECT_EQ(gate.evaluate(1.21).state, "blocked");
+  gate.updateRotationClearance(0.40, 1.3);
+  rotation.linear.x = 0.10;
+  gate.updateCommand(rotation, 1.3);
+  EXPECT_EQ(gate.evaluate(1.31).state, "blocked");
+}
+
 TEST(NavigationSafetyGate, RecoveryRotationCanRestoreStaleLocalization)
 {
   luxi_3d_navigation::SafetyGateParameters parameters;

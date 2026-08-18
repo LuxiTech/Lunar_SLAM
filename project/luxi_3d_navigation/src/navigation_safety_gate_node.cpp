@@ -6,6 +6,7 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/float32.hpp"
 #include "std_msgs/msg/string.hpp"
 
 #include "luxi_3d_navigation/navigation_safety_gate.hpp"
@@ -28,6 +29,8 @@ public:
       "active_topic", "/navigation/active");
     const auto obstacle_topic = declare_parameter<std::string>(
       "obstacle_state_topic", "/navigation/local_obstacles/state");
+    const auto rotation_clearance_topic = declare_parameter<std::string>(
+      "rotation_clearance_topic", "/navigation/local_obstacles/rotation_clearance");
     const auto planner_topic = declare_parameter<std::string>(
       "planner_state_topic", "/navigation/local_replan/status");
     const auto localization_topic = declare_parameter<std::string>(
@@ -62,6 +65,11 @@ public:
       obstacle_topic, rclcpp::QoS(1).reliable().transient_local(),
       [this](const std_msgs::msg::String::SharedPtr message) {
         gate_.updateObstacleState(message->data, steadyNow());
+      });
+    rotation_clearance_sub_ = create_subscription<std_msgs::msg::Float32>(
+      rotation_clearance_topic, 10,
+      [this](const std_msgs::msg::Float32::SharedPtr message) {
+        gate_.updateRotationClearance(message->data, steadyNow());
       });
     planner_sub_ = create_subscription<std_msgs::msg::String>(
       planner_topic, rclcpp::QoS(1).reliable().transient_local(),
@@ -110,6 +118,10 @@ private:
     result.dead_reckoning_scale = declare_parameter<double>("dead_reckoning_scale", 0.50);
     result.maximum_recovery_angular_speed =
       declare_parameter<double>("maximum_recovery_angular_speed", 0.20);
+    result.minimum_obstacle_rotation_clearance =
+      declare_parameter<double>("minimum_obstacle_rotation_clearance", 0.30);
+    result.maximum_obstacle_recovery_angular_speed =
+      declare_parameter<double>("maximum_obstacle_recovery_angular_speed", 0.20);
     return result;
   }
 
@@ -152,6 +164,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr command_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr active_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr obstacle_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr rotation_clearance_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr localization_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr recovery_active_sub_;

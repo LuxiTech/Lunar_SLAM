@@ -66,9 +66,6 @@ public:
     if (elapsed >= parameters_.recovery_timeout) {
       return LocalizationRecoveryAction::kStop;
     }
-    if (health == "verifying") {
-      return LocalizationRecoveryAction::kHold;
-    }
     if (elapsed < parameters_.dead_reckoning_duration) {
       return health == "degraded" || health == "dead_reckoning" ?
         LocalizationRecoveryAction::kDeadReckon : LocalizationRecoveryAction::kHold;

@@ -95,3 +95,61 @@ TEST(PathFollowerControl, SameXYOnAnotherTerrainLevelIsNotTheGoal)
   EXPECT_TRUE(luxi_3d_navigation::pathGoalReached3D(
     1.0, 2.0, 0.95, 0.9, 2.0, 1.0, 2.0, 1.0, 0.12, 0.12));
 }
+
+TEST(TractionBoostController, BoostsAfterNoProgressAndReturnsToNormalAfterMovement)
+{
+  luxi_3d_navigation::TractionBoostParameters parameters;
+  parameters.progress_timeout = 2.0;
+  parameters.progress_distance = 0.04;
+  parameters.boost_timeout = 1.5;
+  luxi_3d_navigation::TractionBoostController controller(parameters);
+
+  EXPECT_EQ(
+    controller.update(true, 0.0, 0.0, 10.0),
+    luxi_3d_navigation::TractionBoostAction::kNormal);
+  EXPECT_EQ(
+    controller.update(true, 0.01, 0.0, 12.0),
+    luxi_3d_navigation::TractionBoostAction::kBoost);
+  EXPECT_EQ(
+    controller.update(true, 0.05, 0.0, 12.2),
+    luxi_3d_navigation::TractionBoostAction::kNormal);
+}
+
+TEST(TractionBoostController, FailsSafelyWhenBoostCannotMoveRobot)
+{
+  luxi_3d_navigation::TractionBoostParameters parameters;
+  parameters.progress_timeout = 1.0;
+  parameters.progress_distance = 0.04;
+  parameters.boost_timeout = 1.0;
+  luxi_3d_navigation::TractionBoostController controller(parameters);
+
+  EXPECT_EQ(
+    controller.update(true, 0.0, 0.0, 20.0),
+    luxi_3d_navigation::TractionBoostAction::kNormal);
+  EXPECT_EQ(
+    controller.update(true, 0.0, 0.0, 21.0),
+    luxi_3d_navigation::TractionBoostAction::kBoost);
+  EXPECT_EQ(
+    controller.update(true, 0.0, 0.0, 22.0),
+    luxi_3d_navigation::TractionBoostAction::kFailed);
+}
+
+TEST(TractionBoostController, NeverBoostsWithoutClearSafetyInputs)
+{
+  luxi_3d_navigation::TractionBoostController controller;
+  EXPECT_EQ(
+    controller.update(true, 0.0, 0.0, 1.0),
+    luxi_3d_navigation::TractionBoostAction::kNormal);
+  EXPECT_EQ(
+    controller.update(false, 0.0, 0.0, 10.0),
+    luxi_3d_navigation::TractionBoostAction::kNormal);
+  EXPECT_EQ(
+    controller.update(true, 0.0, 0.0, 10.1),
+    luxi_3d_navigation::TractionBoostAction::kNormal);
+}
+
+TEST(PathFollowerControl, NormalizesGoalHeadingAcrossPiBoundary)
+{
+  EXPECT_NEAR(
+    luxi_3d_navigation::normalizedAngle(-3.10 - 3.10), 0.083185307, 1e-6);
+}

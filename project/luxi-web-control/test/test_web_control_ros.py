@@ -169,7 +169,12 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert b"path.stale" in app
             assert "规划失败".encode("utf-8") in app
             assert b"nearestTraversableGoal(event)" in app
+            assert b"beginNavigationGoalSelection(event)" in app
+            assert b"updateNavigationGoalDirection(event)" in app
+            assert b"finishNavigationGoalSelection(event, true)" in app
             assert b'api("/api/navigation/goal", goal)' in app
+            assert b'api("/api/navigation/home/set", home)' in app
+            assert b'api("/api/navigation/home/return", {})' in app
             assert b"selectedGoal.x, selectedGoal.y, selectedGoal.z" in app
             assert "地表z=".encode("utf-8") in app
             assert b'api("/api/robot/control", {active: requested})' in app

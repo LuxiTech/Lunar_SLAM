@@ -13,7 +13,9 @@ octomap_3d_astar_planner:
     ground_support_depth_cells: 2
     snap_search_radius_cells: 12
     max_iterations: 500000
-    costmap_margin: 0.60
+    # The model applies this outside the 0.25 m hard robot radius, so the
+    # outer cost boundary is 0.25 + 0.15 = 0.40 m from an obstacle.
+    costmap_margin: 0.15
     costmap_weight: 8.0
     ground_normal_radius: 0.30
     ground_max_slope_degrees: 35.0
@@ -31,7 +33,7 @@ local_path_replanner:
     ground_support_depth_cells: 2
     snap_search_radius_cells: 12
     max_iterations: 500000
-    costmap_margin: 0.60
+    costmap_margin: 0.15
     costmap_weight: 8.0
     ground_normal_radius: 0.30
     ground_max_slope_degrees: 35.0
@@ -94,6 +96,7 @@ local_obstacle_map:
     # More dangerous transitions are immediate; clearing must remain stable.
     state_clear_hold: 0.50
     publish_rate: 10.0
+    rotation_clearance_topic: /navigation/local_obstacles/rotation_clearance
 
 navigation_safety_gate:
   ros__parameters:
@@ -120,6 +123,13 @@ navigation_safety_gate:
     # Recovery is angular-only. A fresh clear/slow rolling obstacle layer is
     # required; a blocked or stale layer still forces zero velocity.
     maximum_recovery_angular_speed: 0.20
+    # A blocked forward corridor may still permit an angular-only turn when
+    # every measured obstacle around the robot stays outside the 0.25 m swept
+    # footprint plus 5 cm. This is intentionally not just a forward-distance
+    # check.
+    rotation_clearance_topic: /navigation/local_obstacles/rotation_clearance
+    minimum_obstacle_rotation_clearance: 0.30
+    maximum_obstacle_recovery_angular_speed: 0.20
     publish_rate: 20.0
 
 terrain_path_follower:
@@ -133,6 +143,7 @@ terrain_path_follower:
     linear_heading_tolerance: 0.35
     lookahead_m: 0.25
     goal_tolerance_m: 0.12
+    goal_yaw_tolerance: 0.15
     # D1 gait does not respond predictably below 0.10 m/s. Keep enough stopping
     # margin even if a smaller runtime tolerance is requested accidentally.
     minimum_safe_goal_tolerance_m: 0.12
@@ -141,7 +152,27 @@ terrain_path_follower:
     # while HLoc searches for a confirmed global match.
     localization_timeout: 2.2
     dead_reckoning_duration: 0.80
-    localization_recovery_timeout: 45.0
-    localization_recovery_angular_speed: 0.20
+    # A verifying/searching localization now rotates in the last commanded
+    # turn direction after the short hold. Keep the recovery bounded.
+    localization_recovery_timeout: 120.0
+    # 0.10 rad/s is about 5.7 deg/s. It gives the image matcher several
+    # overlapping, less blurred views during a full recovery rotation.
+    localization_recovery_angular_speed: 0.10
     localization_recovery_confirmation_time: 1.0
+    replan_after_relocalization_timeout: 15.0
+    replan_request_topic: /navigation/replan_request
     max_path_deviation_m: 0.50
+    # If clear near-field sensing and fresh local odometry show less than 4 cm
+    # progress for 2.5 s, briefly raise speed to overcome a shallow slope or
+    # drivetrain dead zone, then return to the normal 0.10 m/s automatically.
+    odometry_topic: /navigation/odom
+    obstacle_state_topic: /navigation/local_obstacles/state
+    traction_progress_timeout: 2.5
+    traction_progress_distance: 0.04
+    traction_boost_speed: 0.15
+    traction_boost_timeout: 2.0
+    traction_observation_timeout: 0.80
+    # Request an in-place turn when the forward corridor is blocked. The
+    # independent safety gate above decides whether clearance is sufficient.
+    obstacle_recovery_angular_speed: 0.20
+    obstacle_recovery_timeout: 10.0

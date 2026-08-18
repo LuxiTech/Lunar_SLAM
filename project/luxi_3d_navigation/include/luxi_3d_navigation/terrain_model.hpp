@@ -25,7 +25,7 @@ struct TerrainParameters
   bool strict_direct_support{false};
   int snap_radius_cells{12};
   std::size_t max_iterations{500000U};
-  double costmap_margin{0.60};
+  double costmap_margin{0.15};
   double costmap_weight{8.0};
 };
 

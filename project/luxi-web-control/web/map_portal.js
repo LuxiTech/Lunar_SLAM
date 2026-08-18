@@ -33,9 +33,12 @@ const elements = {
   goalX: $("#goalX"),
   goalY: $("#goalY"),
   goalZ: $("#goalZ"),
+  goalYaw: $("#goalYaw"),
   sendGoal: $("#sendGoalButton"),
   startTask: $("#startTaskButton"),
   haltTask: $("#haltTaskButton"),
+  setHome: $("#setHomeButton"),
+  returnHome: $("#returnHomeButton"),
   cameraState: $("#cameraState"),
   cameraProfile: $("#cameraProfileSelect"),
   cameraMessage: $("#cameraMessage"),
@@ -101,6 +104,8 @@ const state = {
   loadedMapId: null,
   goal: null,
   goalMode: false,
+  selectionPurpose: "goal",
+  goalDrag: null,
   view: {...mapProjection.defaultView},
   viewport: null,
   pointer: null,
@@ -404,6 +409,8 @@ function visibleGeometry() {
   if (elements.showObstacles.checked) result.push(...(state.terrain.obstacle_points || []));
   if (elements.showPath.checked) result.push(...(state.path.points || []));
   if (state.goal) result.push([state.goal.x, state.goal.y, state.goal.z]);
+  const home = state.navigation.home;
+  if (home) result.push([home.x, home.y, home.z]);
   const pose = state.navigation.pose;
   if (pose) result.push([pose.x, pose.y, pose.z || 0]);
   return result;
@@ -458,6 +465,24 @@ function mapToScreen(point, viewport = state.viewport) {
     viewport.height / 2 - projected.vertical * viewport.scale,
     projected.depth,
   ];
+}
+
+function canvasGroundPoint(event, groundZ) {
+  if (!state.viewport) return null;
+  const rect = elements.canvas.getBoundingClientRect();
+  const horizontal = (
+    event.clientX - rect.left - state.viewport.width / 2
+  ) / state.viewport.scale;
+  const vertical = (
+    state.viewport.height / 2 - (event.clientY - rect.top)
+  ) / state.viewport.scale;
+  return mapProjection.unprojectGround(
+    horizontal,
+    vertical,
+    [state.viewport.centerX, state.viewport.centerY, state.viewport.centerZ],
+    state.viewport.view,
+    groundZ,
+  );
 }
 
 function drawPointLayer(context, points, color, size = 2) {
@@ -566,6 +591,40 @@ function drawMap() {
     context.moveTo(x, y - 11);
     context.lineTo(x, y + 11);
     context.stroke();
+    const yaw = Number(state.goal.yaw) || 0;
+    const [tipX, tipY] = mapToScreen([
+      state.goal.x + .30 * Math.cos(yaw),
+      state.goal.y + .30 * Math.sin(yaw),
+      state.goal.z,
+    ]);
+    context.beginPath();
+    context.moveTo(x, y);
+    context.lineTo(tipX, tipY);
+    context.stroke();
+  }
+  const home = state.navigation.home;
+  if (home) {
+    const [x, y] = mapToScreen([home.x, home.y, home.z]);
+    context.strokeStyle = "#4db6ff";
+    context.fillStyle = "rgba(77, 182, 255, .22)";
+    context.lineWidth = 2.5;
+    context.beginPath();
+    context.arc(x, y, 8, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+    const yaw = Number(home.yaw) || 0;
+    const [tipX, tipY] = mapToScreen([
+      home.x + .30 * Math.cos(yaw),
+      home.y + .30 * Math.sin(yaw),
+      home.z,
+    ]);
+    context.beginPath();
+    context.moveTo(x, y);
+    context.lineTo(tipX, tipY);
+    context.stroke();
+    context.fillStyle = "#8fd2ff";
+    context.font = "600 12px system-ui, sans-serif";
+    context.fillText("返航点", x + 10, y - 10);
   }
 }
 
@@ -596,22 +655,36 @@ function nearestTerrainGoal(event) {
     }
   }
   if (!best || bestDistance > 32 ** 2) return null;
-  return {x: Number(best[0]), y: Number(best[1]), z: Number(best[2]) || 0};
+  const degrees = Number(elements.goalYaw.value);
+  return {
+    x: Number(best[0]), y: Number(best[1]), z: Number(best[2]) || 0,
+    yaw: Number.isFinite(degrees) ? degrees * Math.PI / 180 : 0,
+  };
 }
 
-function setGoalMode(active) {
+function setGoalMode(active, purpose = "goal") {
   state.goalMode = active;
-  elements.sendGoal.classList.toggle("active", active);
-  elements.sendGoal.textContent = active ? "请在地图点击目标" : "选择并发送目标点";
+  if (active) state.selectionPurpose = purpose;
+  elements.sendGoal.classList.toggle(
+    "active", active && state.selectionPurpose === "goal");
+  elements.setHome.classList.toggle(
+    "active", active && state.selectionPurpose === "home");
+  elements.sendGoal.textContent = active && state.selectionPurpose === "goal"
+    ? "按住目标点并拖动朝向" : "选择并发送目标点";
+  elements.setHome.textContent = active && state.selectionPurpose === "home"
+    ? "按住返航点并拖动朝向" : "在地图设置返航点";
   elements.canvas.classList.toggle("goal-selecting", active);
 }
 
 function setGoal(goal) {
-  state.goal = goal;
-  elements.goalX.value = goal.x.toFixed(2);
-  elements.goalY.value = goal.y.toFixed(2);
-  elements.goalZ.value = goal.z.toFixed(2);
+  const yaw = Number.isFinite(Number(goal.yaw)) ? Number(goal.yaw) : 0;
+  state.goal = {...goal, yaw: Math.atan2(Math.sin(yaw), Math.cos(yaw))};
+  elements.goalX.value = state.goal.x.toFixed(2);
+  elements.goalY.value = state.goal.y.toFixed(2);
+  elements.goalZ.value = state.goal.z.toFixed(2);
+  elements.goalYaw.value = (state.goal.yaw * 180 / Math.PI).toFixed(0);
   scheduleDraw();
+  return state.goal;
 }
 
 function goalFromInputs() {
@@ -619,6 +692,7 @@ function goalFromInputs() {
     x: Number(elements.goalX.value),
     y: Number(elements.goalY.value),
     z: Number(elements.goalZ.value),
+    yaw: Number(elements.goalYaw.value) * Math.PI / 180,
   };
   if (!Object.values(goal).every(Number.isFinite)) {
     throw new Error("请先在地图选择目标，或输入完整的 X/Y/Z 坐标");
@@ -652,8 +726,7 @@ async function startLocalization() {
 
 async function sendNavigationGoal(goal = null) {
   try {
-    const target = goal || goalFromInputs();
-    setGoal(target);
+    const target = setGoal(goal || goalFromInputs());
     await navigationAction(
       () => post("/api/navigation/goal", target),
       "目标点已发送，正在规划路径",
@@ -676,8 +749,76 @@ function chooseGoalOnMap() {
     showToast("请先启动定位并等待精定位完成");
     return;
   }
-  setGoalMode(true);
-  showToast("请在地图可通行区域点击目标点，将自动发送并规划");
+  setGoalMode(true, "goal");
+  showToast("在绿色区域按下确定位置，保持按住并拖动箭头选择方向，松开后提交");
+}
+
+function chooseHomeOnMap() {
+  if (state.goalMode) {
+    setGoalMode(false);
+    return;
+  }
+  if (!state.loadedMapId || !hasGeometry()) {
+    showToast("请先加载地图预览");
+    return;
+  }
+  setGoalMode(true, "home");
+  showToast("在绿色区域按下设置返航位置，拖动箭头选择返航到达方向");
+}
+
+async function setNavigationHome(home) {
+  try {
+    const result = await post("/api/navigation/home/set", home);
+    updateNavigation(result.navigation || state.navigation);
+    state.goal = null;
+    showToast("返航点已保存；蓝色标记为一键返航目标");
+    scheduleDraw();
+  } catch (error) {
+    showToast(`设置返航点失败：${error.message}`);
+  }
+}
+
+async function returnNavigationHome() {
+  stopManualControl();
+  state.path = {};
+  scheduleDraw();
+  await navigationAction(
+    () => post("/api/navigation/home/return"),
+    "已停止其他导航，正在规划返航路径；规划成功后自动出发",
+  );
+  await refreshGeometry(false);
+}
+
+function updateGoalDirection(event) {
+  if (!state.goalDrag || state.goalDrag.id !== event.pointerId || !state.goal) {
+    return false;
+  }
+  const point = canvasGroundPoint(event, state.goal.z);
+  if (!point) return true;
+  const dx = point.x - state.goal.x;
+  const dy = point.y - state.goal.y;
+  if (Math.hypot(dx, dy) >= 0.02) {
+    state.goal.yaw = Math.atan2(dy, dx);
+    elements.goalYaw.value = (state.goal.yaw * 180 / Math.PI).toFixed(0);
+    scheduleDraw();
+  }
+  event.preventDefault();
+  return true;
+}
+
+function finishGoalGesture(event, submit) {
+  if (!state.goalDrag || state.goalDrag.id !== event.pointerId) return false;
+  if (elements.canvas.hasPointerCapture?.(event.pointerId)) {
+    elements.canvas.releasePointerCapture(event.pointerId);
+  }
+  state.goalDrag = null;
+  const purpose = state.selectionPurpose;
+  setGoalMode(false);
+  if (submit && state.goal) {
+    if (purpose === "home") setNavigationHome(state.goal);
+    else sendNavigationGoal(state.goal);
+  }
+  return true;
 }
 
 function navigationStageLabel(navigation) {
@@ -691,7 +832,11 @@ function navigationStageLabel(navigation) {
 }
 
 function updateNavigation(navigation) {
+  const wasActive = Boolean(state.navigation.active);
   state.navigation = navigation || {};
+  if (wasActive && !state.navigation.active) {
+    state.path = {};
+  }
   const stage = navigationStageLabel(state.navigation);
   const active = state.navigation.state === "running" || state.navigation.localization_stage === "localized";
   elements.navigationState.textContent = stage;
@@ -700,11 +845,22 @@ function updateNavigation(navigation) {
   const poseText = pose
     ? `${Number(pose.x).toFixed(2)}, ${Number(pose.y).toFixed(2)}, ${Number(pose.z || 0).toFixed(2)}`
     : "--";
+  const followerLabels = {
+    traction_boost: "短时增力中",
+    aligning_goal_heading: "对准到达方向",
+    stuck_no_progress: "增力无效，已停车",
+    localization_recovery_spin: "单向旋转恢复定位",
+    replanning_after_relocalization: "定位恢复，正在重规划",
+    replan_after_relocalization_timeout: "恢复后重规划超时，已停车",
+    obstacle_recovery_spin: "前方受阻，安全原地转向",
+    obstacle_recovery_timeout: "转向未脱困，已停车",
+  };
   elements.liveDetails.innerHTML = [
     ["定位阶段", stage],
     ["机器人位置", poseText],
     ["规划状态", state.navigation.planning_state || "--"],
-    ["跟随状态", state.navigation.follower_state || "--"],
+    ["跟随状态", followerLabels[state.navigation.follower_state]
+      || state.navigation.follower_state || "--"],
   ].map(([name, value]) => `<div><dt>${name}</dt><dd>${value}</dd></div>`).join("");
   if (state.navigation.planning_error) {
     setMessage(elements.navigationMessage, state.navigation.planning_error, "error");
@@ -717,6 +873,9 @@ function updateNavigation(navigation) {
   elements.haltTask.disabled = !state.navigation.active && !state.navigation.path_ready;
   elements.startTask.disabled = Boolean(state.navigation.active) || !state.navigation.path_ready;
   elements.sendGoal.disabled = state.navigation.state !== "running";
+  elements.setHome.disabled = !state.loadedMapId || !hasGeometry();
+  elements.returnHome.disabled = state.navigation.state !== "running"
+    || !state.navigation.home || !state.navigation.planning_localization_ready;
   updateManualAvailability();
   scheduleDraw();
 }
@@ -736,6 +895,7 @@ async function haltNavigationTask() {
   elements.goalX.value = "";
   elements.goalY.value = "";
   elements.goalZ.value = "";
+  elements.goalYaw.value = "0";
   setGoalMode(false);
   scheduleDraw();
   await navigationAction(
@@ -1211,9 +1371,11 @@ elements.stopLocalization.addEventListener("click", () => navigationAction(
   () => post("/api/navigation/stop"), "定位已停止",
 ));
 elements.sendGoal.addEventListener("click", chooseGoalOnMap);
+elements.setHome.addEventListener("click", chooseHomeOnMap);
+elements.returnHome.addEventListener("click", returnNavigationHome);
 elements.startTask.addEventListener("click", startNavigationTask);
 elements.haltTask.addEventListener("click", haltNavigationTask);
-for (const input of [elements.goalX, elements.goalY, elements.goalZ]) {
+for (const input of [elements.goalX, elements.goalY, elements.goalZ, elements.goalYaw]) {
   input.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
@@ -1242,14 +1404,16 @@ elements.canvas.addEventListener("wheel", (event) => {
 elements.canvas.addEventListener("pointerdown", (event) => {
   if (!state.viewport) return;
   if (state.goalMode) {
+    if (state.goalDrag) return;
     const goal = nearestTerrainGoal(event);
     if (!goal) {
       showToast("该位置附近没有可通行地面，请点击绿色区域");
       return;
     }
     setGoal(goal);
-    setGoalMode(false);
-    sendNavigationGoal(goal);
+    state.goalDrag = {id: event.pointerId};
+    elements.canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
     return;
   }
   elements.canvas.setPointerCapture(event.pointerId);
@@ -1264,6 +1428,7 @@ elements.canvas.addEventListener("pointerdown", (event) => {
 });
 
 elements.canvas.addEventListener("pointermove", (event) => {
+  if (updateGoalDirection(event)) return;
   if (!state.pointer || state.pointer.id !== event.pointerId) return;
   state.view.yaw = state.pointer.yaw + (event.clientX - state.pointer.startX) * .012;
   state.view.pitch = Math.max(
@@ -1274,12 +1439,14 @@ elements.canvas.addEventListener("pointermove", (event) => {
 });
 
 elements.canvas.addEventListener("pointerup", (event) => {
+  if (finishGoalGesture(event, true)) return;
   if (!state.pointer || state.pointer.id !== event.pointerId) return;
   state.pointer = null;
   elements.canvas.classList.remove("dragging");
 });
 
-elements.canvas.addEventListener("pointercancel", () => {
+elements.canvas.addEventListener("pointercancel", (event) => {
+  if (finishGoalGesture(event, false)) return;
   state.pointer = null;
   elements.canvas.classList.remove("dragging");
 });

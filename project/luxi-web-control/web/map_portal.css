@@ -287,7 +287,7 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .button-row { display: flex; gap: 8px; margin-top: 12px; }
 .button-row button { flex: 1; }
 .button-row.three { display: grid; grid-template-columns: repeat(3, 1fr); }
-.goal-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 16px; }
+.goal-fields { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 16px; }
 .goal-fields label { color: var(--muted); font-size: 10px; }
 .goal-fields input { margin-top: 5px; }
 .field-help { margin: 7px 0 0; color: var(--muted); font-size: 10px; }

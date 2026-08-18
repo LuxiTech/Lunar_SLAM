@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
+#include <stdexcept>
 
 namespace luxi_3d_navigation
 {
@@ -25,6 +27,91 @@ struct PathFollowerCommand
   double linear_x{0.0};
   double angular_z{0.0};
 };
+
+enum class TractionBoostAction
+{
+  kNormal,
+  kBoost,
+  kFailed,
+};
+
+struct TractionBoostParameters
+{
+  double progress_timeout{2.5};
+  double progress_distance{0.04};
+  double boost_timeout{2.0};
+};
+
+// Detects a commanded-but-stationary robot from local odometry.  The caller
+// remains responsible for allowing a boost only while localization and the
+// near-field obstacle layer are healthy.
+class TractionBoostController
+{
+public:
+  explicit TractionBoostController(TractionBoostParameters parameters = {})
+  : parameters_(parameters)
+  {
+    if (parameters_.progress_timeout <= 0.0 || parameters_.progress_distance <= 0.0 ||
+      parameters_.boost_timeout <= 0.0)
+    {
+      throw std::invalid_argument("traction boost parameters are invalid");
+    }
+  }
+
+  TractionBoostAction update(
+    const bool eligible, const double x, const double y, const double now_seconds)
+  {
+    if (!eligible || !std::isfinite(x) || !std::isfinite(y) ||
+      !std::isfinite(now_seconds))
+    {
+      reset();
+      return TractionBoostAction::kNormal;
+    }
+    if (!anchor_time_.has_value()) {
+      anchor_x_ = x;
+      anchor_y_ = y;
+      anchor_time_ = now_seconds;
+      return TractionBoostAction::kNormal;
+    }
+    if (std::hypot(x - anchor_x_, y - anchor_y_) >= parameters_.progress_distance) {
+      reset();
+      anchor_x_ = x;
+      anchor_y_ = y;
+      anchor_time_ = now_seconds;
+      return TractionBoostAction::kNormal;
+    }
+    if (boost_started_at_.has_value()) {
+      if (now_seconds - *boost_started_at_ >= parameters_.boost_timeout) {
+        reset();
+        return TractionBoostAction::kFailed;
+      }
+      return TractionBoostAction::kBoost;
+    }
+    if (now_seconds - *anchor_time_ >= parameters_.progress_timeout) {
+      boost_started_at_ = now_seconds;
+      return TractionBoostAction::kBoost;
+    }
+    return TractionBoostAction::kNormal;
+  }
+
+  void reset()
+  {
+    anchor_time_.reset();
+    boost_started_at_.reset();
+  }
+
+private:
+  TractionBoostParameters parameters_;
+  double anchor_x_{0.0};
+  double anchor_y_{0.0};
+  std::optional<double> anchor_time_;
+  std::optional<double> boost_started_at_;
+};
+
+inline double normalizedAngle(const double angle)
+{
+  return std::atan2(std::sin(angle), std::cos(angle));
+}
 
 inline double updatedTurnDirection(
   const double heading_error, const double previous_direction,

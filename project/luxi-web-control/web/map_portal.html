@@ -113,12 +113,17 @@
             <label>X<input id="goalX" type="number" step="0.01" placeholder="0.00"></label>
             <label>Y<input id="goalY" type="number" step="0.01" placeholder="0.00"></label>
             <label>Z<input id="goalZ" type="number" step="0.01" placeholder="0.00"></label>
+            <label>到达方向 (°)<input id="goalYaw" type="number" min="-180" max="180" step="1" value="0"></label>
           </div>
-          <p class="field-help">点击“选择并发送目标点”后，在地图可通行区域单击即可立即规划；也可输入坐标后按 Enter。</p>
+          <p class="field-help">RViz 式选点：在绿色区域按下确定位置，保持按住并拖动箭头选择方向，松开后提交。也可输入完整坐标和方向后按 Enter。</p>
           <div class="button-row three">
             <button id="sendGoalButton" class="secondary">选择并发送目标点</button>
             <button id="startTaskButton" class="primary">开始行驶</button>
             <button id="haltTaskButton" class="danger">停止任务</button>
+          </div>
+          <div class="button-row">
+            <button id="setHomeButton" class="secondary">在地图设置返航点</button>
+            <button id="returnHomeButton" class="primary">一键返回起点</button>
           </div>
         </section>
 
@@ -243,7 +248,7 @@
           <div class="endpoint"><code>POST /api/robot/control</code><span>机器人控制开关，JSON：<b>{"active":true}</b></span></div>
           <div class="endpoint"><code>POST /api/imu/calibrate</code><span>机器人开启并静止后，开始 IMU 水平校准</span></div>
           <div class="endpoint"><code>POST /api/navigation/localize</code><span>启动定位，JSON：<b>{"map_id":"map037"}</b></span></div>
-          <div class="endpoint"><code>POST /api/navigation/goal</code><span>发送目标，JSON：<b>{"x":1.2,"y":0.8,"z":0}</b></span></div>
+          <div class="endpoint"><code>POST /api/navigation/goal</code><span>发送目标，yaw 使用弧度：<b>{"x":1.2,"y":0.8,"z":0,"yaw":1.57}</b></span></div>
           <div class="endpoint"><code>POST /api/navigation/start</code><span>开始执行已规划路径</span></div>
           <div class="endpoint"><code>POST /api/navigation/halt</code><span>停止任务并清空旧路径，继续保持定位</span></div>
           <div class="endpoint"><code>POST /api/cmd_vel</code><span>WASD/轮盘速度控制，支持 <b>linear_x</b>、<b>angular_z</b> 和 <b>client_id</b></span></div>

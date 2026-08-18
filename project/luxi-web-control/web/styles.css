@@ -103,8 +103,9 @@ h2 { margin-top: 3px; font-size: 1.15rem; }
 .navigation-note { margin: 10px 0 0; }
 .navigation-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto auto; gap: 8px; align-items: end; }
 .navigation-actions label { display: grid; gap: 5px; color: var(--muted); font-size: .68rem; }
-.navigation-actions select, .navigation-actions button { min-height: 38px; border: 1px solid var(--border); border-radius: 9px; font-size: .74rem; }
+.navigation-actions select, .navigation-actions input, .navigation-actions button { min-height: 38px; border: 1px solid var(--border); border-radius: 9px; font-size: .74rem; }
 .navigation-actions select { width: 100%; padding: 0 9px; background: #0d121a; color: var(--text); }
+.navigation-actions input { width: 84px; padding: 0 9px; background: #0d121a; color: var(--text); }
 .navigation-actions button { padding: 0 12px; cursor: pointer; font-weight: 800; }
 .navigation-actions button:disabled { cursor: not-allowed; opacity: .45; }
 .goal-select { background: #182a40; color: var(--text); }

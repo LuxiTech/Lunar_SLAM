@@ -29,7 +29,7 @@ from pathlib import Path
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Path as NavigationPath
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 
 from luxi_web_control.web_control_node import discover_navigation_maps
 from luxi_web_control.web_control_node import D1ControlManager
@@ -1021,6 +1021,14 @@ def test_map_portal_is_the_configured_public_ui():
     assert page.index('class="panel robot-panel"') < page.index('class="panel status-panel"')
     assert page.index('class="panel status-panel"') < page.index('class="panel imu-panel"')
     assert 'post("/api/navigation/goal", target)' in app
+    assert 'post("/api/navigation/home/set", home)' in app
+    assert 'post("/api/navigation/home/return")' in app
+    assert 'id="setHomeButton"' in page
+    assert 'id="returnHomeButton"' in page
+    assert "updateGoalDirection(event)" in app
+    assert "finishGoalGesture(event, true)" in app
+    assert "mapProjection.unprojectGround" in app
+    assert "按住并拖动箭头选择方向" in page
     assert 'post("/api/navigation/start")' in app
     assert 'post("/api/navigation/halt")' in app
     assert 'post("/api/cmd_vel", {...command, client_id: controlClientId})' in app
@@ -1029,7 +1037,7 @@ def test_map_portal_is_the_configured_public_ui():
     assert 'manualKeyActions' in app
     assert 'elements.joystickPad.addEventListener("pointerdown"' in app
     assert 'elements.sendGoal.addEventListener("click", chooseGoalOnMap)' in app
-    assert 'sendNavigationGoal(goal)' in app
+    assert 'sendNavigationGoal(state.goal)' in app
     assert 'latestFiltered?.id' in app
     assert 'setMapLoading(true, `正在加载 ${record.id}' in app
     assert 'setMapLoading(true, "地图数据已准备，正在加载三维图层…")' in app
@@ -1068,6 +1076,8 @@ def test_web_api_capabilities_cover_all_map_and_control_actions():
     assert ("POST", "/api/maps/{map_id}/preview") in operations
     assert ("GET", "/api/maps/{map_id}/download/{layer}") in operations
     assert ("POST", "/api/navigation/goal") in operations
+    assert ("POST", "/api/navigation/home/set") in operations
+    assert ("POST", "/api/navigation/home/return") in operations
     assert ("POST", "/api/navigation/start") in operations
     assert ("POST", "/api/navigation/halt") in operations
     assert ("POST", "/api/cmd_vel") in operations
@@ -1240,11 +1250,19 @@ def test_terrain_pose_callback_keeps_the_ground_constrained_height():
 ])
 def test_navigation_goal_accepts_finite_coordinates(payload):
     assert parse_navigation_goal(payload) == (
-        float(payload["x"]), float(payload["y"]), float(payload.get("z", 0.0)))
+        float(payload["x"]), float(payload["y"]),
+        float(payload.get("z", 0.0)), float(payload.get("yaw", 0.0)))
+
+
+def test_navigation_goal_normalizes_final_heading():
+    parsed = parse_navigation_goal({"x": 0, "y": 0, "yaw": 3 * math.pi})
+    assert parsed[:3] == (0.0, 0.0, 0.0)
+    assert math.isclose(abs(parsed[3]), math.pi)
 
 
 @pytest.mark.parametrize("payload", [
     {"x": True, "y": 0}, {"x": math.nan, "y": 0}, {"x": 0, "y": "bad"},
+    {"x": 0, "y": 0, "yaw": math.inf},
 ])
 def test_navigation_goal_rejects_invalid_coordinates(payload):
     with pytest.raises(ValueError):
@@ -1321,6 +1339,90 @@ def test_navigation_halt_clears_paths_but_retains_localization():
     assert node._refined_localization_pose == {"x": 2.0, "y": 3.0}
 
 
+def test_navigation_active_transition_clears_finished_task_path():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._navigation_active = True
+    node._planned_path_points = [(0.0, 0.0, 0.0)]
+    node._last_valid_path_points = list(node._planned_path_points)
+    node._path_received_at = 1.0
+    node._last_valid_path_received_at = 1.0
+    node._return_home_pending = True
+
+    message = Bool()
+    message.data = False
+    node._on_navigation_active(message)
+
+    assert node._planned_path_points == []
+    assert node._last_valid_path_points == []
+    assert node._return_home_pending is False
+
+
+def test_navigation_home_is_map_scoped_and_return_cancels_other_motion():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._navigation_cloud_map_id = "map039"
+    node._terrain_map_id = "map039"
+    node._navigation_homes = {}
+    accepted, _message = node.set_navigation_home(1.0, -0.5, 0.1, 0.4)
+    assert accepted
+    assert node._navigation_homes["map039"]["x"] == 1.0
+
+    calls = []
+    node.navigation_status = lambda: {"map_id": "map039"}
+    node.stop_motion = lambda force=True: calls.append(("stop", force))
+    node.set_navigation_goal = lambda *args, **kwargs: (
+        calls.append((args, kwargs)) or (True, "sent")
+    )
+    accepted, _message = node.return_navigation_home()
+
+    assert accepted
+    assert calls[0] == ("stop", True)
+    assert calls[1][1]["auto_start"] is True
+
+
+def test_return_home_path_auto_starts_after_planning():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_lock = threading.Lock()
+    node._planned_path_points = []
+    node._last_valid_path_points = []
+    node._path_frame_id = "map"
+    node._last_valid_path_frame_id = "map"
+    node._path_received_at = None
+    node._last_valid_path_received_at = None
+    node._planning_state = "pending"
+    node._planning_error = ""
+    node._navigation_follower_state = "plan_ready"
+    node._return_home_pending = True
+    starts = []
+    node.start_navigation_motion = lambda: (
+        starts.append(True) or (True, "started")
+    )
+    path = NavigationPath()
+    path.poses.append(PoseStamped())
+
+    node._on_navigation_path(path)
+
+    assert starts == [True]
+    assert node._return_home_pending is False
+
+
+def test_relocalization_replans_at_slower_rotation_speed():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi_3d_navigation/config/navigation.yaml")
+        .read_text(encoding="utf-8")
+    )
+    follower = config["terrain_path_follower"]["ros__parameters"]
+    assert follower["localization_recovery_angular_speed"] == 0.10
+    assert follower["replan_request_topic"] == "/navigation/replan_request"
+    source = (
+        WORKSPACE_ROOT / "project/luxi_3d_navigation/src/"
+        "terrain_path_follower_node.cpp"
+    ).read_text(encoding="utf-8")
+    assert "requestReplanAfterRelocalization" in source
+    assert "replanning_after_relocalization" in source
+
+
 @pytest.mark.parametrize(
     ("navigation_active", "path_ready"),
     [(True, False), (False, True)],
@@ -1342,7 +1444,7 @@ def test_manual_velocity_is_rejected_until_navigation_is_halted(
     assert "halt it first" in message
 
 
-def test_failed_replan_keeps_only_a_stale_preview():
+def test_failed_replan_removes_old_preview():
     node = WebControlNode.__new__(WebControlNode)
     node._navigation_lock = threading.Lock()
     node._planned_path_points = []
@@ -1353,6 +1455,7 @@ def test_failed_replan_keeps_only_a_stale_preview():
     node._last_valid_path_received_at = None
     node._planning_state = "pending"
     node._planning_error = ""
+    node._navigation_follower_state = "plan_ready"
 
     valid_path = NavigationPath()
     valid_path.header.frame_id = "map"
@@ -1369,9 +1472,9 @@ def test_failed_replan_keeps_only_a_stale_preview():
 
     preview = node.path_preview()
     assert preview["valid"] is False
-    assert preview["stale"] is True
+    assert preview["stale"] is False
     assert preview["active_point_count"] == 0
-    assert preview["points"] == [(1.0, 0.0, 0.0)]
+    assert preview["points"] == []
     assert preview["planning_state"] == "failed"
     assert "可通行地形" in preview["error"]
 

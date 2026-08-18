@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 #include "geometry_msgs/msg/twist.hpp"
@@ -25,6 +26,8 @@ struct SafetyGateParameters
   double dead_reckoning_duration{0.80};
   double dead_reckoning_scale{0.50};
   double maximum_recovery_angular_speed{0.20};
+  double minimum_obstacle_rotation_clearance{0.30};
+  double maximum_obstacle_recovery_angular_speed{0.20};
 };
 
 struct SafetyGateResult
@@ -70,6 +73,13 @@ public:
     obstacle_state_ = state;
     obstacle_time_ = now_seconds;
     have_obstacle_state_ = true;
+  }
+
+  void updateRotationClearance(double distance, double now_seconds)
+  {
+    rotation_clearance_ = distance;
+    rotation_clearance_time_ = now_seconds;
+    have_rotation_clearance_ = std::isfinite(distance);
   }
 
   void updatePlannerState(const std::string & state, double now_seconds)
@@ -197,6 +207,27 @@ public:
       return result;
     }
     const bool planner_ready = planner_state_ == "clear" || planner_state_ == "ready";
+    const bool rotation_clearance_fresh = have_rotation_clearance_ &&
+      now_seconds - rotation_clearance_time_ <= parameters_.obstacle_timeout;
+    const bool angular_only_command =
+      std::abs(command_.linear.x) <= 1.0e-6 &&
+      std::abs(command_.linear.y) <= 1.0e-6 &&
+      std::abs(command_.angular.z) > 1.0e-6;
+    if (obstacle_state_ == "blocked" && planner_ready && rotation_clearance_fresh &&
+      rotation_clearance_ >= parameters_.minimum_obstacle_rotation_clearance &&
+      angular_only_command)
+    {
+      // The forward corridor is blocked, but every measured collision-height
+      // point is outside the full rotation envelope. Permit a bounded in-place
+      // turn only; translation remains prohibited and stale depth still fails closed.
+      healthy_since_ = -1.0;
+      result.command.angular.z = std::clamp(
+        command_.angular.z,
+        -parameters_.maximum_obstacle_recovery_angular_speed,
+        parameters_.maximum_obstacle_recovery_angular_speed);
+      result.state = "obstacle_recovery_spin";
+      return result;
+    }
     const bool blocked = obstacle_state_ == "blocked" || !planner_ready;
     if (blocked) {
       healthy_since_ = -1.0;
@@ -241,11 +272,14 @@ private:
   bool active_{false};
   bool have_command_{false};
   bool have_obstacle_state_{false};
+  bool have_rotation_clearance_{false};
   bool have_planner_state_{false};
   bool have_localization_state_{false};
   bool hard_stop_latched_{false};
   double command_time_{};
   double obstacle_time_{};
+  double rotation_clearance_time_{};
+  double rotation_clearance_{std::numeric_limits<double>::infinity()};
   double planner_time_{};
   double localization_time_{};
   double localization_fault_started_at_{-1.0};

@@ -36,7 +36,7 @@ TEST(LocalizationRecoveryController, DeadReckonsThenRequestsBoundedRotation)
     luxi_3d_navigation::LocalizationRecoveryAction::kStop);
 }
 
-TEST(LocalizationRecoveryController, HoldsStillWhileVerifyingAndBeforeResume)
+TEST(LocalizationRecoveryController, RotatesWhileVerifyingThenHoldsBeforeResume)
 {
   luxi_3d_navigation::LocalizationRecoveryParameters parameters;
   parameters.healthy_confirmation_time = 1.0;
@@ -50,7 +50,7 @@ TEST(LocalizationRecoveryController, HoldsStillWhileVerifyingAndBeforeResume)
     luxi_3d_navigation::LocalizationRecoveryAction::kRotate);
   EXPECT_EQ(
     controller.update("verifying", 11.1),
-    luxi_3d_navigation::LocalizationRecoveryAction::kHold);
+    luxi_3d_navigation::LocalizationRecoveryAction::kRotate);
   EXPECT_EQ(
     controller.update("tracking", 12.0),
     luxi_3d_navigation::LocalizationRecoveryAction::kHold);

@@ -10,43 +10,6 @@
 同一服务进程只会将其中一套页面挂载到 `/`，通过启动参数选择。地图 API 在两种模式
 下保持一致，外部网页或程序可以直接订阅和调用。
 
-## 1. 进入正确目录
-
-不要混用宿主机路径和容器路径。
-
-- 在宿主机终端中，工程目录是：
-
-  ```bash
-  cd /home/lunar/project/lunar_slam
-  ```
-
-- 如果终端提示符类似 `lunar@lunar_slam:/workspace/lunar_slam$`，说明当前位于容器内，
-  应使用：
-
-  ```bash
-  cd /workspace/lunar_slam
-  ```
-
-后续命令都必须在同一个工程根目录执行。先确认目录和安装文件：
-
-```bash
-pwd
-test -d project -a -d scripts || echo "当前不是 lunar_slam 工程根目录"
-test -f install/setup.bash || echo "当前工作区尚未构建"
-```
-
-如果出现 `install/setup.bash: No such file or directory`，就在当前目录先构建项目：
-
-```bash
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install --packages-select \
-  luxi_adapter luxi_visual_frontend luxi_rtab_map \
-  luxi_3d_navigation luxi_web_control slam_d1_bridge
-```
-
-D455 首次使用时还必须先按照
-[`device/D455/ros2_ws/src/lunar_d455_bringup/README.md`](../../device/D455/ros2_ws/src/lunar_d455_bringup/README.md)
-构建 D455 官方 SDK 和驱动工作区。
 
 ## 2. 关闭所有旧进程
 
@@ -124,7 +87,10 @@ ros2 launch luxi_web_control lekiwi_web_control.launch.py \
 显式指定 `filtered` 的预览 API 都默认使用过滤版。地图沿用开发者页面的三维轨道视图：
 拖动改变 yaw/pitch、滚轮缩放；进入“选择目标”模式后点击可通行面选择导航目标。
 
-导航区的“选择并发送目标点”会进入地图选点状态，单击可通行面后立即发送并规划。
+导航区点击“选择并发送目标点”后，采用与 RViz 相同的手势：在可通行面按下确定
+目标位置，保持按住并拖动箭头确定朝向，松开后同时发送位置和方向。角度输入框仍可
+用于精确调整（0° 指向地图 +X，90° 指向 +Y）。
+到达位置后，机器人会原地对准该方向，方向误差小于配置阈值后才报告导航结束。
 “停止任务”只停止跟随并清除当前和缓存路径，定位进程会继续运行；路径清空后可以用
 WASD 或页面轮盘临时手动控制，松开即停车，再次选点即可开始下一次任务。
 
@@ -155,7 +121,9 @@ GET  /api/maps/map037/download/hloc_metadata
 
 ```text
 POST /api/navigation/localize       {"map_id": "map037"}
-POST /api/navigation/goal           {"x": 1.2, "y": 0.8, "z": 0.0}
+POST /api/navigation/goal           {"x": 1.2, "y": 0.8, "z": 0.0, "yaw": 1.57}
+POST /api/navigation/home/set       {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+POST /api/navigation/home/return    {}
 POST /api/navigation/start          {}
 POST /api/navigation/halt           {}
 POST /api/navigation/stop           {}
@@ -163,6 +131,10 @@ POST /api/system/restart            {"confirm": "restart_all_services"}
 GET  /api/status
 GET  /api/navigation/path
 ```
+
+返航点与当前地图绑定，由网页服务端统一保存，因此不同手机或电脑看到的是同一个返航
+点。“一键返回起点”会取消手动控制和已有导航，清除旧路径，规划成功且跟随器确认收到
+新路径后才自动出发。普通任务到达、停止或异常中断后，路径接口返回空路径。
 
 页面顶部“一键重启”会先停车、停止导航/建图/相机、让机器人趴下并关闭全部 Luxi/D1
 服务，确认清理完成后按当前 HTTP 地址、端口和页面模式重新拉起网页服务。页面会自动
@@ -177,7 +149,7 @@ const catalog = await fetch(`${robot}/api/maps`).then(response => response.json(
 await fetch(`${robot}/api/navigation/goal`, {
   method: "POST",
   headers: {"Content-Type": "application/json"},
-  body: JSON.stringify({x: 1.2, y: 0.8, z: 0.0}),
+  body: JSON.stringify({x: 1.2, y: 0.8, z: 0.0, yaw: 1.57}),
 });
 ```
 
@@ -222,27 +194,3 @@ ros2 launch luxi_web_control web_control.launch.py \
    ```bash
    bash scripts/stop_luxi_system.sh
    ```
-
-## 常见错误
-
-### `install/setup.bash: No such file or directory`
-
-当前目录不是已构建的工作区。先执行本文第 1 节的目录检查和构建命令。容器内应使用
-`/workspace/lunar_slam`，宿主机才使用 `/home/lunar/project/lunar_slam`。
-
-### `Package 'luxi_web_control' not found`
-
-说明没有成功执行 `source install/setup.bash`，或者当前目录下的工作区尚未构建。不要
-继续启动；返回第 1 节处理。
-
-### 网页没有 RGB 预览或不能开始建图
-
-先查看网页“相机选择与开关”的错误信息；相机日志位于
-`log/luxi_web_control_camera.log`。再确认只存在一套统一传感器发布者：
-
-```bash
-ros2 topic info /sensors/rgbd/rgbd_image --verbose
-ros2 topic info /sensors/imu/data --verbose
-```
-
-两个话题都应显示 `Publisher count: 1`。

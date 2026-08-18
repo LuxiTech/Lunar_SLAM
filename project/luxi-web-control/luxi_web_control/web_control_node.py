@@ -443,6 +443,8 @@ def web_api_capabilities() -> dict:
         ("navigation_localize", "POST", "/api/navigation/localize"),
         ("navigation_stop", "POST", "/api/navigation/stop"),
         ("navigation_goal", "POST", "/api/navigation/goal"),
+        ("navigation_home_set", "POST", "/api/navigation/home/set"),
+        ("navigation_home_return", "POST", "/api/navigation/home/return"),
         ("navigation_start", "POST", "/api/navigation/start"),
         ("navigation_halt", "POST", "/api/navigation/halt"),
         ("mapping_start", "POST", "/api/mapping/start"),
@@ -643,10 +645,12 @@ def localization_pose_summary(message: PoseWithCovarianceStamped) -> Optional[di
     }
 
 
-def parse_navigation_goal(payload: Dict[str, Any]) -> Tuple[float, float, float]:
-    """Validate a map-frame browser goal without accepting NaN or booleans."""
+def parse_navigation_goal(
+    payload: Dict[str, Any]
+) -> Tuple[float, float, float, float]:
+    """Validate a map-frame browser goal and final yaw in radians."""
     values = []
-    for name in ("x", "y", "z"):
+    for name in ("x", "y", "z", "yaw"):
         raw_value = payload.get(name, 0.0)
         if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
             raise ValueError(f"{name} must be a number")
@@ -654,7 +658,9 @@ def parse_navigation_goal(payload: Dict[str, Any]) -> Tuple[float, float, float]
         if not math.isfinite(value):
             raise ValueError(f"{name} must be finite")
         values.append(value)
-    return values[0], values[1], values[2]
+    return values[0], values[1], values[2], math.atan2(
+        math.sin(values[3]), math.cos(values[3])
+    )
 
 
 def discover_lan_ipv4_addresses() -> list:
@@ -2400,8 +2406,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/navigation/goal":
             try:
-                x, y, z = parse_navigation_goal(payload)
-                accepted, message = node.set_navigation_goal(x, y, z)
+                x, y, z, yaw = parse_navigation_goal(payload)
+                accepted, message = node.set_navigation_goal(x, y, z, yaw)
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -2409,7 +2415,35 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json(HTTPStatus.CONFLICT, message)
                 return
             self._send_json(HTTPStatus.ACCEPTED, {
-                "ok": True, "message": message, "goal": {"x": x, "y": y, "z": z},
+                "ok": True, "message": message,
+                "goal": {"x": x, "y": y, "z": z, "yaw": yaw},
+            })
+            return
+        if path == "/api/navigation/home/set":
+            try:
+                x, y, z, yaw = parse_navigation_goal(payload)
+                accepted, message = node.set_navigation_home(x, y, z, yaw)
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.OK, {
+                "ok": True,
+                "message": message,
+                "navigation": node.navigation_status(),
+            })
+            return
+        if path == "/api/navigation/home/return":
+            accepted, message = node.return_navigation_home()
+            if not accepted:
+                self._send_error_json(HTTPStatus.CONFLICT, message)
+                return
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "ok": True,
+                "message": message,
+                "navigation": node.navigation_status(),
             })
             return
         if path == "/api/navigation/start":
@@ -2616,7 +2650,7 @@ class WebControlNode(Node):
         self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("max_terrain_points", 12000)
         self.declare_parameter("navigation_robot_radius", 0.25)
-        self.declare_parameter("navigation_costmap_margin", 0.60)
+        self.declare_parameter("navigation_costmap_margin", 0.15)
         self.declare_parameter("navigation_ground_normal_radius", 0.30)
         self.declare_parameter("navigation_ground_max_slope_degrees", 35.0)
         self.declare_parameter("navigation_obstacle_min_height", 0.15)
@@ -3106,6 +3140,8 @@ class WebControlNode(Node):
         self._planning_error = ""
         self._navigation_active = False
         self._navigation_follower_state = "stopped"
+        self._navigation_homes: Dict[str, Dict[str, float]] = {}
+        self._return_home_pending = False
         self._imu_calibration_lock = threading.Lock()
         self._imu_calibration = {
             "state": "offline",
@@ -3660,6 +3696,7 @@ class WebControlNode(Node):
             elif self._planning_state != "failed":
                 self._planning_state = "failed"
                 self._planning_error = "规划器未生成可执行路径"
+        self._start_return_home_if_ready()
 
     def _on_navigation_planning_status(self, message: String) -> None:
         errors = {
@@ -3671,6 +3708,7 @@ class WebControlNode(Node):
         status = message.data[:80]
         with self._navigation_lock:
             if status == "planning":
+                self._clear_navigation_path_locked()
                 self._planning_state = "pending"
                 self._planning_error = ""
             elif status == "ready":
@@ -3678,7 +3716,8 @@ class WebControlNode(Node):
                     self._planning_state = "ready"
                     self._planning_error = ""
             elif status in errors:
-                self._planned_path_points = []
+                self._clear_navigation_path_locked()
+                self._return_home_pending = False
                 self._planning_state = "failed"
                 self._planning_error = errors[status]
             elif status in {"waiting_map", "loading_map"}:
@@ -3693,22 +3732,66 @@ class WebControlNode(Node):
     def _on_navigation_active(self, message: Bool) -> None:
         """Track whether the C++ path follower currently owns navigation."""
         with self._navigation_lock:
+            was_active = self._navigation_active
             self._navigation_active = bool(message.data)
+            if was_active and not self._navigation_active:
+                self._clear_navigation_path_locked()
+                self._return_home_pending = False
 
     def _on_navigation_follower_state(self, message: String) -> None:
         """Expose the bounded C++ follower state to the browser."""
         with self._navigation_lock:
             self._navigation_follower_state = message.data[:80]
-            if self._navigation_follower_state == "goal_reached":
+            terminal_states = {
+                "goal_reached", "localization_lost", "path_deviation",
+                "obstacle_recovery_timeout", "stuck_no_progress",
+                "replan_after_relocalization_timeout", "stopped",
+            }
+            stale_stop_for_previous_goal = (
+                self._navigation_follower_state == "stopped"
+                and self._planning_state == "pending"
+            )
+            if (
+                self._navigation_follower_state in terminal_states
+                and not stale_stop_for_previous_goal
+            ):
                 # The planner's Path publisher is transient-local, so the
                 # original global path otherwise remains visible after motion
                 # has ended. Remove both active and stale-preview copies.
-                self._planned_path_points = []
-                self._last_valid_path_points = []
-                self._path_received_at = None
-                self._last_valid_path_received_at = None
-                self._planning_state = "goal_reached"
+                self._clear_navigation_path_locked()
+                self._return_home_pending = False
+                self._planning_state = (
+                    "goal_reached"
+                    if self._navigation_follower_state == "goal_reached"
+                    else ("map_ready" if self._planner_map_ready else "idle")
+                )
                 self._planning_error = ""
+        self._start_return_home_if_ready()
+
+    def _start_return_home_if_ready(self) -> None:
+        """Start return only after this node and the follower both hold the path."""
+        with self._navigation_lock:
+            ready = (
+                getattr(self, "_return_home_pending", False)
+                and self._navigation_follower_state == "plan_ready"
+                and bool(self._planned_path_points)
+            )
+            if ready:
+                self._return_home_pending = False
+        if not ready:
+            return
+        started, message = self.start_navigation_motion()
+        if not started:
+            with self._navigation_lock:
+                self._planning_state = "failed"
+                self._planning_error = "返航路径已生成但自动出发失败：" + message
+
+    def _clear_navigation_path_locked(self) -> None:
+        """Clear active and fallback path copies while holding the nav lock."""
+        self._planned_path_points = []
+        self._last_valid_path_points = []
+        self._path_received_at = None
+        self._last_valid_path_received_at = None
 
     def _on_navigation_localization_pose(
         self, message: PoseWithCovarianceStamped
@@ -3875,6 +3958,7 @@ class WebControlNode(Node):
             self._planning_error = ""
             self._navigation_active = False
             self._navigation_follower_state = "stopped"
+            self._return_home_pending = False
 
     def rgb_preview(self) -> Tuple[Optional[bytes], str]:
         """Return the latest compressed RGB frame and its MIME type."""
@@ -4055,26 +4139,26 @@ class WebControlNode(Node):
     def path_preview(self) -> Dict[str, Any]:
         """Return the latest A* global path for Canvas rendering."""
         with self._navigation_lock:
-            goal_reached = getattr(
+            follower_state = getattr(
                 self, "_navigation_follower_state", "stopped"
-            ) == "goal_reached"
-            valid = bool(self._planned_path_points) and not goal_reached
-            points = (
-                self._planned_path_points if valid else
-                ([] if goal_reached else self._last_valid_path_points)
             )
-            received_at = (
-                self._path_received_at if valid else self._last_valid_path_received_at
+            hidden_states = {
+                "goal_reached", "stopped", "waiting_path",
+                "localization_lost", "path_deviation",
+                "obstacle_recovery_timeout", "stuck_no_progress",
+                "replan_after_relocalization_timeout",
+            }
+            valid = bool(self._planned_path_points) and (
+                follower_state not in hidden_states
             )
+            points = self._planned_path_points if valid else []
+            received_at = self._path_received_at if valid else None
             return {
-                "frame_id": (
-                    self._path_frame_id if valid else self._last_valid_path_frame_id
-                ),
+                "frame_id": self._path_frame_id,
                 "point_count": len(points),
-                "active_point_count": 0 if goal_reached else
-                len(self._planned_path_points),
+                "active_point_count": len(self._planned_path_points) if valid else 0,
                 "valid": valid,
-                "stale": bool(points) and not valid,
+                "stale": False,
                 "planning_state": self._planning_state,
                 "error": self._planning_error or None,
                 "age_seconds": None if received_at is None
@@ -4941,8 +5025,8 @@ class WebControlNode(Node):
             self._refined_localization_verified_at = None
             self._localization_health = "searching"
             self._localization_health_received_at = None
-            self._planned_path_points = []
-            self._path_received_at = None
+            self._clear_navigation_path_locked()
+            self._return_home_pending = False
             self._planner_map_ready = False
             self._planning_state = "loading_map"
             self._planning_error = ""
@@ -5006,7 +5090,7 @@ class WebControlNode(Node):
             self._navigation_follower_state = "starting"
         return True, "navigation start command sent"
 
-    def halt_navigation_motion(self, clear_path: bool = False) -> None:
+    def halt_navigation_motion(self, clear_path: bool = True) -> None:
         """Stop path following, optionally clearing its path but not localization."""
         message = Bool()
         message.data = True
@@ -5014,18 +5098,19 @@ class WebControlNode(Node):
         with self._navigation_lock:
             self._navigation_active = False
             self._navigation_follower_state = "stopped"
+            self._return_home_pending = False
             if clear_path:
-                self._planned_path_points = []
-                self._last_valid_path_points = []
-                self._path_received_at = None
-                self._last_valid_path_received_at = None
+                self._clear_navigation_path_locked()
                 self._planning_state = (
                     "map_ready" if self._planner_map_ready else "idle"
                 )
                 self._planning_error = ""
 
-    def set_navigation_goal(self, x: float, y: float, z: float) -> Tuple[bool, str]:
-        """Publish a map-frame goal only after HLoc and ICP localization is ready."""
+    def set_navigation_goal(
+        self, x: float, y: float, z: float, yaw: float = 0.0,
+        auto_start: bool = False,
+    ) -> Tuple[bool, str]:
+        """Publish a map-frame position and final heading after localization."""
         navigation = self.navigation_status()
         if navigation["state"] != "running":
             return False, "load a map and wait for navigation to start first"
@@ -5033,21 +5118,57 @@ class WebControlNode(Node):
             return False, "wait for a recent accepted ICP localization before selecting a goal"
         if not navigation["planner_map_ready"]:
             return False, "wait for the 3D terrain map to finish loading before selecting a goal"
-        self.halt_navigation_motion()
+        self.halt_navigation_motion(clear_path=True)
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         with self._navigation_lock:
             goal.header.frame_id = self._voxel_frame_id or "map"
-            self._planned_path_points = []
-            self._path_received_at = None
+            self._clear_navigation_path_locked()
+            self._return_home_pending = auto_start
             self._planning_state = "pending"
             self._planning_error = ""
         goal.pose.position.x = x
         goal.pose.position.y = y
         goal.pose.position.z = z
-        goal.pose.orientation.w = 1.0
+        goal.pose.orientation.z = math.sin(yaw * 0.5)
+        goal.pose.orientation.w = math.cos(yaw * 0.5)
         self.navigation_goal_publisher.publish(goal)
-        return True, "goal sent to voxel A* planner"
+        return True, "goal position and heading sent to voxel A* planner"
+
+    def set_navigation_home(
+        self, x: float, y: float, z: float, yaw: float = 0.0
+    ) -> Tuple[bool, str]:
+        """Store one manually selected return pose for the loaded map."""
+        with self._navigation_lock:
+            map_id = self._navigation_cloud_map_id
+            terrain_map_id = self._terrain_map_id
+            if not map_id or terrain_map_id != map_id:
+                return False, "load a map and its traversable terrain before setting home"
+            home = {
+                "x": float(x), "y": float(y), "z": float(z),
+                "yaw": math.atan2(math.sin(yaw), math.cos(yaw)),
+            }
+            self._navigation_homes[map_id] = home
+        return True, f"return point saved for {map_id}"
+
+    def return_navigation_home(self) -> Tuple[bool, str]:
+        """Cancel other motion, plan to the saved pose, then auto-start."""
+        navigation = self.navigation_status()
+        map_id = navigation.get("map_id")
+        with self._navigation_lock:
+            home = dict(self._navigation_homes.get(map_id, {}))
+        if not home:
+            return False, "set a return point on the current map first"
+        self.stop_motion(force=True)
+        accepted, message = self.set_navigation_goal(
+            home["x"], home["y"], home["z"], home["yaw"],
+            auto_start=True,
+        )
+        if not accepted:
+            with self._navigation_lock:
+                self._return_home_pending = False
+            return False, message
+        return True, "current navigation cancelled; planning automatic return"
 
     def navigation_status(self) -> Dict[str, Any]:
         """Return selected-map navigation state without large preview payloads."""
@@ -5109,6 +5230,12 @@ class WebControlNode(Node):
             status["active"] = running and self._navigation_active
             status["follower_state"] = (
                 self._navigation_follower_state if running else "stopped"
+            )
+            current_map_id = status.get("map_id") or self._navigation_cloud_map_id
+            home = getattr(self, "_navigation_homes", {}).get(current_map_id)
+            status["home"] = dict(home) if home else None
+            status["return_home_pending"] = bool(
+                getattr(self, "_return_home_pending", False)
             )
             status["coarse_localization_ready"] = running and coarse_ready
             status["coarse_consistency_ready"] = (

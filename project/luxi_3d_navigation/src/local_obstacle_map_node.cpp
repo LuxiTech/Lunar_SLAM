@@ -88,6 +88,8 @@ public:
       "state_topic", "/navigation/local_obstacles/state");
     nearest_topic_ = declare_parameter<std::string>(
       "nearest_topic", "/navigation/local_obstacles/nearest_distance");
+    rotation_clearance_topic_ = declare_parameter<std::string>(
+      "rotation_clearance_topic", "/navigation/local_obstacles/rotation_clearance");
     skip_pixel_ = std::max(
       1, static_cast<int>(declare_parameter<int>("skip_pixel", 8)));
     raycast_stride_ = std::max(
@@ -119,6 +121,8 @@ public:
     state_pub_ = create_publisher<std_msgs::msg::String>(
       state_topic_, rclcpp::QoS(1).reliable().transient_local());
     nearest_pub_ = create_publisher<std_msgs::msg::Float32>(nearest_topic_, 10);
+    rotation_clearance_pub_ = create_publisher<std_msgs::msg::Float32>(
+      rotation_clearance_topic_, 10);
     auto latest_sensor_qos = rclcpp::SensorDataQoS();
     latest_sensor_qos.keep_last(1);
     camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -256,6 +260,7 @@ private:
       less_restrictive_candidate_.clear();
       publishState(last_error_.empty() ? "stale" : last_error_);
       publishNearest(std::numeric_limits<float>::infinity());
+      publishRotationClearance(std::numeric_limits<float>::infinity());
       return;
     }
 
@@ -267,10 +272,17 @@ private:
       grid_.prune(point3D(target_from_base.getOrigin()), current_time.seconds());
       const auto occupied = grid_.occupiedPoints(current_time.seconds());
       double nearest = std::numeric_limits<double>::infinity();
+      double rotation_clearance = std::numeric_limits<double>::infinity();
       for (const auto & point : occupied) {
         const auto in_base = base_from_target * tf2::Vector3(point.x, point.y, point.z);
-        if (in_base.x() >= 0.0 && std::abs(in_base.y()) <= corridor_half_width_ &&
-          in_base.z() >= minimum_obstacle_z_ && in_base.z() <= maximum_obstacle_z_)
+        const bool collision_height = in_base.z() >= minimum_obstacle_z_ &&
+          in_base.z() <= maximum_obstacle_z_;
+        if (collision_height) {
+          rotation_clearance = std::min(
+            rotation_clearance, std::hypot(in_base.x(), in_base.y()));
+        }
+        if (collision_height && in_base.x() >= 0.0 &&
+          std::abs(in_base.y()) <= corridor_half_width_)
         {
           nearest = std::min(nearest, in_base.x());
         }
@@ -279,10 +291,12 @@ private:
         (nearest <= slow_distance_ ? "slow" : "clear");
       publishSafetyState(raw_state, current_time);
       publishNearest(static_cast<float>(nearest));
+      publishRotationClearance(static_cast<float>(rotation_clearance));
       publishCloud(occupied, current_time);
     } catch (const tf2::TransformException & error) {
       publishState("tf_unavailable");
       publishNearest(std::numeric_limits<float>::infinity());
+      publishRotationClearance(std::numeric_limits<float>::infinity());
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Cannot evaluate obstacle corridor: %s", error.what());
     }
@@ -362,6 +376,13 @@ private:
     nearest_pub_->publish(message);
   }
 
+  void publishRotationClearance(float distance)
+  {
+    std_msgs::msg::Float32 message;
+    message.data = distance;
+    rotation_clearance_pub_->publish(message);
+  }
+
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   RollingVoxelGrid grid_;
@@ -372,6 +393,7 @@ private:
   std::string points_topic_;
   std::string state_topic_;
   std::string nearest_topic_;
+  std::string rotation_clearance_topic_;
   std::string last_error_;
   std::string last_published_state_;
   int skip_pixel_{};
@@ -401,6 +423,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr points_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr nearest_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr rotation_clearance_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

@@ -1,6 +1,8 @@
 #include <fstream>
 #include <chrono>
+#include <cmath>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,6 +15,7 @@
 #include "octomap_msgs/msg/octomap.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -31,6 +34,7 @@ public:
   {
     declare_parameter<std::string>("octomap_topic", "/navigation/octomap");
     declare_parameter<std::string>("goal_topic", "/navigation/goal_pose");
+    declare_parameter<std::string>("replan_request_topic", "/navigation/replan_request");
     declare_parameter<std::string>("path_topic", "/navigation/planned_path");
     declare_parameter<std::string>("planning_status_topic", "/navigation/planning_status");
     declare_parameter<std::string>("terrain_pose_topic", "/navigation/terrain_pose");
@@ -48,7 +52,7 @@ public:
     declare_parameter<bool>("strict_direct_ground_support", false);
     declare_parameter<int>("snap_search_radius_cells", 12);
     declare_parameter<int>("max_iterations", 500000);
-    declare_parameter<double>("costmap_margin", 0.60);
+    declare_parameter<double>("costmap_margin", 0.15);
     declare_parameter<double>("costmap_weight", 8.0);
     declare_parameter<double>("ground_normal_radius", 0.30);
     declare_parameter<double>("ground_max_slope_degrees", 35.0);
@@ -67,6 +71,13 @@ public:
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       get_parameter("goal_topic").as_string(), rclcpp::QoS(1).reliable(),
       std::bind(&Octomap3DAstarPlannerNode::onGoal, this, std::placeholders::_1));
+    replan_sub_ = create_subscription<std_msgs::msg::Bool>(
+      get_parameter("replan_request_topic").as_string(), 10,
+      [this](const std_msgs::msg::Bool::SharedPtr message) {
+        if (message->data) {
+          replanLastGoal();
+        }
+      });
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local());
     planning_status_pub_ = create_publisher<std_msgs::msg::String>(
@@ -257,6 +268,25 @@ private:
 
   void onGoal(const geometry_msgs::msg::PoseStamped::SharedPtr goal)
   {
+    last_goal_ = *goal;
+    planCurrentPose(*goal);
+  }
+
+  void replanLastGoal()
+  {
+    if (!last_goal_) {
+      RCLCPP_ERROR(get_logger(), "Cannot replan after relocalization: no original goal");
+      publishPath({});
+      publishPlanningStatus("failed_goal_unavailable");
+      return;
+    }
+    RCLCPP_INFO(
+      get_logger(), "Replanning from corrected localization pose to the original goal");
+    planCurrentPose(*last_goal_);
+  }
+
+  void planCurrentPose(const geometry_msgs::msg::PoseStamped & goal)
+  {
     publishPlanningStatus("planning");
     if (!terrain_) {
       RCLCPP_WARN(get_logger(), "Ignoring goal: no OctoMap has arrived");
@@ -269,7 +299,7 @@ private:
         map_frame_, get_parameter("base_frame").as_string(), tf2::TimePointZero);
       plan(
         transform.transform.translation.x, transform.transform.translation.y,
-        transform.transform.translation.z, *goal);
+        transform.transform.translation.z, goal);
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN(get_logger(), "Cannot obtain the localized robot pose: %s", error.what());
       publishPath({});
@@ -330,7 +360,7 @@ private:
       publishPlanningStatus("failed_no_path");
       return;
     }
-    publishPath(cells);
+    publishPath(cells, goal.pose.orientation);
     publishPlanningStatus("ready");
     RCLCPP_INFO(
       get_logger(), "Global A* planning completed in %.3fs",
@@ -344,7 +374,9 @@ private:
     planning_status_pub_->publish(message);
   }
 
-  void publishPath(const std::vector<luxi_3d_navigation::GridCell3D> & cells)
+  void publishPath(
+    const std::vector<luxi_3d_navigation::GridCell3D> & cells,
+    const geometry_msgs::msg::Quaternion & goal_orientation = geometry_msgs::msg::Quaternion())
   {
     nav_msgs::msg::Path path;
     path.header.stamp = now();
@@ -365,6 +397,16 @@ private:
       }
       path.poses.push_back(std::move(pose));
     }
+    if (!path.poses.empty()) {
+      const double norm = std::sqrt(
+        goal_orientation.x * goal_orientation.x +
+        goal_orientation.y * goal_orientation.y +
+        goal_orientation.z * goal_orientation.z +
+        goal_orientation.w * goal_orientation.w);
+      if (std::isfinite(norm) && norm > 1.0e-6) {
+        path.poses.back().pose.orientation = goal_orientation;
+      }
+    }
     path_pub_->publish(path);
     RCLCPP_INFO(get_logger(), "Published ground-supported 3D A* path with %zu poses", path.poses.size());
   }
@@ -378,6 +420,7 @@ private:
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr replan_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr planning_status_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr terrain_pose_pub_;
@@ -385,6 +428,7 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr traversable_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr costmap_pub_;
   rclcpp::TimerBase::SharedPtr terrain_pose_timer_;
+  std::optional<geometry_msgs::msg::PoseStamped> last_goal_;
 };
 
 int main(int argc, char ** argv)

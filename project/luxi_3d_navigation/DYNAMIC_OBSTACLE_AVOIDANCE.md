@@ -173,6 +173,7 @@ SCAN 默认参数中，滚动地图为 `10 × 10 × 5 m`、局部更新范围为
 | `/navigation/local_obstacles/points` | `sensor_msgs/msg/PointCloud2` | 调试用实时障碍点；无人订阅时不必发布 |
 | `/navigation/local_obstacles/state` | `std_msgs/msg/String` | `clear/slow/blocked/stale/error` |
 | `/navigation/local_obstacles/nearest_distance` | `std_msgs/msg/Float32` | 相机前方安全走廊内的最近障碍距离 |
+| `/navigation/local_obstacles/rotation_clearance` | `std_msgs/msg/Float32` | 机器人周身碰撞高度内的最近障碍径向距离，用于原地转向安全检查 |
 | `/navigation/local_replan/status` | `std_msgs/msg/String` | `idle/planning/ready/no_path` |
 | `/navigation/safety_limited` | `std_msgs/msg/Bool` | 当前速度是否被安全门限制 |
 | `/navigation/safety_hard_stop` | `std_msgs/msg/Bool` | 传感器/状态硬故障锁停；与人工急停话题隔离 |

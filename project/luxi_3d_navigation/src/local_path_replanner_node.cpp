@@ -79,6 +79,13 @@ public:
         dirty_ = true;
         if (!global_path_.poses.empty()) {
           publishStatus("global_path_ready");
+        } else {
+          nav_msgs::msg::Path empty;
+          empty.header.stamp = now();
+          empty.header.frame_id = map_frame_;
+          path_pub_->publish(empty);
+          publishStatus("idle");
+          dirty_ = false;
         }
       });
     obstacle_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -113,7 +120,7 @@ private:
     declare_parameter<bool>("strict_direct_ground_support", false);
     declare_parameter<int>("snap_search_radius_cells", 12);
     declare_parameter<int>("max_iterations", 500000);
-    declare_parameter<double>("costmap_margin", 0.60);
+    declare_parameter<double>("costmap_margin", 0.15);
     declare_parameter<double>("costmap_weight", 8.0);
     declare_parameter<double>("ground_normal_radius", 0.30);
     declare_parameter<double>("ground_max_slope_degrees", 35.0);
@@ -469,6 +476,9 @@ private:
       output.poses.insert(
         output.poses.end(), global_path_.poses.begin() + static_cast<std::ptrdiff_t>(*rejoin_index + 1U),
         global_path_.poses.end());
+      if (!output.poses.empty() && !global_path_.poses.empty()) {
+        output.poses.back().pose.orientation = global_path_.poses.back().pose.orientation;
+      }
       active_path_ = output;
       active_path_is_detour_ = true;
       path_pub_->publish(output);

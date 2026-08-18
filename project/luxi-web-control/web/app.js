@@ -49,7 +49,10 @@ const navigationLoadButton = $("#navigationLoadButton");
 const navigationFilterButton = $("#navigationFilterButton");
 const navigationLocateButton = $("#navigationLocateButton");
 const navigationStopButton = $("#navigationStopButton");
+const navigationGoalYaw = $("#navigationGoalYaw");
 const navigationGoalButton = $("#navigationGoalButton");
+const navigationHomeSetButton = $("#navigationHomeSetButton");
+const navigationHomeReturnButton = $("#navigationHomeReturnButton");
 const navigationStartButton = $("#navigationStartButton");
 const navigationHaltButton = $("#navigationHaltButton");
 const voxelMapCanvas = $("#voxelMapCanvas");
@@ -119,6 +122,8 @@ let navigationDrag = null;
 let navigationPinch = null;
 const navigationPointers = new Map();
 let navigationGoalMode = false;
+let navigationSelectionPurpose = "goal";
+let navigationGoalDrag = null;
 let selectedGoalPending = false;
 let navigationStatus = {};
 let navigationMapRecords = new Map();
@@ -750,8 +755,10 @@ const navigationStateNames = {
 
 function updateNavigation(navigation) {
   if (!navigation) return;
+  const wasActive = Boolean(navigationStatus.active);
   navigationStatus = navigation;
-  if (navigation.follower_state === "goal_reached") {
+  if (navigation.follower_state === "goal_reached" ||
+      (wasActive && !navigation.active)) {
     // Clear the already-fetched path immediately; the backend also clears its
     // transient/stale copies so later preview refreshes cannot restore it.
     navigationPath = {};
@@ -764,6 +771,20 @@ function updateNavigation(navigation) {
     name = "定位短时推算中（限距 8 cm）";
   } else if (navigation.follower_state === "localization_recovery_spin") {
     name = "正沿原路径朝向持续旋转定位";
+  } else if (navigation.follower_state === "replanning_after_relocalization") {
+    name = "定位恢复，正在重新规划";
+  } else if (navigation.follower_state === "replan_after_relocalization_timeout") {
+    name = "恢复后重规划超时，已停车";
+  } else if (navigation.follower_state === "traction_boost") {
+    name = "检测到无位移，正在短时增力";
+  } else if (navigation.follower_state === "aligning_goal_heading") {
+    name = "已到目标位置，正在对准到达方向";
+  } else if (navigation.follower_state === "obstacle_recovery_spin") {
+    name = "前方受阻，正在安全原地转向";
+  } else if (navigation.follower_state === "obstacle_recovery_timeout") {
+    name = "转向仍无法脱困，已安全停车";
+  } else if (navigation.follower_state === "stuck_no_progress") {
+    name = "增力后仍无位移，已安全停车";
   } else if (navigation.follower_state?.startsWith("localization_recovery_")) {
     name = "定位恢复中（已停车验证）";
   } else if (navigation.follower_state === "goal_reached") {
@@ -807,13 +828,18 @@ function updateNavigation(navigation) {
   navigationGoalButton.disabled =
     navigation.state !== "running" || !hasTraversableTerrain ||
     !navigation.planner_map_ready;
+  navigationHomeSetButton.disabled = !hasTraversableTerrain;
+  navigationHomeReturnButton.disabled =
+    navigation.state !== "running" || !navigation.home ||
+    !navigation.planning_localization_ready || estopActive;
   if (!navigationGoalMode) {
     navigationGoalButton.textContent =
       selectedGoalPending
         ? navigation.planning_localization_ready
           ? "提交已选目标"
           : "重新选择目标"
-        : "选择目标点";
+        : "选择目标点和方向";
+    navigationHomeSetButton.textContent = "在地图设置返航点";
   }
   navigationStartButton.disabled =
     !navigation.planning_localization_ready || !navigation.path_ready ||
@@ -838,6 +864,27 @@ function updateNavigation(navigation) {
     } else if (navigation.follower_state === "localization_recovery_spin") {
       navigationDetail.textContent =
         `${mapName} 已停止平移，正在障碍安全门监控下沿丢失定位前的路径朝向持续同向旋转；匹配稳定后自动继续。`;
+    } else if (navigation.follower_state === "replanning_after_relocalization") {
+      navigationDetail.textContent =
+        `${mapName} 定位已经重新确认，正在从修正后的当前位置到原目标重新规划；新路径生成前保持停车。`;
+    } else if (navigation.follower_state === "replan_after_relocalization_timeout") {
+      navigationDetail.textContent =
+        `${mapName} 定位恢复后 15 秒内未生成新路径，导航已停止并清除旧路径。`;
+    } else if (navigation.follower_state === "traction_boost") {
+      navigationDetail.textContent =
+        `${mapName} 前方障碍层明确为空，但里程计未检测到有效位移，正在短时提高轮子输出；运动恢复后自动回到常速。`;
+    } else if (navigation.follower_state === "aligning_goal_heading") {
+      navigationDetail.textContent =
+        `${mapName} 已到达目标位置，正在原地旋转到设定的到达方向。`;
+    } else if (navigation.follower_state === "obstacle_recovery_spin") {
+      navigationDetail.textContent =
+        `${mapName} 前方路径被动态障碍阻挡，已停止平移；安全门确认旋转净空后正在原地转向，净空后自动接回绕行路径。`;
+    } else if (navigation.follower_state === "obstacle_recovery_timeout") {
+      navigationDetail.textContent =
+        `${mapName} 原地转向 10 秒后前方仍被阻挡，已停止导航，请人工检查障碍距离。`;
+    } else if (navigation.follower_state === "stuck_no_progress") {
+      navigationDetail.textContent =
+        `${mapName} 短时增力后仍无有效位移，已安全停止；请检查坡度、轮子和地面接触。`;
     } else if (navigation.follower_state?.startsWith("localization_recovery_")) {
       navigationDetail.textContent =
         `${mapName} 发现定位候选，车辆保持零速度进行连续匹配验证；确认后自动继续。`;
@@ -1019,6 +1066,9 @@ function drawNavigationMap(voxels, path, cloud) {
     obstaclePoints,
     pathPoints,
     selectedGoal ? [[selectedGoal.x, selectedGoal.y, selectedGoal.z]] : [],
+    navigationStatus.home
+      ? [[navigationStatus.home.x, navigationStatus.home.y, navigationStatus.home.z]]
+      : [],
     mapHasGeometry && navigationShowMappingOrigin.checked ? [mappingOrigin] : [],
     navigationPose && navigationShowRobot.checked
       ? [[navigationPose.x, navigationPose.y, navigationPose.z || 0]]
@@ -1208,6 +1258,40 @@ function drawNavigationMap(voxels, path, cloud) {
     context.beginPath();
     context.arc(x, y, 6, 0, Math.PI * 2);
     context.stroke();
+    const yaw = Number(selectedGoal.yaw) || 0;
+    const [tipX, tipY] = toCanvas([
+      selectedGoal.x + .30 * Math.cos(yaw),
+      selectedGoal.y + .30 * Math.sin(yaw),
+      selectedGoal.z,
+    ]);
+    context.beginPath();
+    context.moveTo(x, y);
+    context.lineTo(tipX, tipY);
+    context.stroke();
+  }
+  const home = navigationStatus.home;
+  if (home) {
+    const [x, y] = toCanvas([home.x, home.y, home.z]);
+    context.strokeStyle = "#4db6ff";
+    context.fillStyle = "rgba(77, 182, 255, .22)";
+    context.lineWidth = 2.5;
+    context.beginPath();
+    context.arc(x, y, 7, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+    const yaw = Number(home.yaw) || 0;
+    const [tipX, tipY] = toCanvas([
+      home.x + .30 * Math.cos(yaw),
+      home.y + .30 * Math.sin(yaw),
+      home.z,
+    ]);
+    context.beginPath();
+    context.moveTo(x, y);
+    context.lineTo(tipX, tipY);
+    context.stroke();
+    context.fillStyle = "#8fd2ff";
+    context.font = "600 12px system-ui, sans-serif";
+    context.fillText("返航点", x + 10, y - 10);
   }
   if (mapHasGeometry && navigationShowMappingOrigin.checked) {
     const [x, y] = toCanvas(mappingOrigin);
@@ -1509,14 +1593,35 @@ navigationShowVoxels.addEventListener("change", () => drawNavigationMap(navigati
 navigationShowSemantics.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowMappingOrigin.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
 navigationShowRobot.addEventListener("change", () => drawNavigationMap(navigationVoxels, navigationPath, navigationCloud));
-function setNavigationGoalMode(enabled) {
+function setNavigationGoalMode(enabled, purpose = "goal") {
   navigationGoalMode = enabled;
+  if (enabled) navigationSelectionPurpose = purpose;
   if (enabled) semanticTool.value = "orbit";
-  navigationGoalButton.classList.toggle("active", enabled);
-  navigationGoalButton.textContent = enabled ? "请点击地图目标" : "选择目标点";
+  navigationGoalButton.classList.toggle(
+    "active", enabled && navigationSelectionPurpose === "goal");
+  navigationHomeSetButton.classList.toggle(
+    "active", enabled && navigationSelectionPurpose === "home");
+  navigationGoalButton.textContent = enabled && navigationSelectionPurpose === "goal" ?
+    "按住目标点并拖动朝向" : "选择目标点和方向";
+  navigationHomeSetButton.textContent = enabled && navigationSelectionPurpose === "home" ?
+    "按住返航点并拖动朝向" : "在地图设置返航点";
   voxelMapCanvas.classList.toggle("selecting-goal", enabled);
   updateSemanticControls();
 }
+
+function navigationGoalYawRadians() {
+  const degrees = Number(navigationGoalYaw.value);
+  const radians = Number.isFinite(degrees) ? degrees * Math.PI / 180 : 0;
+  return Math.atan2(Math.sin(radians), Math.cos(radians));
+}
+
+navigationGoalYaw.addEventListener("input", () => {
+  if (selectedGoal) {
+    selectedGoal.yaw = navigationGoalYawRadians();
+    selectedGoalPending = true;
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+  }
+});
 
 navigationGoalButton.addEventListener("click", () => {
   if (navigationGoalButton.disabled) return;
@@ -1526,18 +1631,59 @@ navigationGoalButton.addEventListener("click", () => {
     sendNavigationGoal(selectedGoal);
     return;
   }
-  setNavigationGoalMode(!navigationGoalMode);
-  if (navigationGoalMode) showToast("请在地图中点击目标点；可先退出选点模式调整视角");
+  setNavigationGoalMode(!navigationGoalMode, "goal");
+  if (navigationGoalMode) {
+    showToast("在绿色区域按下确定位置，保持按住并拖动箭头选择方向，松开后提交");
+  }
+});
+
+navigationHomeSetButton.addEventListener("click", () => {
+  if (navigationHomeSetButton.disabled) return;
+  const enable = !(navigationGoalMode && navigationSelectionPurpose === "home");
+  setNavigationGoalMode(enable, "home");
+  if (enable) {
+    showToast("在绿色区域按下设置返航位置，拖动箭头选择返航到达方向");
+  }
+});
+
+async function setNavigationHome(home) {
+  try {
+    const result = await api("/api/navigation/home/set", home);
+    navigationStatus = result.navigation || navigationStatus;
+    selectedGoal = null;
+    selectedGoalPending = false;
+    setNavigationGoalMode(false);
+    showToast("返航点已保存，地图上的蓝色标记为返航目标");
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+  } catch (error) {
+    showToast(`设置返航点失败：${error.message}`);
+  }
+}
+
+navigationHomeReturnButton.addEventListener("click", async () => {
+  if (navigationHomeReturnButton.disabled) return;
+  stop();
+  navigationPath = {};
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+  try {
+    const result = await api("/api/navigation/home/return", {});
+    updateNavigation(result.navigation);
+    showToast("已停止其他导航，返航路径生成后将自动出发");
+  } catch (error) {
+    showToast(`一键返航失败：${error.message}`);
+  }
 });
 
 async function sendNavigationGoal(goal) {
   if (!goal) return;
+  goal = {...goal, yaw: Number.isFinite(Number(goal.yaw)) ? Number(goal.yaw) : 0};
   try {
     await api("/api/navigation/goal", goal);
     selectedGoalPending = false;
     setNavigationGoalMode(false);
     showToast(
-      `地面目标已发送：${goal.x.toFixed(2)}, ${goal.y.toFixed(2)}, ${goal.z.toFixed(2)}`
+      `地面目标已发送：${goal.x.toFixed(2)}, ${goal.y.toFixed(2)}, ${goal.z.toFixed(2)}，` +
+      `到达方向 ${(goal.yaw * 180 / Math.PI).toFixed(0)}°`
     );
     refreshVoxelMap();
   } catch (error) {
@@ -1545,22 +1691,61 @@ async function sendNavigationGoal(goal) {
   }
 }
 
-async function selectNavigationGoal(event) {
-  if (!voxelViewport) return;
+function beginNavigationGoalSelection(event) {
+  if (!voxelViewport || navigationGoalDrag) return;
   const point = nearestTraversableGoal(event);
   if (!point) return;
   const {x, y, z} = point;
-  selectedGoal = {x, y, z};
+  selectedGoal = {x, y, z, yaw: navigationGoalYawRadians()};
+  selectedGoalPending = true;
+  navigationGoalDrag = {pointerId: event.pointerId};
+  voxelMapCanvas.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+}
+
+function updateNavigationGoalDirection(event) {
+  if (!navigationGoalDrag || navigationGoalDrag.pointerId !== event.pointerId ||
+      !selectedGoal) return false;
+  const point = canvasGroundPoint(event, selectedGoal.z);
+  if (!point) return true;
+  const dx = point.x - selectedGoal.x;
+  const dy = point.y - selectedGoal.y;
+  if (Math.hypot(dx, dy) >= 0.02) {
+    selectedGoal.yaw = Math.atan2(dy, dx);
+    navigationGoalYaw.value = (selectedGoal.yaw * 180 / Math.PI).toFixed(0);
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+  }
+  event.preventDefault();
+  return true;
+}
+
+async function finishNavigationGoalSelection(event, submit) {
+  if (!navigationGoalDrag || navigationGoalDrag.pointerId !== event.pointerId) return false;
+  if (voxelMapCanvas.hasPointerCapture?.(event.pointerId)) {
+    voxelMapCanvas.releasePointerCapture(event.pointerId);
+  }
+  navigationGoalDrag = null;
+  const purpose = navigationSelectionPurpose;
+  setNavigationGoalMode(false);
+  if (!submit || !selectedGoal) {
+    drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
+    return true;
+  }
+  if (purpose === "home") {
+    await setNavigationHome(selectedGoal);
+    return true;
+  }
   if (!navigationStatus.planning_localization_ready) {
     selectedGoalPending = true;
-    setNavigationGoalMode(false);
     showToast(
-      `目标已选：${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}；定位恢复后点击“提交已选目标”`
+      `目标位置和方向已选；定位恢复后点击“提交已选目标”`
     );
     drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
-    return;
+    return true;
   }
   await sendNavigationGoal(selectedGoal);
+  return true;
 }
 
 function nearestTraversableGoal(event) {
@@ -1697,7 +1882,7 @@ function addSemanticPitVertex(event) {
 
 voxelMapCanvas.addEventListener("pointerdown", (event) => {
   if (navigationGoalMode) {
-    selectNavigationGoal(event);
+    beginNavigationGoalSelection(event);
     return;
   }
   if (semanticAnnotation && semanticTool.value !== "orbit") {
@@ -1736,6 +1921,7 @@ voxelMapCanvas.addEventListener("pointerdown", (event) => {
   voxelMapCanvas.classList.add("dragging");
 });
 voxelMapCanvas.addEventListener("pointermove", (event) => {
+  if (updateNavigationGoalDirection(event)) return;
   if (semanticBrushActive && semanticBrushPointerId === event.pointerId) {
     applySemanticBrush(event);
     return;
@@ -1791,8 +1977,20 @@ function endNavigationDrag(event) {
     voxelMapCanvas.classList.remove("dragging");
   }
 }
-voxelMapCanvas.addEventListener("pointerup", endNavigationDrag);
-voxelMapCanvas.addEventListener("pointercancel", endNavigationDrag);
+voxelMapCanvas.addEventListener("pointerup", (event) => {
+  if (navigationGoalDrag?.pointerId === event.pointerId) {
+    finishNavigationGoalSelection(event, true);
+    return;
+  }
+  endNavigationDrag(event);
+});
+voxelMapCanvas.addEventListener("pointercancel", (event) => {
+  if (navigationGoalDrag?.pointerId === event.pointerId) {
+    finishNavigationGoalSelection(event, false);
+    return;
+  }
+  endNavigationDrag(event);
+});
 voxelMapCanvas.addEventListener("wheel", (event) => {
   if (!navigationView) return;
   event.preventDefault();
