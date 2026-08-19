@@ -1,3 +1,15 @@
+navigation_task_manager:
+  ros__parameters:
+    # Browser pages and other clients use only /navigation/task/* commands.
+    # This node owns cancellation, return-home auto-start and low-level topics.
+    task_goal_topic: /navigation/task/goal_pose
+    task_home_topic: /navigation/task/home_pose
+    task_start_topic: /navigation/task/start
+    task_cancel_topic: /navigation/task/cancel
+    task_return_home_topic: /navigation/task/return_home
+    task_status_topic: /navigation/task/status
+    task_home_state_topic: /navigation/task/home_state
+
 octomap_3d_astar_planner:
   ros__parameters:
     # Measured center-to-wheel distance. The camera/rear extents are smaller.
@@ -14,8 +26,8 @@ octomap_3d_astar_planner:
     snap_search_radius_cells: 12
     max_iterations: 500000
     # The model applies this outside the 0.25 m hard robot radius, so the
-    # outer cost boundary is 0.25 + 0.15 = 0.40 m from an obstacle.
-    costmap_margin: 0.15
+    # outer cost boundary is 0.25 + 0.35 = 0.60 m from an obstacle.
+    costmap_margin: 0.35
     costmap_weight: 8.0
     ground_normal_radius: 0.30
     ground_max_slope_degrees: 35.0
@@ -33,7 +45,7 @@ local_path_replanner:
     ground_support_depth_cells: 2
     snap_search_radius_cells: 12
     max_iterations: 500000
-    costmap_margin: 0.15
+    costmap_margin: 0.35
     costmap_weight: 8.0
     ground_normal_radius: 0.30
     ground_max_slope_degrees: 35.0
@@ -95,6 +107,10 @@ local_obstacle_map:
     tf_timeout: 0.05
     # More dangerous transitions are immediate; clearing must remain stable.
     state_clear_hold: 0.50
+    # A relocalization invalidates obstacle history accumulated against the old
+    # map alignment. Rebuild from two current depth frames before motion resumes.
+    minimum_fresh_frames_after_reset: 2
+    reset_topic: /navigation/local_obstacles/reset
     publish_rate: 10.0
     rotation_clearance_topic: /navigation/local_obstacles/rotation_clearance
 
@@ -117,11 +133,15 @@ navigation_safety_gate:
     minimum_linear_speed: 0.10
     healthy_resume_hold: 0.50
     # Keep the odometry/IMU track for at most 0.8 s after ICP health drops.
-    # At D1's 0.10 m/s hardware floor this limits blind travel to about 8 cm.
+    # Forward motion is allowed only when the last tracking-time obstacle
+    # snapshot and every current depth update both say clear.
     dead_reckoning_duration: 0.80
     dead_reckoning_scale: 0.50
-    # Recovery is angular-only. A fresh clear/slow rolling obstacle layer is
-    # required; a blocked or stale layer still forces zero velocity.
+    # 0.10 m/s * 0.80 s gives a hard upper bound of 8 cm after pose loss.
+    maximum_dead_reckoning_linear_speed: 0.10
+    # Recovery is angular-only and always requires a fresh 0.30 m full-body
+    # rotation envelope. Forward blocked may still rotate when that envelope
+    # is clear; stale depth or insufficient radial clearance forces zero.
     maximum_recovery_angular_speed: 0.20
     # A blocked forward corridor may still permit an angular-only turn when
     # every measured obstacle around the robot stays outside the 0.25 m swept
@@ -149,18 +169,24 @@ terrain_path_follower:
     minimum_safe_goal_tolerance_m: 0.12
     # Brief ICP loss keeps the continuous RGB-D odometry/IMU pose alive. If it
     # persists, stop translation and keep turning toward the last path heading
-    # while HLoc searches for a confirmed global match.
+    # while HLoc searches for a confirmed global match. Dead reckoning is
+    # permitted only from a clear-forward snapshot captured before pose loss.
     localization_timeout: 2.2
     dead_reckoning_duration: 0.80
-    # A verifying/searching localization now rotates in the last commanded
-    # turn direction after the short hold. Keep the recovery bounded.
-    localization_recovery_timeout: 120.0
+    # A verifying/searching localization rotates in the last commanded turn
+    # direction after the short hold. Zero disables the time limit: rotation
+    # continues until tracking is confirmed or the user cancels navigation.
+    localization_recovery_timeout: 0.0
     # 0.10 rad/s is about 5.7 deg/s. It gives the image matcher several
     # overlapping, less blurred views during a full recovery rotation.
     localization_recovery_angular_speed: 0.10
     localization_recovery_confirmation_time: 1.0
-    replan_after_relocalization_timeout: 15.0
+    # Keep the original goal stopped and retry while the obstacle layer rebuilds.
+    # This is intentionally longer than the 30 s occupied-point TTL.
+    replan_after_relocalization_timeout: 120.0
+    replan_retry_interval: 5.0
     replan_request_topic: /navigation/replan_request
+    obstacle_reset_topic: /navigation/local_obstacles/reset
     max_path_deviation_m: 0.50
     # If clear near-field sensing and fresh local odometry show less than 4 cm
     # progress for 2.5 s, briefly raise speed to overcome a shallow slope or

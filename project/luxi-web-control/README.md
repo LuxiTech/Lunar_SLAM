@@ -1,14 +1,15 @@
 # Luxi Web Control 启动说明
 
-本包提供二选一的两套网页，共用同一个 ROS 2/HTTP 服务：
+本包同时提供两套可相互切换的网页，共用同一个 ROS 2/HTTP 服务：
 
 - `map_portal`（默认）：面向普通用户的地图中心，提供三维地图/代价地图查看、图层下载、
   相机开关与 RGB 画面、机器人控制与双电池信息、IMU 水平校准、自动定位、目标点下发和
   导航任务控制；
 - `developer`：原有开发者控制台，负责机器人遥控、相机选择、IMU 校准、建图和定位。
 
-同一服务进程只会将其中一套页面挂载到 `/`，通过启动参数选择。地图 API 在两种模式
-下保持一致，外部网页或程序可以直接订阅和调用。
+默认入口 `/` 打开地图中心；页面右上角可直接切换用户模式与开发者模式，开发者页面
+固定为 `/developer`，用户页面固定为 `/user`。`web_ui_mode` 参数仍可兼容旧脚本，用于
+指定 `/` 的默认页面。地图 API 在两种模式下保持一致，外部网页或程序可以直接调用。
 
 
 ## 2. 关闭所有旧进程
@@ -64,26 +65,18 @@ http://机器人电脑IP:8080
 hostname -I
 ```
 
-默认打开地图中心。如果需要相机、建图或手动控制，将网页模式切换为开发者模式：
-
-```bash
-ros2 launch luxi_web_control lekiwi_web_control.launch.py \
-  bind_address:=0.0.0.0 http_port:=8080 web_ui_mode:=developer
-```
-
-恢复普通用户地图中心：
-
-```bash
-ros2 launch luxi_web_control lekiwi_web_control.launch.py \
-  bind_address:=0.0.0.0 http_port:=8080 web_ui_mode:=map_portal
-```
+默认打开地图中心。需要建图时，点击页面右上角“开发者模式”；完成后点击“用户模式”
+即可返回，无需停止或重新启动 ROS 2 服务。旧部署如需让 `/` 默认打开开发者页面，仍可
+追加兼容参数 `web_ui_mode:=developer`。
 
 ## 地图中心 HTTP API
 
 地图中心以 `mapNNN` 为资源单位。地图选择列表固定显示多行，选择一个 map 后，下方会
 直接显示该地图的 DB、PLY、BT、过滤版 PLY/BT、语义标注和 HLoc 元数据，每个文件都
-可以独立下载。页面打开后会自动选中编号最新的可用过滤版地图，但由用户确认后点击
-“加载地图预览”，不会在初始连接时自动启动地图转换。存在过滤版时，网页和未
+可以独立下载。页面打开后会自动选中编号最新的可用过滤版地图。从开发者模式停止一次
+新建图后，后端会自动导出点云、过滤离群点、重建 OctoMap，完成后两个页面都会自动
+选中并显示该过滤地图。历史地图仍由用户确认后点击“加载地图预览”，不会在初始
+连接时自动启动地图转换。存在过滤版时，网页和未
 显式指定 `filtered` 的预览 API 都默认使用过滤版。地图沿用开发者页面的三维轨道视图：
 拖动改变 yaw/pitch、滚轮缩放；进入“选择目标”模式后点击可通行面选择导航目标。
 
@@ -97,6 +90,8 @@ WASD 或页面轮盘临时手动控制，松开即停车，再次选点即可开
 地图中心不会返回服务器绝对路径。地图下载只接受已发现的 `mapNNN` 和固定图层名称，
 大文件使用流式响应并支持 `Range` 断点续传。网页内所有地图、建图、定位、导航、相机
 和机器人控制均通过 HTTP API 实现；`GET /api/capabilities` 可以查询完整操作清单。
+面向外部网页和应用的完整请求/响应、局域网、轮询、错误码与安全说明见
+[API接口使用与交付说明.md](API接口使用与交付说明.md)。
 
 ```text
 GET  /api/capabilities
@@ -107,6 +102,8 @@ POST /api/maps/map037/preview       {"filtered": false}
 GET  /api/maps/map037/preview/cloud
 GET  /api/maps/map037/preview/voxels
 GET  /api/maps/map037/preview/terrain
+GET  /api/maps/map037/preview/costmap
+GET  /api/maps/map037/preview/obstacles
 GET  /api/maps/map037/preview/path
 GET  /api/maps/map037/download/database
 GET  /api/maps/map037/download/cloud

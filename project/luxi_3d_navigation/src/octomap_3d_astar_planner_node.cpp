@@ -35,6 +35,7 @@ public:
     declare_parameter<std::string>("octomap_topic", "/navigation/octomap");
     declare_parameter<std::string>("goal_topic", "/navigation/goal_pose");
     declare_parameter<std::string>("replan_request_topic", "/navigation/replan_request");
+    declare_parameter<std::string>("clear_path_topic", "/navigation/clear_path");
     declare_parameter<std::string>("path_topic", "/navigation/planned_path");
     declare_parameter<std::string>("planning_status_topic", "/navigation/planning_status");
     declare_parameter<std::string>("terrain_pose_topic", "/navigation/terrain_pose");
@@ -52,7 +53,7 @@ public:
     declare_parameter<bool>("strict_direct_ground_support", false);
     declare_parameter<int>("snap_search_radius_cells", 12);
     declare_parameter<int>("max_iterations", 500000);
-    declare_parameter<double>("costmap_margin", 0.15);
+    declare_parameter<double>("costmap_margin", 0.35);
     declare_parameter<double>("costmap_weight", 8.0);
     declare_parameter<double>("ground_normal_radius", 0.30);
     declare_parameter<double>("ground_max_slope_degrees", 35.0);
@@ -77,6 +78,20 @@ public:
         if (message->data) {
           replanLastGoal();
         }
+      });
+    clear_path_sub_ = create_subscription<std_msgs::msg::Bool>(
+      get_parameter("clear_path_topic").as_string(), 10,
+      [this](const std_msgs::msg::Bool::SharedPtr message) {
+        if (!message->data) {
+          return;
+        }
+        last_goal_.reset();
+        nav_msgs::msg::Path empty;
+        empty.header.stamp = now();
+        empty.header.frame_id = map_frame_;
+        path_pub_->publish(empty);
+        publishPlanningStatus(terrain_ ? "map_ready" : "waiting_map");
+        RCLCPP_INFO(get_logger(), "Global path and stored goal cleared by task manager");
       });
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local());
@@ -421,6 +436,7 @@ private:
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr replan_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr clear_path_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr planning_status_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr terrain_pose_pub_;

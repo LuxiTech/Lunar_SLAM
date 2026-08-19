@@ -2,6 +2,7 @@
 
 const $ = (selector) => document.querySelector(selector);
 const mapProjection = window.LuxiMapProjection;
+const navigationUi = window.LuxiNavigationUi;
 const connection = $("#connection");
 const connectionText = $("#connectionText");
 const topic = $("#topic");
@@ -135,6 +136,8 @@ let semanticHistory = [];
 let semanticBrushActive = false;
 let semanticBrushPointerId = null;
 let semanticDirty = false;
+let automaticFilteredMapHandled = null;
+let automaticFilteredMapLoading = false;
 
 const keyActions = {
   KeyW: "forward",
@@ -767,12 +770,8 @@ function updateNavigation(navigation) {
     navigationUseFiltered = navigation.map_variant === "filtered";
   }
   let name = navigationStateNames[navigation.state] || navigation.state;
-  if (navigation.follower_state === "localization_dead_reckoning") {
-    name = "定位短时推算中（限距 8 cm）";
-  } else if (navigation.follower_state === "localization_recovery_spin") {
-    name = "正沿原路径朝向持续旋转定位";
-  } else if (navigation.follower_state === "replanning_after_relocalization") {
-    name = "定位恢复，正在重新规划";
+  if (navigationUi.isRecoveryState(navigation.follower_state)) {
+    name = navigationUi.followerLabel(navigation.follower_state);
   } else if (navigation.follower_state === "replan_after_relocalization_timeout") {
     name = "恢复后重规划超时，已停车";
   } else if (navigation.follower_state === "traction_boost") {
@@ -827,8 +826,9 @@ function updateNavigation(navigation) {
     navigationTerrain.traversable_points.length > 0;
   navigationGoalButton.disabled =
     navigation.state !== "running" || !hasTraversableTerrain ||
-    !navigation.planner_map_ready;
-  navigationHomeSetButton.disabled = !hasTraversableTerrain;
+    !navigation.planner_map_ready || !navigation.planning_localization_ready;
+  navigationHomeSetButton.disabled =
+    navigation.state !== "running" || !hasTraversableTerrain;
   navigationHomeReturnButton.disabled =
     navigation.state !== "running" || !navigation.home ||
     !navigation.planning_localization_ready || estopActive;
@@ -844,7 +844,7 @@ function updateNavigation(navigation) {
   navigationStartButton.disabled =
     !navigation.planning_localization_ready || !navigation.path_ready ||
     navigation.active || estopActive;
-  navigationHaltButton.disabled = !navigation.active;
+  navigationHaltButton.disabled = !navigation.active && !navigation.path_ready;
   navigationPose = navigation.pose || null;
   if (navigationLoadPending) {
     drawNavigationMap(navigationVoxels, navigationPath, navigationCloud);
@@ -858,18 +858,12 @@ function updateNavigation(navigation) {
       ? ` x=${pose.x.toFixed(2)}m，y=${pose.y.toFixed(2)}m，` +
         `地表z=${pose.z.toFixed(2)}m，yaw=${pose.yaw_degrees.toFixed(1)}°`
       : "";
-    if (navigation.follower_state === "localization_dead_reckoning") {
-      navigationDetail.textContent =
-        `${mapName} 暂时失去地图匹配，正使用视觉惯性里程计短时推算，最多续行约 8 cm；随后停车搜索。`;
-    } else if (navigation.follower_state === "localization_recovery_spin") {
-      navigationDetail.textContent =
-        `${mapName} 已停止平移，正在障碍安全门监控下沿丢失定位前的路径朝向持续同向旋转；匹配稳定后自动继续。`;
-    } else if (navigation.follower_state === "replanning_after_relocalization") {
-      navigationDetail.textContent =
-        `${mapName} 定位已经重新确认，正在从修正后的当前位置到原目标重新规划；新路径生成前保持停车。`;
+    const recoveryMessage = navigationUi.recoveryMessage(navigation, mapName);
+    if (recoveryMessage) {
+      navigationDetail.textContent = recoveryMessage;
     } else if (navigation.follower_state === "replan_after_relocalization_timeout") {
       navigationDetail.textContent =
-        `${mapName} 定位恢复后 15 秒内未生成新路径，导航已停止并清除旧路径。`;
+        `${mapName} 定位恢复后在安全等待上限内仍未生成路线，导航已停车并保留诊断状态。`;
     } else if (navigation.follower_state === "traction_boost") {
       navigationDetail.textContent =
         `${mapName} 前方障碍层明确为空，但里程计未检测到有效位移，正在短时提高轮子输出；运动恢复后自动回到常速。`;
@@ -1570,7 +1564,9 @@ navigationStopButton.addEventListener("click", stopNavigation);
 navigationStartButton.addEventListener("click", startNavigationMotion);
 navigationHaltButton.addEventListener("click", haltNavigationMotion);
 navigationMapSelect.addEventListener("change", () => {
-  navigationUseFiltered = false;
+  navigationUseFiltered = Boolean(
+    navigationMapRecords.get(navigationMapSelect.value)?.filtered_loadable
+  );
   selectedGoal = null;
   selectedGoalPending = false;
   navigationCloud = {};
@@ -2187,16 +2183,29 @@ cameraStopButton.addEventListener("click", stopCamera);
 
 function updateMapping(mapping) {
   if (!mapping) return;
+  const postprocess = mapping.postprocess || {};
+  const filtering = ["waiting", "filtering"].includes(postprocess.state);
   const mappingStateName = mappingStateNames[mapping.state] || mapping.state;
-  mappingState.textContent = mappingStateName;
-  mappingState.className = `mapping-state ${mapping.state}`;
+  mappingState.textContent = filtering
+    ? "自动过滤中"
+    : postprocess.state === "completed" ? "过滤完成" : mappingStateName;
+  mappingState.className = `mapping-state ${filtering ? "running" : mapping.state}`;
   const calibrationRequired = currentImuCalibration.service_available
     && currentImuCalibration.state !== "calibrated";
   const cameraReady = Boolean(currentCameraStatus.ready);
-  mappingStartButton.disabled = !mapping.enabled || mapping.state === "running"
+  mappingStartButton.disabled = !mapping.enabled || mapping.state === "running" || filtering
     || calibrationRequired || !cameraReady;
   mappingStopButton.disabled = !mapping.enabled || mapping.state !== "running";
-  if (mapping.last_error) {
+  if (filtering) {
+    mappingDetail.textContent = postprocess.message || "正在生成过滤点云和 OctoMap…";
+  } else if (postprocess.state === "failed") {
+    mappingDetail.textContent = postprocess.message || "地图自动过滤失败。";
+  } else if (postprocess.state === "completed") {
+    mappingDetail.textContent = postprocess.message || "过滤地图已生成。";
+    if (postprocess.map_id && automaticFilteredMapHandled !== postprocess.map_id) {
+      void showAutomaticallyFilteredMap(postprocess.map_id);
+    }
+  } else if (mapping.last_error) {
     mappingDetail.textContent = mapping.last_error;
   } else if (mapping.state === "running") {
     const uptime = mapping.uptime_seconds == null ? "" : ` · ${mapping.uptime_seconds}s`;
@@ -2209,6 +2218,32 @@ function updateMapping(mapping) {
       : (calibrationRequired
         ? "请先将机器人放在水平面并完成 IMU 一键校准。"
         : "相机链路已就绪，可以开始建图。");
+  }
+}
+
+async function showAutomaticallyFilteredMap(mapId) {
+  if (automaticFilteredMapLoading || automaticFilteredMapHandled === mapId) return;
+  automaticFilteredMapLoading = true;
+  automaticFilteredMapHandled = mapId;
+  try {
+    const response = await fetch("/api/maps", {cache: "no-store"});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    updateNavigationMaps(Array.isArray(result.maps) ? result.maps : []);
+    const record = navigationMapRecords.get(mapId);
+    if (!record?.filtered_loadable) {
+      throw new Error("过滤地图文件尚未就绪");
+    }
+    navigationMapSelect.value = mapId;
+    navigationUseFiltered = true;
+    if (!await loadNavigationMap(true)) {
+      throw new Error("过滤地图加载失败");
+    }
+    showToast(`${mapId} 自动过滤完成，已显示过滤结果`);
+  } catch (error) {
+    showToast(`${mapId} 过滤结果显示失败：${error.message}`);
+  } finally {
+    automaticFilteredMapLoading = false;
   }
 }
 
@@ -2227,7 +2262,7 @@ async function stopMapping() {
   try {
     const result = await api("/api/mapping/stop");
     updateMapping(result.mapping);
-    showToast("RTAB-Map 已停止，地图数据库已保存");
+    showToast("RTAB-Map 已停止，地图已保存，正在后台自动过滤");
   } catch (error) {
     showToast(`建图停止失败：${error.message}`);
   }

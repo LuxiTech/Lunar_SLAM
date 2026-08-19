@@ -2,6 +2,7 @@
 
 const $ = (selector) => document.querySelector(selector);
 const mapProjection = window.LuxiMapProjection;
+const navigationUi = window.LuxiNavigationUi;
 const elements = {
   connection: $("#connectionBadge"),
   connectionText: $("#connectionText"),
@@ -127,6 +128,8 @@ const state = {
   estopActive: false,
   rgbRequestPending: false,
   rgbObjectUrl: null,
+  automaticFilteredMapHandled: null,
+  automaticFilteredMapLoading: false,
 };
 
 class ApiError extends Error {
@@ -348,12 +351,36 @@ async function loadPreview() {
     await refreshMaps();
     setMessage(elements.mapMessage, result.message, "success");
     showToast(`${record.id} 地图预览已加载`);
+    return true;
   } catch (error) {
     setMessage(elements.mapMessage, `地图加载失败：${error.message}`, "error");
     showToast(`地图加载失败：${error.message}`);
+    return false;
   } finally {
     elements.preview.disabled = false;
     setMapLoading(false);
+  }
+}
+
+async function showAutomaticallyFilteredMap(mapId) {
+  if (state.automaticFilteredMapLoading ||
+      state.automaticFilteredMapHandled === mapId) return;
+  state.automaticFilteredMapLoading = true;
+  state.automaticFilteredMapHandled = mapId;
+  try {
+    await refreshMaps();
+    const record = state.mapById.get(mapId);
+    if (!record?.filtered_loadable) {
+      throw new Error("过滤地图文件尚未就绪");
+    }
+    selectMap(mapId, true);
+    elements.filtered.checked = true;
+    if (!await loadPreview()) throw new Error("过滤地图加载失败");
+    setMessage(elements.mapMessage, `${mapId} 自动过滤完成，已显示过滤结果。`, "success");
+  } catch (error) {
+    setMessage(elements.mapMessage, `${mapId} 过滤结果显示失败：${error.message}`, "error");
+  } finally {
+    state.automaticFilteredMapLoading = false;
   }
 }
 
@@ -837,7 +864,10 @@ function updateNavigation(navigation) {
   if (wasActive && !state.navigation.active) {
     state.path = {};
   }
-  const stage = navigationStageLabel(state.navigation);
+  const recoveryState = navigationUi.isRecoveryState(state.navigation.follower_state);
+  const stage = recoveryState
+    ? navigationUi.followerLabel(state.navigation.follower_state)
+    : navigationStageLabel(state.navigation);
   const active = state.navigation.state === "running" || state.navigation.localization_stage === "localized";
   elements.navigationState.textContent = stage;
   elements.navigationState.classList.toggle("active", active);
@@ -845,24 +875,18 @@ function updateNavigation(navigation) {
   const poseText = pose
     ? `${Number(pose.x).toFixed(2)}, ${Number(pose.y).toFixed(2)}, ${Number(pose.z || 0).toFixed(2)}`
     : "--";
-  const followerLabels = {
-    traction_boost: "短时增力中",
-    aligning_goal_heading: "对准到达方向",
-    stuck_no_progress: "增力无效，已停车",
-    localization_recovery_spin: "单向旋转恢复定位",
-    replanning_after_relocalization: "定位恢复，正在重规划",
-    replan_after_relocalization_timeout: "恢复后重规划超时，已停车",
-    obstacle_recovery_spin: "前方受阻，安全原地转向",
-    obstacle_recovery_timeout: "转向未脱困，已停车",
-  };
   elements.liveDetails.innerHTML = [
     ["定位阶段", stage],
     ["机器人位置", poseText],
     ["规划状态", state.navigation.planning_state || "--"],
-    ["跟随状态", followerLabels[state.navigation.follower_state]
-      || state.navigation.follower_state || "--"],
+    ["任务状态", state.navigation.task_state || "--"],
+    ["跟随状态", navigationUi.followerLabel(state.navigation.follower_state)],
   ].map(([name, value]) => `<div><dt>${name}</dt><dd>${value}</dd></div>`).join("");
-  if (state.navigation.planning_error) {
+  const recoveryMessage = navigationUi.recoveryMessage(
+    state.navigation, state.navigation.map_id || "所选地图");
+  if (recoveryMessage) {
+    setMessage(elements.navigationMessage, recoveryMessage);
+  } else if (state.navigation.planning_error) {
     setMessage(elements.navigationMessage, state.navigation.planning_error, "error");
   } else if (state.navigation.localization_stage === "localized") {
     setMessage(elements.navigationMessage, "定位有效，可以选择并发送导航目标。", "success");
@@ -871,11 +895,17 @@ function updateNavigation(navigation) {
   }
   elements.stopLocalization.disabled = state.navigation.state !== "running";
   elements.haltTask.disabled = !state.navigation.active && !state.navigation.path_ready;
-  elements.startTask.disabled = Boolean(state.navigation.active) || !state.navigation.path_ready;
-  elements.sendGoal.disabled = state.navigation.state !== "running";
-  elements.setHome.disabled = !state.loadedMapId || !hasGeometry();
+  elements.startTask.disabled = Boolean(state.navigation.active) ||
+    !state.navigation.path_ready || !state.navigation.planning_localization_ready ||
+    state.estopActive;
+  elements.sendGoal.disabled = state.navigation.state !== "running" ||
+    !state.navigation.planner_map_ready ||
+    !state.navigation.planning_localization_ready || !state.loadedMapId || !hasGeometry();
+  elements.setHome.disabled = state.navigation.state !== "running"
+    || !state.loadedMapId || !hasGeometry();
   elements.returnHome.disabled = state.navigation.state !== "running"
-    || !state.navigation.home || !state.navigation.planning_localization_ready;
+    || !state.navigation.home || !state.navigation.planning_localization_ready
+    || state.estopActive;
   updateManualAvailability();
   scheduleDraw();
 }
@@ -1347,6 +1377,15 @@ async function refreshStatus() {
     updateRobotControl(result.robot_control || {});
     updateImuCalibration(result.imu_calibration || {});
     updateRgbStatus(result.preview || {});
+    const postprocess = result.mapping?.postprocess || {};
+    if (postprocess.state === "completed" && postprocess.map_id &&
+        state.automaticFilteredMapHandled !== postprocess.map_id) {
+      void showAutomaticallyFilteredMap(postprocess.map_id);
+    } else if (["waiting", "filtering"].includes(postprocess.state)) {
+      setMessage(elements.mapMessage, postprocess.message || "新地图正在自动过滤…");
+    } else if (postprocess.state === "failed") {
+      setMessage(elements.mapMessage, postprocess.message || "新地图自动过滤失败。", "error");
+    }
   } catch (_error) {
     setOnline(false);
   } finally {

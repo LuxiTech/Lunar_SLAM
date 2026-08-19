@@ -10,6 +10,7 @@ namespace luxi_location
 struct MapOdomCorrection
 {
   bool accepted{false};
+  bool applied{false};
   double translation_residual{0.0};
   double yaw_residual{0.0};
   std::string reason;
@@ -30,7 +31,8 @@ public:
   Eigen::Matrix4d predict(const Eigen::Matrix4d & odom_from_base) const;
   MapOdomCorrection correct(
     const Eigen::Matrix4d & measured_map_from_base,
-    const Eigen::Matrix4d & odom_from_base);
+    const Eigen::Matrix4d & odom_from_base,
+    bool apply_correction = true);
   const Eigen::Matrix4d & map_from_odom() const;
 
 private:

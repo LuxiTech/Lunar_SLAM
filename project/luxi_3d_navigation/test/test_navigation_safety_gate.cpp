@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "luxi_3d_navigation/navigation_safety_gate.hpp"
 
 namespace
@@ -208,6 +210,66 @@ TEST(NavigationSafetyGate, AllowsOnlyBriefScaledDeadReckoning)
   EXPECT_DOUBLE_EQ(gate.evaluate(2.2).command.linear.x, 0.0);
 }
 
+TEST(NavigationSafetyGate, DeadReckoningRequiresClearCorridorBeforeAndAfterLoss)
+{
+  luxi_3d_navigation::SafetyGateParameters parameters;
+  parameters.command_timeout = 2.0;
+  parameters.obstacle_timeout = 2.0;
+  parameters.planner_timeout = 2.0;
+  parameters.localization_timeout = 2.0;
+  parameters.dead_reckoning_duration = 1.0;
+  luxi_3d_navigation::NavigationSafetyGate gate(parameters);
+  gate.setNavigationActive(true, 1.0);
+  gate.updateCommand(movingCommand(), 1.0);
+  gate.updateObstacleState("blocked", 1.0);
+  gate.updatePlannerState("clear", 1.0);
+  gate.updateLocalizationState("tracking", 1.0);
+  gate.updateLocalizationState("degraded", 1.1);
+  gate.updateObstacleState("clear", 1.11);
+
+  const auto no_snapshot = gate.evaluate(1.12);
+  EXPECT_EQ(no_snapshot.state, "localization_recovery_waiting");
+  EXPECT_DOUBLE_EQ(no_snapshot.command.linear.x, 0.0);
+
+  gate.setNavigationActive(false, 1.2);
+  gate.setNavigationActive(true, 2.0);
+  gate.updateCommand(movingCommand(), 2.0);
+  gate.updateObstacleState("clear", 2.0);
+  gate.updatePlannerState("clear", 2.0);
+  gate.updateLocalizationState("tracking", 2.0);
+  gate.updateLocalizationState("degraded", 2.1);
+  EXPECT_GT(gate.evaluate(2.11).command.linear.x, 0.0);
+  gate.updateObstacleState("blocked", 2.12);
+  EXPECT_DOUBLE_EQ(gate.evaluate(2.13).command.linear.x, 0.0);
+}
+
+TEST(NavigationSafetyGate, DeadReckoningIsForwardOnlyAndDistanceBounded)
+{
+  luxi_3d_navigation::SafetyGateParameters parameters;
+  parameters.command_timeout = 2.0;
+  parameters.obstacle_timeout = 2.0;
+  parameters.planner_timeout = 2.0;
+  parameters.localization_timeout = 2.0;
+  parameters.dead_reckoning_duration = 0.8;
+  parameters.dead_reckoning_scale = 1.0;
+  parameters.maximum_dead_reckoning_linear_speed = 0.10;
+  luxi_3d_navigation::NavigationSafetyGate gate(parameters);
+  auto command = movingCommand();
+  command.linear.x = 0.20;
+  command.linear.y = 0.10;
+  gate.setNavigationActive(true, 1.0);
+  gate.updateCommand(command, 1.0);
+  gate.updateObstacleState("clear", 1.0);
+  gate.updatePlannerState("clear", 1.0);
+  gate.updateLocalizationState("tracking", 1.0);
+  gate.updateLocalizationState("degraded", 1.1);
+
+  const auto result = gate.evaluate(1.2);
+  EXPECT_DOUBLE_EQ(result.command.linear.x, 0.10);
+  EXPECT_DOUBLE_EQ(result.command.linear.y, 0.0);
+  EXPECT_DOUBLE_EQ(gate.evaluate(1.91).command.linear.x, 0.0);
+}
+
 TEST(NavigationSafetyGate, RecoveryRotationIsAngularOnlyAndObstacleGated)
 {
   luxi_3d_navigation::SafetyGateParameters parameters;
@@ -220,6 +282,7 @@ TEST(NavigationSafetyGate, RecoveryRotationIsAngularOnlyAndObstacleGated)
   gate.setNavigationActive(true, 1.0);
   gate.updateCommand(movingCommand(), 1.0);
   gate.updateObstacleState("clear", 1.0);
+  gate.updateRotationClearance(0.40, 1.0);
   gate.updatePlannerState("no_path", 1.0);
   gate.updateLocalizationState("searching", 1.0);
   gate.updateRecoveryActive(true, 1.0);
@@ -231,7 +294,12 @@ TEST(NavigationSafetyGate, RecoveryRotationIsAngularOnlyAndObstacleGated)
   gate.updateObstacleState("slow", 1.2);
   EXPECT_DOUBLE_EQ(gate.evaluate(1.21).command.angular.z, 0.20);
   gate.updateObstacleState("blocked", 1.3);
+  gate.updateRotationClearance(0.29, 1.3);
   EXPECT_DOUBLE_EQ(gate.evaluate(1.31).command.angular.z, 0.0);
+  gate.updateRotationClearance(0.40, 1.32);
+  EXPECT_DOUBLE_EQ(gate.evaluate(1.33).command.angular.z, 0.20);
+  gate.updateRotationClearance(0.29, 1.34);
+  EXPECT_DOUBLE_EQ(gate.evaluate(1.35).command.angular.z, 0.0);
 }
 
 TEST(NavigationSafetyGate, BlockedCorridorPermitsOnlyClearanceCheckedInPlaceTurn)
@@ -277,6 +345,8 @@ TEST(NavigationSafetyGate, RecoveryRotationCanRestoreStaleLocalization)
   gate.setNavigationActive(true, 1.0);
   gate.updateCommand(movingCommand(), 1.3);
   gate.updateObstacleState("clear", 1.3);
+  gate.updateRotationClearance(
+    std::numeric_limits<double>::infinity(), 1.3);
   gate.updatePlannerState("no_path", 1.0);
   gate.updateLocalizationState("tracking", 1.0);
   gate.updateRecoveryActive(true, 1.3);

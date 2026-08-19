@@ -20,15 +20,19 @@ luxi_icp_localization:
     # Learned VO is nominally 5 Hz but real CUDA contention with HLoc produced
     # occasional 0.56 s gaps. At the 0.10 m/s speed cap, 0.60 s is at most 6 cm.
     maximum_odometry_age: 0.60
-    # The current map's large uniform floor gives scan-to-map ICP a directional
-    # bias even while stationary. Keep ICP as a health check for the 0.5 m
-    # acceptance stage; do not let it rewrite the continuous odometry track.
-    map_odom_correction_gain: 0.0
+    # Correct visual-odometry drift gradually instead of freezing the global
+    # position after the first HLoc pose. Quality gates below prevent a large
+    # uniform floor or a temporary object from dragging the map alignment.
+    map_odom_correction_gain: 0.05
     # map029 logs show 0.26-0.33 m planar ICP ambiguity after obstacle turns,
     # while the recorded runaway was 1.9 m. Accept the former but not the latter.
-    # ICP does not rewrite odometry (gain=0); this is only a health threshold.
+    # Residuals above this remain health failures; smaller residuals are only
+    # applied when all three correction-quality gates pass.
     maximum_odometry_icp_translation_correction: 0.35
     maximum_odometry_icp_yaw_correction_deg: 10.0
+    map_odom_minimum_correction_fitness: 0.80
+    map_odom_maximum_correction_rmse: 0.08
+    map_odom_minimum_correction_static_ratio: 0.80
     # Repeated geometric disagreement is a localization failure, even when a
     # large floor leaves a misleadingly high overlap score.
     relocalize_on_tracking_icp_failure: true

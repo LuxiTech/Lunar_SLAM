@@ -153,6 +153,9 @@ public:
     declare_parameter("map_odom_correction_gain", 0.05);
     declare_parameter("maximum_odometry_icp_translation_correction", 0.35);
     declare_parameter("maximum_odometry_icp_yaw_correction_deg", 10.0);
+    declare_parameter("map_odom_minimum_correction_fitness", 0.80);
+    declare_parameter("map_odom_maximum_correction_rmse", 0.08);
+    declare_parameter("map_odom_minimum_correction_static_ratio", 0.80);
     declare_parameter("relocalize_on_tracking_icp_failure", true);
     declare_parameter("relocalization_minimum_static_point_ratio", 0.90);
     declare_parameter("preserve_initial_translation", true);
@@ -220,6 +223,12 @@ public:
     preserve_initial_translation_ =
       get_parameter("preserve_initial_translation").as_bool();
     maximum_odometry_age_ = get_parameter("maximum_odometry_age").as_double();
+    map_odom_minimum_correction_fitness_ =
+      get_parameter("map_odom_minimum_correction_fitness").as_double();
+    map_odom_maximum_correction_rmse_ =
+      get_parameter("map_odom_maximum_correction_rmse").as_double();
+    map_odom_minimum_correction_static_ratio_ =
+      get_parameter("map_odom_minimum_correction_static_ratio").as_double();
     motion_command_timeout_ = get_parameter("motion_command_timeout").as_double();
     initial_pose_max_variance_ =
       get_parameter("initial_pose_max_variance").as_double();
@@ -227,7 +236,12 @@ public:
       minimum_depth_ <= 0.0 || maximum_depth_ <= minimum_depth_ ||
       maximum_odometry_age_ <= 0.0 || motion_command_timeout_ <= 0.0 ||
       relocalization_minimum_static_point_ratio_ < 0.0 ||
-      relocalization_minimum_static_point_ratio_ > 1.0)
+      relocalization_minimum_static_point_ratio_ > 1.0 ||
+      map_odom_minimum_correction_fitness_ < 0.0 ||
+      map_odom_minimum_correction_fitness_ > 1.0 ||
+      map_odom_maximum_correction_rmse_ <= 0.0 ||
+      map_odom_minimum_correction_static_ratio_ < 0.0 ||
+      map_odom_minimum_correction_static_ratio_ > 1.0)
     {
       throw std::invalid_argument("depth and processing parameters are invalid");
     }
@@ -703,12 +717,21 @@ private:
             stationary_map_pose_ = fused_pose;
           }
         } else {
-          odometry_correction = map_odom_alignment_->correct(result.pose, odom_from_base);
+          const bool correction_geometry_ready =
+            result.fitness >= map_odom_minimum_correction_fitness_ &&
+            std::isfinite(result.rmse) &&
+            result.rmse <= map_odom_maximum_correction_rmse_ &&
+            result.static_point_ratio >= map_odom_minimum_correction_static_ratio_;
+          odometry_correction = map_odom_alignment_->correct(
+            result.pose, odom_from_base, correction_geometry_ready);
           accepted = odometry_correction.accepted;
           if (accepted) {
             fused_pose = map_odom_alignment_->predict(odom_from_base);
             if (!motion_active_locked()) {
-              fused_pose = stationary_map_pose_;
+              // Freeze raw visual odometry while stopped, but retain a
+              // high-confidence scan-to-map correction. Otherwise a correction
+              // accumulated while stationary appears as a jump at motion start.
+              stationary_map_pose_ = fused_pose;
             }
             const auto decision = tracking_pose_gate_->evaluate(fused_pose, stamp_seconds);
             accepted = decision.accepted;
@@ -756,7 +779,9 @@ private:
            << result.yaw_correction * 180.0 / M_PI << "deg";
     if (!initial_alignment && odometry_correction.reason.size() > 0U) {
       status << "; odom_residual=" << odometry_correction.translation_residual << "m/"
-             << odometry_correction.yaw_residual * 180.0 / M_PI << "deg";
+             << odometry_correction.yaw_residual * 180.0 / M_PI << "deg"
+             << "; map_correction="
+             << (odometry_correction.applied ? "applied" : "held");
     }
     if (hloc_action == HlocAction::kDisable) {
       request_hloc_enabled(false);
@@ -909,6 +934,9 @@ private:
   double minimum_depth_{0.25};
   double maximum_depth_{4.0};
   double maximum_odometry_age_{0.25};
+  double map_odom_minimum_correction_fitness_{0.80};
+  double map_odom_maximum_correction_rmse_{0.08};
+  double map_odom_minimum_correction_static_ratio_{0.80};
   double motion_command_timeout_{0.50};
   double initial_pose_max_variance_{0.0};
   bool use_imu_yaw_prediction_{true};

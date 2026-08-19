@@ -59,11 +59,15 @@ public:
       "relocalization_request_topic", "/luxi_location/relocalization_request");
     declare_parameter<std::string>(
       "replan_request_topic", "/navigation/replan_request");
+    declare_parameter<std::string>(
+      "obstacle_reset_topic", "/navigation/local_obstacles/reset");
     declare_parameter<double>("dead_reckoning_duration", 0.80);
-    declare_parameter<double>("localization_recovery_timeout", 45.0);
+    // Zero means keep rotating until localization succeeds or the task is cancelled.
+    declare_parameter<double>("localization_recovery_timeout", 0.0);
     declare_parameter<double>("localization_recovery_angular_speed", 0.10);
     declare_parameter<double>("localization_recovery_confirmation_time", 1.0);
-    declare_parameter<double>("replan_after_relocalization_timeout", 15.0);
+    declare_parameter<double>("replan_after_relocalization_timeout", 120.0);
+    declare_parameter<double>("replan_retry_interval", 5.0);
     declare_parameter<double>("max_path_deviation_m", 0.50);
     declare_parameter<double>("traction_progress_timeout", 2.5);
     declare_parameter<double>("traction_progress_distance", 0.04);
@@ -108,6 +112,8 @@ public:
       get_parameter("relocalization_request_topic").as_string(), 10);
     replan_request_pub_ = create_publisher<std_msgs::msg::Bool>(
       get_parameter("replan_request_topic").as_string(), 10);
+    obstacle_reset_pub_ = create_publisher<std_msgs::msg::Bool>(
+      get_parameter("obstacle_reset_topic").as_string(), 10);
     terrain_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       get_parameter("terrain_pose_topic").as_string(), 10,
       [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
@@ -137,6 +143,10 @@ public:
     path_sub_ = create_subscription<nav_msgs::msg::Path>(
       get_parameter("path_topic").as_string(), rclcpp::QoS(1).reliable().transient_local(),
       [this](const nav_msgs::msg::Path::SharedPtr message) {
+        if (replan_pending_ && obstacle_rebuild_pending_ && !message->poses.empty()) {
+          path_.clear();
+          return;
+        }
         path_ = message->poses;
         if (path_.empty()) {
           if (replan_pending_ && active_) {
@@ -148,7 +158,9 @@ public:
         } else if (active_) {
           const bool recovered_replan = replan_pending_;
           replan_pending_ = false;
+          obstacle_rebuild_pending_ = false;
           replan_requested_at_ = -1.0;
+          last_replan_publish_at_ = -1.0;
           updateActiveState("active");
           RCLCPP_INFO(
             get_logger(),
@@ -173,9 +185,14 @@ public:
           obstacle_recovery_started_at_ = -1.0;
           last_path_turn_direction_ = 1.0;
           replan_pending_ = false;
+          obstacle_rebuild_pending_ = false;
           replan_requested_at_ = -1.0;
+          last_replan_publish_at_ = -1.0;
           forced_relocalization_ = false;
           forced_relocalization_observed_fault_ = false;
+          localization_fault_active_ = false;
+          last_tracking_forward_clear_ = false;
+          forward_clear_at_localization_loss_ = false;
         }
         setState(
           message->data && !path_.empty(),
@@ -191,9 +208,14 @@ public:
           traction_boost_active_ = false;
           obstacle_recovery_started_at_ = -1.0;
           replan_pending_ = false;
+          obstacle_rebuild_pending_ = false;
           replan_requested_at_ = -1.0;
+          last_replan_publish_at_ = -1.0;
           forced_relocalization_ = false;
           forced_relocalization_observed_fault_ = false;
+          localization_fault_active_ = false;
+          last_tracking_forward_clear_ = false;
+          forward_clear_at_localization_loss_ = false;
           path_.clear();
           setState(false, "stopped");
         }
@@ -219,13 +241,35 @@ private:
     if (replan_pending_) {
       publishRecoveryActive(false);
       publishStop();
+      const bool obstacle_state_fresh_after_reset =
+        obstacle_state_received_at_ >= replan_requested_at_;
+      const bool obstacle_layer_ready = obstacle_state_fresh_after_reset &&
+        (obstacle_state_ == "clear" || obstacle_state_ == "slow" ||
+        obstacle_state_ == "blocked");
+      if (obstacle_rebuild_pending_ && obstacle_layer_ready) {
+        obstacle_rebuild_pending_ = false;
+        publishReplanRequest(now_seconds);
+        updateActiveState("replanning_after_relocalization");
+        RCLCPP_INFO(
+          get_logger(),
+          "Fresh obstacle layer ready after relocalization; requesting corrected path");
+      } else if (!obstacle_rebuild_pending_ &&
+        (last_replan_publish_at_ < 0.0 ||
+        now_seconds - last_replan_publish_at_ >=
+        get_parameter("replan_retry_interval").as_double()))
+      {
+        publishReplanRequest(now_seconds);
+        updateActiveState("replanning_waiting_for_clear");
+      }
       if (replan_requested_at_ >= 0.0 &&
         now_seconds - replan_requested_at_ >=
         get_parameter("replan_after_relocalization_timeout").as_double())
       {
         RCLCPP_ERROR(
-          get_logger(), "No new path arrived after relocalization; navigation stopped");
+          get_logger(),
+          "No safe local path arrived during the bounded relocalization recovery; navigation stopped");
         replan_pending_ = false;
+        obstacle_rebuild_pending_ = false;
         setState(false, "replan_after_relocalization_timeout");
       }
       return;
@@ -242,8 +286,10 @@ private:
     }
     const std::string health = forced_relocalization_ &&
       !forced_relocalization_observed_fault_ ? "searching" : observed_health;
+    const bool forward_clear_for_dead_reckoning =
+      updateLocalizationLossClearance(health, now_seconds);
     const auto recovery_action = localization_recovery_controller_->update(
-      health, now_seconds);
+      health, now_seconds, forward_clear_for_dead_reckoning);
     if (recovery_action == luxi_3d_navigation::LocalizationRecoveryAction::kStop) {
       traction_boost_controller_->reset();
       traction_boost_active_ = false;
@@ -502,7 +548,9 @@ private:
   void handleLocalizationFault()
   {
     const double now_seconds = steadyNow();
-    const auto action = localization_recovery_controller_->update("searching", now_seconds);
+    const auto action = localization_recovery_controller_->update(
+      "searching", now_seconds,
+      updateLocalizationLossClearance("searching", now_seconds));
     if (action == luxi_3d_navigation::LocalizationRecoveryAction::kRotate) {
       publishRecoveryRotation();
       return;
@@ -510,6 +558,36 @@ private:
     publishRecoveryActive(false);
     publishStop();
     updateActiveState("localization_recovery_waiting");
+  }
+
+  bool forwardCorridorClear(const double now_seconds) const
+  {
+    const double timeout = get_parameter("traction_observation_timeout").as_double();
+    return obstacle_state_ == "clear" && obstacle_state_received_at_ >= 0.0 &&
+      now_seconds - obstacle_state_received_at_ <= timeout;
+  }
+
+  bool updateLocalizationLossClearance(
+    const std::string & health, const double now_seconds)
+  {
+    const bool currently_clear = forwardCorridorClear(now_seconds);
+    if (health == "tracking") {
+      localization_fault_active_ = false;
+      last_tracking_forward_clear_ = currently_clear;
+      forward_clear_at_localization_loss_ = false;
+      return false;
+    }
+    if (!localization_fault_active_) {
+      localization_fault_active_ = true;
+      forward_clear_at_localization_loss_ =
+        last_tracking_forward_clear_ && currently_clear;
+      RCLCPP_WARN(
+        get_logger(),
+        forward_clear_at_localization_loss_ ?
+        "Localization lost with a clear forward corridor; allowing bounded dead reckoning" :
+        "Localization lost without a trusted clear-forward snapshot; translation held");
+    }
+    return forward_clear_at_localization_loss_ && currently_clear;
   }
 
   void beginForcedRelocalization()
@@ -533,16 +611,26 @@ private:
     forced_relocalization_observed_fault_ = false;
     replan_pending_ = true;
     replan_requested_at_ = steadyNow();
+    last_replan_publish_at_ = -1.0;
+    obstacle_rebuild_pending_ = true;
     path_.clear();
     publishRecoveryActive(false);
     publishStop();
     updateActiveState("replanning_after_relocalization");
+    std_msgs::msg::Bool reset;
+    reset.data = true;
+    obstacle_reset_pub_->publish(reset);
+    RCLCPP_INFO(
+      get_logger(),
+      "Localization recovered; rebuilding the rolling obstacle layer before replanning to the original goal");
+  }
+
+  void publishReplanRequest(const double now_seconds)
+  {
     std_msgs::msg::Bool request;
     request.data = true;
     replan_request_pub_->publish(request);
-    RCLCPP_INFO(
-      get_logger(),
-      "Localization recovered; requesting a fresh path from the corrected pose to the original goal");
+    last_replan_publish_at_ = now_seconds;
   }
 
   void publishRecoveryRotation()
@@ -606,9 +694,14 @@ private:
       traction_boost_active_ = false;
       obstacle_recovery_started_at_ = -1.0;
       replan_pending_ = false;
+      obstacle_rebuild_pending_ = false;
       replan_requested_at_ = -1.0;
+      last_replan_publish_at_ = -1.0;
       forced_relocalization_ = false;
       forced_relocalization_observed_fault_ = false;
+      localization_fault_active_ = false;
+      last_tracking_forward_clear_ = false;
+      forward_clear_at_localization_loss_ = false;
       publishRecoveryActive(false);
       publishStop();
     }
@@ -633,6 +726,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr recovery_active_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr relocalization_request_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr replan_request_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr obstacle_reset_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::optional<geometry_msgs::msg::PoseStamped> terrain_pose_;
   std::optional<nav_msgs::msg::Odometry> odometry_;
@@ -646,9 +740,14 @@ private:
   bool traction_boost_active_{false};
   double obstacle_recovery_started_at_{-1.0};
   bool replan_pending_{false};
+  bool obstacle_rebuild_pending_{false};
   double replan_requested_at_{-1.0};
+  double last_replan_publish_at_{-1.0};
   bool forced_relocalization_{false};
   bool forced_relocalization_observed_fault_{false};
+  bool localization_fault_active_{false};
+  bool last_tracking_forward_clear_{false};
+  bool forward_clear_at_localization_loss_{false};
   std::unique_ptr<luxi_3d_navigation::LocalizationRecoveryController>
     localization_recovery_controller_;
   std::unique_ptr<luxi_3d_navigation::TractionBoostController>

@@ -477,10 +477,28 @@ TEST(MapOdomAlignment, AppliesOnlyBoundedFractionOfAcceptedIcpCorrection)
 
   const auto decision = alignment.correct(measured, Eigen::Matrix4d::Identity());
   ASSERT_TRUE(decision.accepted) << decision.reason;
+  EXPECT_TRUE(decision.applied);
   const auto corrected = alignment.predict(Eigen::Matrix4d::Identity());
   EXPECT_NEAR(corrected(0, 3), 0.008, 1e-9);
   EXPECT_NEAR(corrected(1, 3), -0.004, 1e-9);
   EXPECT_NEAR(luxi_location::IcpLocalizer::yaw(corrected), 0.005, 1e-9);
+}
+
+TEST(MapOdomAlignment, HoldsCorrectionWhenSceneGeometryIsWeak)
+{
+  luxi_location::MapOdomAlignment alignment(0.10, 0.20, 10.0 * M_PI / 180.0);
+  alignment.initialize(Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity());
+  const auto ambiguous =
+    luxi_location::IcpLocalizer::planar_pose(0.15, -0.04, 0.0, 0.05);
+
+  const auto decision = alignment.correct(
+    ambiguous, Eigen::Matrix4d::Identity(), false);
+
+  EXPECT_TRUE(decision.accepted);
+  EXPECT_FALSE(decision.applied);
+  EXPECT_TRUE(
+    alignment.predict(Eigen::Matrix4d::Identity()).isApprox(
+      Eigen::Matrix4d::Identity(), 1e-9));
 }
 
 TEST(CommandGatedOdometry, FreezesVisualDriftWhileVelocityCommandIsZero)

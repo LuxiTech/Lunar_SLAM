@@ -102,9 +102,23 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             assert response.status == 200
             assert b"Luxi" in response.read()
 
+        with urlopen(base_url + "/user", timeout=2.0) as response:
+            assert response.status == 200
+            user_page = response.read()
+            assert "Luxi 地图中心".encode("utf-8") in user_page
+            assert b'href="/developer"' in user_page
+
+        with urlopen(base_url + "/developer", timeout=2.0) as response:
+            assert response.status == 200
+            developer_page = response.read()
+            assert "Luxi 开发者模式".encode("utf-8") in developer_page
+            assert b'href="/user"' in developer_page
+
         with urlopen(base_url + "/map_projection.js", timeout=2.0) as response:
             assert response.status == 200
-            assert b"unprojectGround" in response.read()
+            projection = response.read()
+            assert b"unprojectGround" in projection
+            assert b"LuxiNavigationUi" in projection
 
         with urlopen(base_url + "/map_portal.js", timeout=2.0) as response:
             assert response.status == 200
@@ -121,10 +135,12 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
 
         with urlopen(base_url + "/api/capabilities", timeout=2.0) as response:
             capabilities = json.load(response)
-            assert any(
-                operation["path"] == "/api/maps/{map_id}/preview/cloud"
-                for operation in capabilities["operations"]
-            )
+            capability_paths = {
+                operation["path"] for operation in capabilities["operations"]
+            }
+            assert "/api/maps/{map_id}/preview/cloud" in capability_paths
+            assert "/api/maps/{map_id}/preview/costmap" in capability_paths
+            assert "/api/maps/{map_id}/preview/obstacles" in capability_paths
 
         range_request = Request(
             base_url + "/api/maps/map011/download/database",
@@ -251,6 +267,24 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
             terrain = json.load(response)["terrain"]
             assert terrain["traversable_points"] == []
             assert terrain["obstacle_points"] == []
+        with node._navigation_lock:
+            node._terrain_map_id = "map011"
+            node._terrain_variant = "original"
+            node._terrain_resolution = 0.1
+            node._terrain_traversable_points = [(1.0, 2.0, 0.1, 0.75)]
+            node._terrain_obstacle_points = [(3.0, 4.0, 0.2)]
+        with urlopen(
+            base_url + "/api/maps/map011/preview/costmap", timeout=2.0
+        ) as response:
+            costmap = json.load(response)["costmap"]
+            assert costmap["point_count"] == 1
+            assert costmap["points"] == [[1.0, 2.0, 0.1, 0.75]]
+        with urlopen(
+            base_url + "/api/maps/map011/preview/obstacles", timeout=2.0
+        ) as response:
+            obstacles = json.load(response)["obstacles"]
+            assert obstacles["point_count"] == 1
+            assert obstacles["points"] == [[3.0, 4.0, 0.2]]
         try:
             urlopen(base_url + "/api/preview/rgb", timeout=2.0)
             assert False, "an RGB endpoint without camera input must return 404"

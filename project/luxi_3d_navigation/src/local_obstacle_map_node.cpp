@@ -16,6 +16,7 @@
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float32.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "tf2/LinearMath/Transform.h"
@@ -108,6 +109,10 @@ public:
     tf_timeout_ = declare_parameter<double>("tf_timeout", 0.05);
     state_clear_hold_ = declare_parameter<double>("state_clear_hold", 0.50);
     publish_rate_ = std::max(1.0, declare_parameter<double>("publish_rate", 15.0));
+    minimum_fresh_frames_after_reset_ = std::max(
+      1, static_cast<int>(declare_parameter<int>("minimum_fresh_frames_after_reset", 2)));
+    reset_topic_ = declare_parameter<std::string>(
+      "reset_topic", "/navigation/local_obstacles/reset");
 
     if (minimum_depth_ <= 0.0 || maximum_depth_ <= minimum_depth_ ||
       minimum_obstacle_z_ >= maximum_obstacle_z_ || stop_distance_ <= 0.0 ||
@@ -131,6 +136,13 @@ public:
     depth_sub_ = create_subscription<sensor_msgs::msg::Image>(
       depth_topic_, latest_sensor_qos,
       [this](const sensor_msgs::msg::Image::SharedPtr message) {onDepth(*message);});
+    reset_sub_ = create_subscription<std_msgs::msg::Bool>(
+      reset_topic_, rclcpp::QoS(1).reliable(),
+      [this](const std_msgs::msg::Bool::SharedPtr message) {
+        if (message->data) {
+          resetAfterRelocalization();
+        }
+      });
     timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / publish_rate_), [this]() {publish();});
     publishState("stale");
@@ -141,6 +153,20 @@ public:
   }
 
 private:
+  void resetAfterRelocalization()
+  {
+    grid_.clear();
+    fresh_frames_since_reset_ = 0;
+    last_successful_depth_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    safety_state_ = "rebuilding";
+    less_restrictive_candidate_.clear();
+    publishState("rebuilding");
+    RCLCPP_WARN(
+      get_logger(),
+      "Rolling obstacle history cleared after relocalization; waiting for %d fresh depth frames",
+      minimum_fresh_frames_after_reset_);
+  }
+
   RollingVoxelGridParameters gridParameters()
   {
     RollingVoxelGridParameters parameters;
@@ -242,6 +268,8 @@ private:
       grid_.integrateFrame(point3D(target_from_camera.getOrigin()), observations, stamp.seconds());
       grid_.prune(point3D(target_from_base.getOrigin()), stamp.seconds());
       last_successful_depth_ = now();
+      fresh_frames_since_reset_ = std::min(
+        minimum_fresh_frames_after_reset_, fresh_frames_since_reset_ + 1);
       last_error_.clear();
     } catch (const tf2::TransformException & error) {
       last_error_ = "tf_unavailable";
@@ -253,12 +281,15 @@ private:
   void publish()
   {
     const auto current_time = now();
-    const bool healthy = last_successful_depth_.nanoseconds() != 0 &&
+    const bool healthy = fresh_frames_since_reset_ >= minimum_fresh_frames_after_reset_ &&
+      last_successful_depth_.nanoseconds() != 0 &&
       (current_time - last_successful_depth_).seconds() <= sensor_timeout_;
     if (!healthy) {
-      safety_state_ = last_error_.empty() ? "stale" : last_error_;
+      const std::string state = fresh_frames_since_reset_ < minimum_fresh_frames_after_reset_ ?
+        "rebuilding" : (last_error_.empty() ? "stale" : last_error_);
+      safety_state_ = state;
       less_restrictive_candidate_.clear();
-      publishState(last_error_.empty() ? "stale" : last_error_);
+      publishState(state);
       publishNearest(std::numeric_limits<float>::infinity());
       publishRotationClearance(std::numeric_limits<float>::infinity());
       return;
@@ -394,6 +425,7 @@ private:
   std::string state_topic_;
   std::string nearest_topic_;
   std::string rotation_clearance_topic_;
+  std::string reset_topic_;
   std::string last_error_;
   std::string last_published_state_;
   int skip_pixel_{};
@@ -412,6 +444,8 @@ private:
   double tf_timeout_{};
   double state_clear_hold_{};
   double publish_rate_{};
+  int minimum_fresh_frames_after_reset_{2};
+  int fresh_frames_since_reset_{0};
   rclcpp::Time last_depth_received_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_successful_depth_{0, 0, RCL_ROS_TIME};
   rclcpp::Time less_restrictive_since_{0, 0, RCL_ROS_TIME};
@@ -420,6 +454,7 @@ private:
   sensor_msgs::msg::CameraInfo::SharedPtr camera_info_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr points_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr nearest_pub_;

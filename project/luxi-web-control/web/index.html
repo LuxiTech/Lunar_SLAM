@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <meta name="theme-color" content="#10141d">
-  <title>Luxi 小车控制</title>
+  <title>Luxi 开发者模式</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -14,9 +14,15 @@
         <p class="eyebrow">LUXI · ROS 2</p>
         <h1>小车遥控台</h1>
       </div>
-      <div id="connection" class="connection offline">
-        <span class="dot"></span>
-        <span id="connectionText">正在连接</span>
+      <div class="topbar-actions">
+        <nav class="mode-switcher" aria-label="界面模式切换">
+          <a href="/user">用户模式</a>
+          <a href="/developer" class="active" aria-current="page">开发者模式</a>
+        </nav>
+        <div id="connection" class="connection offline">
+          <span class="dot"></span>
+          <span id="connectionText">正在连接</span>
+        </div>
       </div>
     </header>
 
@@ -266,7 +272,7 @@
         <canvas id="voxelMapCanvas" aria-label="可拖动查看的可通行区域、代价地图、障碍物和全局路径"></canvas>
         <span id="voxelMapHint" class="preview-overlay">加载地图后显示可通行区域、代价边缘和障碍物；拖动旋转，滚轮缩放</span>
       </div>
-      <p class="navigation-note">选择地图会自动生成 HLoc 索引，并由 C++ 地形模型按 0.05 m 体素分割可通行面、障碍物和代价边缘。当前机器人硬碰撞半径为 0.25 m，再向外铺 0.15 m 渐变代价带，因此最外层距离障碍物约 0.40 m；规划器会优先选择低代价的中间区域。语义标注不会修改原始地图：岩石/墙画笔只选择高于地面阈值的占用体素；坑通过地面多边形和估计深度记录。默认视角中 +X（前方）朝上、+Y（左方）朝左。紫色箭头为当前机器人位姿；定位完成后可选择目标位置和到达方向，规划完成后点击“出发”。</p>
+      <p class="navigation-note">选择地图会自动生成 HLoc 索引，并由 C++ 地形模型按 0.05 m 体素分割可通行面、障碍物和代价边缘。当前机器人硬碰撞半径为 0.25 m，再向外铺 0.35 m 渐变代价带，因此最外层距离障碍物约 0.60 m；规划器会优先选择低代价的中间区域。语义标注不会修改原始地图：岩石/墙画笔只选择高于地面阈值的占用体素；坑通过地面多边形和估计深度记录。默认视角中 +X（前方）朝上、+Y（左方）朝左。紫色箭头为当前机器人位姿；定位完成后可选择目标位置和到达方向，规划完成后点击“出发”。</p>
     </section>
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

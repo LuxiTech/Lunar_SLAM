@@ -56,4 +56,19 @@ TEST(RollingVoxelGrid, PrunesEntriesOutsideSlidingWindow)
   EXPECT_EQ(grid.entryCount(), 0U);
 }
 
+TEST(RollingVoxelGrid, ClearRemovesAccumulatedHistory)
+{
+  auto grid = makeGrid();
+  const luxi_3d_navigation::Point3D origin{0.0, 0.0, 0.0};
+  const std::vector<luxi_3d_navigation::RayObservation> hit{{{0.55, 0.05, 0.05}, true}};
+  grid.integrateFrame(origin, hit, 1.0);
+  grid.integrateFrame(origin, hit, 1.1);
+  ASSERT_FALSE(grid.occupiedPoints(1.1).empty());
+
+  grid.clear();
+
+  EXPECT_EQ(grid.entryCount(), 0U);
+  EXPECT_TRUE(grid.occupiedPoints(1.1).empty());
+}
+
 }  // namespace

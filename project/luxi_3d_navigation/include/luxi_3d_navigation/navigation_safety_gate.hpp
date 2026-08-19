@@ -25,6 +25,9 @@ struct SafetyGateParameters
   double healthy_resume_hold{0.50};
   double dead_reckoning_duration{0.80};
   double dead_reckoning_scale{0.50};
+  // Combined with dead_reckoning_duration this is also a hard travel bound.
+  // The default permits at most 0.08 m of forward motion after localization loss.
+  double maximum_dead_reckoning_linear_speed{0.10};
   double maximum_recovery_angular_speed{0.20};
   double minimum_obstacle_rotation_clearance{0.30};
   double maximum_obstacle_recovery_angular_speed{0.20};
@@ -54,6 +57,8 @@ public:
       recovery_active_ = false;
       localization_fault_started_at_ = -1.0;
       obstacle_fault_started_at_ = -1.0;
+      last_tracking_forward_clear_ = false;
+      forward_clear_at_localization_loss_ = false;
     } else if (!active_) {
       healthy_since_ = -1.0;
     }
@@ -73,13 +78,18 @@ public:
     obstacle_state_ = state;
     obstacle_time_ = now_seconds;
     have_obstacle_state_ = true;
+    if (localization_state_ == "tracking") {
+      last_tracking_forward_clear_ = state == "clear";
+    }
   }
 
   void updateRotationClearance(double distance, double now_seconds)
   {
     rotation_clearance_ = distance;
     rotation_clearance_time_ = now_seconds;
-    have_rotation_clearance_ = std::isfinite(distance);
+    // Positive infinity is the local obstacle map's explicit "no measured
+    // obstacle" value and therefore represents valid, unbounded clearance.
+    have_rotation_clearance_ = !std::isnan(distance) && distance >= 0.0;
   }
 
   void updatePlannerState(const std::string & state, double now_seconds)
@@ -93,8 +103,14 @@ public:
   {
     if (state == "tracking") {
       localization_fault_started_at_ = -1.0;
+      last_tracking_forward_clear_ = forwardCorridorClear(now_seconds);
+      forward_clear_at_localization_loss_ = false;
     } else if (localization_state_ == "tracking" || localization_fault_started_at_ < 0.0) {
       localization_fault_started_at_ = now_seconds;
+      // Snapshot the final trusted obstacle observation. Clearing after the
+      // pose is already lost must not retroactively authorize blind travel.
+      forward_clear_at_localization_loss_ =
+        last_tracking_forward_clear_ && forwardCorridorClear(now_seconds);
     }
     localization_state_ = state;
     localization_time_ = now_seconds;
@@ -160,9 +176,13 @@ public:
       result.state = "command_stale";
       return result;
     }
+    const bool rotation_clearance_fresh = have_rotation_clearance_ &&
+      now_seconds - rotation_clearance_time_ <= parameters_.obstacle_timeout;
+    const bool recovery_rotation_clear = rotation_clearance_fresh &&
+      rotation_clearance_ >= parameters_.minimum_obstacle_rotation_clearance;
     if (recovery_active_ &&
       now_seconds - recovery_time_ <= parameters_.command_timeout &&
-      obstacle_state_ != "blocked")
+      recovery_rotation_clear)
     {
       // A stale localization heartbeat/TF is itself one reason the follower
       // requests recovery. Permit only the explicitly marked, angular-only
@@ -184,22 +204,26 @@ public:
       const bool planner_ready_during_recovery = !planner_stale &&
         (planner_state_ == "clear" || planner_state_ == "ready");
       if (!localization_stale && dead_reckoning_state && within_dead_reckoning_window &&
-        planner_ready_during_recovery && obstacle_state_ != "blocked")
+        planner_ready_during_recovery && forward_clear_at_localization_loss_ &&
+        obstacle_state_ == "clear")
       {
         const double scale = std::clamp(parameters_.dead_reckoning_scale, 0.0, 1.0);
-        result.command = command_;
-        const double original_x = result.command.linear.x;
-        const double original_y = result.command.linear.y;
-        result.command.linear.x *= scale;
-        result.command.linear.y *= scale;
-        result.command.angular.z *= scale;
+        const double original_x = std::max(0.0, command_.linear.x);
+        result.command.linear.x = std::clamp(
+          original_x * scale, 0.0,
+          std::max(0.0, parameters_.maximum_dead_reckoning_linear_speed));
+        result.command.angular.z = command_.angular.z * scale;
         preserveMinimumLinearCommand(original_x, result.command.linear.x);
-        preserveMinimumLinearCommand(original_y, result.command.linear.y);
+        result.command.linear.x = std::min(
+          result.command.linear.x,
+          std::max(0.0, parameters_.maximum_dead_reckoning_linear_speed));
         result.state = "localization_dead_reckoning";
         return result;
       }
-      result.state = localization_stale ? "localization_stale" :
-        "localization_" + localization_state_;
+      result.state = within_dead_reckoning_window ?
+        "localization_recovery_waiting" :
+        (localization_stale ? "localization_stale" :
+        "localization_" + localization_state_);
       return result;
     }
     if (planner_stale) {
@@ -207,8 +231,6 @@ public:
       return result;
     }
     const bool planner_ready = planner_state_ == "clear" || planner_state_ == "ready";
-    const bool rotation_clearance_fresh = have_rotation_clearance_ &&
-      now_seconds - rotation_clearance_time_ <= parameters_.obstacle_timeout;
     const bool angular_only_command =
       std::abs(command_.linear.x) <= 1.0e-6 &&
       std::abs(command_.linear.y) <= 1.0e-6 &&
@@ -260,6 +282,12 @@ public:
   }
 
 private:
+  bool forwardCorridorClear(const double now_seconds) const
+  {
+    return have_obstacle_state_ && obstacle_state_ == "clear" &&
+      now_seconds - obstacle_time_ <= parameters_.obstacle_timeout;
+  }
+
   void preserveMinimumLinearCommand(double original, double & scaled) const
   {
     const double minimum = std::max(0.0, parameters_.minimum_linear_speed);
@@ -276,6 +304,8 @@ private:
   bool have_planner_state_{false};
   bool have_localization_state_{false};
   bool hard_stop_latched_{false};
+  bool last_tracking_forward_clear_{false};
+  bool forward_clear_at_localization_loss_{false};
   double command_time_{};
   double obstacle_time_{};
   double rotation_clearance_time_{};

@@ -148,4 +148,9 @@ std::size_t RollingVoxelGrid::entryCount() const
   return entries_.size();
 }
 
+void RollingVoxelGrid::clear()
+{
+  entries_.clear();
+}
+
 }  // namespace luxi_3d_navigation

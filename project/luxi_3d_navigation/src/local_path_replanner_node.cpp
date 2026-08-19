@@ -18,6 +18,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -44,6 +45,7 @@ public:
     declare_parameter<std::string>(
       "obstacle_state_topic", "/navigation/local_obstacles/state");
     declare_parameter<std::string>("status_topic", "/navigation/local_replan/status");
+    declare_parameter<std::string>("clear_path_topic", "/navigation/clear_path");
     declare_parameter<std::string>("map_frame", "map");
     declare_parameter<std::string>("base_frame", "base_link");
     declare_parameter<std::string>("semantic_path", "");
@@ -102,6 +104,22 @@ public:
           dirty_ = true;
         }
       });
+    clear_path_sub_ = create_subscription<std_msgs::msg::Bool>(
+      get_parameter("clear_path_topic").as_string(), 10,
+      [this](const std_msgs::msg::Bool::SharedPtr message) {
+        if (!message->data) {
+          return;
+        }
+        global_path_.poses.clear();
+        active_path_.poses.clear();
+        active_path_is_detour_ = false;
+        dirty_ = false;
+        nav_msgs::msg::Path empty;
+        empty.header.stamp = now();
+        empty.header.frame_id = map_frame_;
+        path_pub_->publish(empty);
+        publishStatus("idle");
+      });
     const double rate = std::max(0.2, get_parameter("replan_rate").as_double());
     timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / rate), [this]() {updatePlan();});
@@ -120,7 +138,7 @@ private:
     declare_parameter<bool>("strict_direct_ground_support", false);
     declare_parameter<int>("snap_search_radius_cells", 12);
     declare_parameter<int>("max_iterations", 500000);
-    declare_parameter<double>("costmap_margin", 0.15);
+    declare_parameter<double>("costmap_margin", 0.35);
     declare_parameter<double>("costmap_weight", 8.0);
     declare_parameter<double>("ground_normal_radius", 0.30);
     declare_parameter<double>("ground_max_slope_degrees", 35.0);
@@ -338,7 +356,8 @@ private:
       publishStatus("waiting_map");
       return;
     }
-    if (obstacle_state_ == "stale" || obstacle_state_ == "tf_unavailable" ||
+    if (obstacle_state_ == "stale" || obstacle_state_ == "rebuilding" ||
+      obstacle_state_ == "tf_unavailable" ||
       obstacle_state_ == "camera_info_missing" || obstacle_state_ == "error")
     {
       publishStatus("sensor_stale");
@@ -432,6 +451,10 @@ private:
       }
       if (!rejoin_index) {
         publishStatus("no_path");
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Local detour unavailable: no clear rejoin point in %.2f-%.2f m (blocked_columns=%zu)",
+          minimum, horizon, planning_blocked.size());
         return;
       }
       const auto & rejoin_pose = global_path_.poses[*rejoin_index].pose.position;
@@ -452,6 +475,10 @@ private:
         *start, *goal, planning_blocked, bounds);
       if (local_cells.empty()) {
         publishStatus("no_path");
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Local detour A* failed between current pose and rejoin index %zu (blocked_columns=%zu)",
+          *rejoin_index, planning_blocked.size());
         return;
       }
       nav_msgs::msg::Path output;
@@ -520,6 +547,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr clear_path_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr obstacle_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr obstacle_state_sub_;
   rclcpp::TimerBase::SharedPtr timer_;

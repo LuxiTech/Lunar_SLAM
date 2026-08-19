@@ -91,7 +91,7 @@ def generate_launch_description():
                 "navigation_input_topic": "/navigation/cmd_vel",
                 "output_topic": LaunchConfiguration("cmd_vel_topic"),
                 "navigation_active_topic": "/navigation/active",
-                "navigation_stop_topic": "/navigation/stop",
+                "navigation_stop_topic": "/navigation/task/cancel",
                 "emergency_stop_topic": "/navigation/emergency_stop",
                 "invert_angular_z": False,
             }],

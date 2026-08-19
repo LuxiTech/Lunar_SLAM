@@ -119,6 +119,10 @@ target_compile_features(navigation_safety_gate_node PUBLIC cxx_std_17)
 target_include_directories(navigation_safety_gate_node PRIVATE include)
 ament_target_dependencies(navigation_safety_gate_node geometry_msgs rclcpp std_msgs)
 
+add_executable(navigation_task_manager_node src/navigation_task_manager_node.cpp)
+target_compile_features(navigation_task_manager_node PUBLIC cxx_std_17)
+ament_target_dependencies(navigation_task_manager_node geometry_msgs nav_msgs rclcpp std_msgs)
+
 add_executable(twist_direction_adapter_node src/twist_direction_adapter_node.cpp)
 target_compile_features(twist_direction_adapter_node PUBLIC cxx_std_17)
 target_include_directories(twist_direction_adapter_node PRIVATE include)
@@ -146,6 +150,7 @@ install(TARGETS
   local_obstacle_map_node
   local_path_replanner_node
   navigation_safety_gate_node
+  navigation_task_manager_node
   twist_direction_adapter_node
   velocity_command_mux_node
   terrain_plan_check

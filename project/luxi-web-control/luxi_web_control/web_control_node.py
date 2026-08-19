@@ -264,6 +264,36 @@ def _is_filtered_export_path(candidate: Path, octo_directory: Path) -> bool:
     return False
 
 
+def rtab_map_database_snapshot(maps_root: Path) -> Dict[str, Tuple[int, int]]:
+    """Return stable metadata for saved mapNNN databases."""
+    snapshot: Dict[str, Tuple[int, int]] = {}
+    directory = maps_root / "rtab_maps"
+    for candidate in directory.glob("map*.db"):
+        if not MAP_IDENTIFIER.fullmatch(candidate.stem):
+            continue
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        if stat.st_size > 0:
+            snapshot[str(candidate.resolve())] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def newest_changed_map_database(
+    before: Dict[str, Tuple[int, int]],
+    after: Dict[str, Tuple[int, int]],
+) -> Optional[Path]:
+    """Return the newest map database created or changed during mapping."""
+    changed = [
+        (metadata[0], Path(path))
+        for path, metadata in after.items()
+        if before.get(path) != metadata
+        and MAP_IDENTIFIER.fullmatch(Path(path).stem)
+    ]
+    return max(changed, default=(0, None), key=lambda item: item[0])[1]
+
+
 def discover_navigation_maps(maps_root: Path) -> list:
     """Return saved map layers and optional HLoc indices grouped by mapNNN."""
     rtab_directory = maps_root / "rtab_maps"
@@ -392,6 +422,8 @@ def public_navigation_maps(
                 "cloud": f"/api/maps/{map_id}/preview/cloud",
                 "voxels": f"/api/maps/{map_id}/preview/voxels",
                 "terrain": f"/api/maps/{map_id}/preview/terrain",
+                "costmap": f"/api/maps/{map_id}/preview/costmap",
+                "obstacles": f"/api/maps/{map_id}/preview/obstacles",
                 "path": f"/api/maps/{map_id}/preview/path",
             },
             "files": files,
@@ -435,9 +467,17 @@ def web_api_capabilities() -> dict:
         ("map_cloud", "GET", "/api/maps/{map_id}/preview/cloud"),
         ("map_voxels", "GET", "/api/maps/{map_id}/preview/voxels"),
         ("map_terrain", "GET", "/api/maps/{map_id}/preview/terrain"),
-        ("map_costmap", "GET", "/api/maps/{map_id}/preview/terrain"),
+        ("map_costmap", "GET", "/api/maps/{map_id}/preview/costmap"),
+        ("map_obstacles", "GET", "/api/maps/{map_id}/preview/obstacles"),
         ("map_path", "GET", "/api/maps/{map_id}/preview/path"),
         ("map_download", "GET", "/api/maps/{map_id}/download/{layer}"),
+        ("live_cloud_preview", "GET", "/api/preview/cloud"),
+        ("legacy_navigation_maps", "GET", "/api/navigation/maps"),
+        ("legacy_navigation_voxels", "GET", "/api/navigation/voxels"),
+        ("legacy_navigation_cloud", "GET", "/api/navigation/cloud"),
+        ("legacy_navigation_path", "GET", "/api/navigation/path"),
+        ("legacy_navigation_terrain", "GET", "/api/navigation/terrain"),
+        ("legacy_navigation_load_map", "POST", "/api/navigation/load_map"),
         ("semantic_annotations", "GET", "/api/semantic/annotations"),
         ("semantic_save", "POST", "/api/semantic/save"),
         ("navigation_localize", "POST", "/api/navigation/localize"),
@@ -460,7 +500,7 @@ def web_api_capabilities() -> dict:
         ("system_restart", "POST", "/api/system/restart"),
     ]
     return {
-        "version": 1,
+        "version": 2,
         "operations": [
             {"id": operation_id, "method": method, "path": path}
             for operation_id, method, path in operations
@@ -1987,7 +2027,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
         map_preview_match = re.fullmatch(
-            r"/api/maps/(map\d+)/preview/(cloud|voxels|terrain|path)",
+            r"/api/maps/(map\d+)/preview/"
+            r"(cloud|voxels|terrain|costmap|obstacles|path)",
             path,
         )
         if map_preview_match:
@@ -2107,6 +2148,14 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         assets = {
             "/": (selected_index, "text/html; charset=utf-8"),
             "/index.html": (selected_index, "text/html; charset=utf-8"),
+            "/user": ("map_portal.html", "text/html; charset=utf-8"),
+            "/user/": ("map_portal.html", "text/html; charset=utf-8"),
+            "/map_portal.html": (
+                "map_portal.html", "text/html; charset=utf-8"
+            ),
+            "/developer": ("index.html", "text/html; charset=utf-8"),
+            "/developer/": ("index.html", "text/html; charset=utf-8"),
+            "/developer.html": ("index.html", "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
             "/map_portal.js": (
                 "map_portal.js", "text/javascript; charset=utf-8"
@@ -2590,6 +2639,7 @@ class WebControlNode(Node):
         self.declare_parameter("mapping_workspace_setup", "")
         self.declare_parameter("mapping_log_path", "")
         self.declare_parameter("mapping_planar_motion", True)
+        self.declare_parameter("auto_filter_after_mapping", True)
         self.declare_parameter("mapping_rgbd_topic", "/sensors/rgbd/rgbd_image")
         self.declare_parameter("mapping_imu_topic", "/sensors/imu/data")
         self.declare_parameter("enable_navigation_control", True)
@@ -2604,14 +2654,26 @@ class WebControlNode(Node):
         self.declare_parameter("map_conversion_timeout", 300.0)
         self.declare_parameter("auto_build_hloc_index", True)
         self.declare_parameter("hloc_index_build_timeout", 900.0)
-        self.declare_parameter("navigation_goal_topic", "/navigation/goal_pose")
+        self.declare_parameter("navigation_goal_topic", "/navigation/task/goal_pose")
         self.declare_parameter("navigation_marker_topic", "/navigation/occupied_voxels")
         self.declare_parameter("navigation_path_topic", "/navigation/planned_path")
         self.declare_parameter(
             "navigation_planning_status_topic", "/navigation/planning_status"
         )
-        self.declare_parameter("navigation_start_topic", "/navigation/start")
-        self.declare_parameter("navigation_stop_topic", "/navigation/stop")
+        self.declare_parameter("navigation_start_topic", "/navigation/task/start")
+        self.declare_parameter("navigation_stop_topic", "/navigation/task/cancel")
+        self.declare_parameter(
+            "navigation_return_home_topic", "/navigation/task/return_home"
+        )
+        self.declare_parameter(
+            "navigation_home_topic", "/navigation/task/home_pose"
+        )
+        self.declare_parameter(
+            "navigation_task_status_topic", "/navigation/task/status"
+        )
+        self.declare_parameter(
+            "navigation_home_state_topic", "/navigation/task/home_state"
+        )
         self.declare_parameter("navigation_active_topic", "/navigation/active")
         self.declare_parameter(
             "navigation_follower_state_topic",
@@ -2650,7 +2712,7 @@ class WebControlNode(Node):
         self.declare_parameter("max_voxel_points", 12000)
         self.declare_parameter("max_terrain_points", 12000)
         self.declare_parameter("navigation_robot_radius", 0.25)
-        self.declare_parameter("navigation_costmap_margin", 0.15)
+        self.declare_parameter("navigation_costmap_margin", 0.35)
         self.declare_parameter("navigation_ground_normal_radius", 0.30)
         self.declare_parameter("navigation_ground_max_slope_degrees", 35.0)
         self.declare_parameter("navigation_obstacle_min_height", 0.15)
@@ -2891,6 +2953,9 @@ class WebControlNode(Node):
         navigation_log_path = str(self.get_parameter("navigation_log_path").value)
         maps_root = str(self.get_parameter("maps_root").value)
         self.maps_root = Path(maps_root or workspace_root / "maps").resolve()
+        self.auto_filter_after_mapping = bool(
+            self.get_parameter("auto_filter_after_mapping").value
+        )
         self.map_export_executable = (
             workspace_root / "tools/export_rtabmap_octomap.sh"
         ).resolve()
@@ -2960,6 +3025,18 @@ class WebControlNode(Node):
         )
         self.navigation_stop_topic = str(
             self.get_parameter("navigation_stop_topic").value
+        )
+        self.navigation_return_home_topic = str(
+            self.get_parameter("navigation_return_home_topic").value
+        )
+        self.navigation_home_topic = str(
+            self.get_parameter("navigation_home_topic").value
+        )
+        self.navigation_task_status_topic = str(
+            self.get_parameter("navigation_task_status_topic").value
+        )
+        self.navigation_home_state_topic = str(
+            self.get_parameter("navigation_home_state_topic").value
         )
         self.navigation_active_topic = str(
             self.get_parameter("navigation_active_topic").value
@@ -3094,6 +3171,14 @@ class WebControlNode(Node):
         self._cloud_received_at: Optional[float] = None
         self._navigation_lock = threading.Lock()
         self._navigation_map_operation_lock = threading.Lock()
+        self._mapping_postprocess_lock = threading.Lock()
+        self._mapping_database_snapshot: Dict[str, Tuple[int, int]] = {}
+        self._mapping_postprocess = {
+            "enabled": self.auto_filter_after_mapping,
+            "state": "idle",
+            "map_id": None,
+            "message": "",
+        }
         self._voxel_points = []
         self._voxel_frame_id = "map"
         self._voxel_resolution = 0.0
@@ -3140,7 +3225,8 @@ class WebControlNode(Node):
         self._planning_error = ""
         self._navigation_active = False
         self._navigation_follower_state = "stopped"
-        self._navigation_homes: Dict[str, Dict[str, float]] = {}
+        self._navigation_home: Optional[Dict[str, float]] = None
+        self._navigation_task_state = "idle"
         self._return_home_pending = False
         self._imu_calibration_lock = threading.Lock()
         self._imu_calibration = {
@@ -3232,6 +3318,12 @@ class WebControlNode(Node):
         self.navigation_stop_publisher = self.create_publisher(
             Bool, self.navigation_stop_topic, qos
         )
+        self.navigation_return_home_publisher = self.create_publisher(
+            Bool, self.navigation_return_home_topic, qos
+        )
+        self.navigation_home_publisher = self.create_publisher(
+            PoseStamped, self.navigation_home_topic, qos
+        )
         self.navigation_emergency_stop_publisher = self.create_publisher(
             Bool, self.navigation_emergency_stop_topic, qos
         )
@@ -3268,6 +3360,18 @@ class WebControlNode(Node):
             String,
             self.navigation_follower_state_topic,
             self._on_navigation_follower_state,
+            navigation_qos,
+        )
+        self.navigation_task_status_subscription = self.create_subscription(
+            String,
+            self.navigation_task_status_topic,
+            self._on_navigation_task_status,
+            navigation_qos,
+        )
+        self.navigation_home_state_subscription = self.create_subscription(
+            PoseStamped,
+            self.navigation_home_state_topic,
+            self._on_navigation_home_state,
             navigation_qos,
         )
         localization_qos = QoSProfile(
@@ -3441,10 +3545,9 @@ class WebControlNode(Node):
             raise ValueError("velocity limits must be finite and non-negative")
         if not self.web_root.is_dir():
             raise ValueError(f"web_root is not a directory: {self.web_root}")
-        if not (self.web_root / self.selected_web_index).is_file():
-            raise ValueError(
-                f"selected web page is missing: {self.selected_web_index}"
-            )
+        for web_asset in ("map_portal.html", "index.html", "map_projection.js"):
+            if not (self.web_root / web_asset).is_file():
+                raise ValueError(f"web asset is missing: {web_asset}")
 
     def _twist(self, command: VelocityCommand) -> Twist:
         message = Twist()
@@ -3693,10 +3796,16 @@ class WebControlNode(Node):
                 self._planner_map_ready = True
                 self._planning_state = "ready"
                 self._planning_error = ""
+            elif getattr(self, "_navigation_task_state", "idle") in {
+                "cancelled", "goal_reached", "home_reached"
+            } or self._navigation_follower_state == "goal_reached":
+                self._planning_state = (
+                    "map_ready" if self._planner_map_ready else "idle"
+                )
+                self._planning_error = ""
             elif self._planning_state != "failed":
                 self._planning_state = "failed"
                 self._planning_error = "规划器未生成可执行路径"
-        self._start_return_home_if_ready()
 
     def _on_navigation_planning_status(self, message: String) -> None:
         errors = {
@@ -3717,7 +3826,6 @@ class WebControlNode(Node):
                     self._planning_error = ""
             elif status in errors:
                 self._clear_navigation_path_locked()
-                self._return_home_pending = False
                 self._planning_state = "failed"
                 self._planning_error = errors[status]
             elif status in {"waiting_map", "loading_map"}:
@@ -3736,7 +3844,6 @@ class WebControlNode(Node):
             self._navigation_active = bool(message.data)
             if was_active and not self._navigation_active:
                 self._clear_navigation_path_locked()
-                self._return_home_pending = False
 
     def _on_navigation_follower_state(self, message: String) -> None:
         """Expose the bounded C++ follower state to the browser."""
@@ -3759,32 +3866,37 @@ class WebControlNode(Node):
                 # original global path otherwise remains visible after motion
                 # has ended. Remove both active and stale-preview copies.
                 self._clear_navigation_path_locked()
-                self._return_home_pending = False
                 self._planning_state = (
                     "goal_reached"
                     if self._navigation_follower_state == "goal_reached"
                     else ("map_ready" if self._planner_map_ready else "idle")
                 )
                 self._planning_error = ""
-        self._start_return_home_if_ready()
 
-    def _start_return_home_if_ready(self) -> None:
-        """Start return only after this node and the follower both hold the path."""
+    def _on_navigation_task_status(self, message: String) -> None:
+        """Expose the navigation-core task state without implementing it here."""
+        state = message.data[:80]
         with self._navigation_lock:
-            ready = (
-                getattr(self, "_return_home_pending", False)
-                and self._navigation_follower_state == "plan_ready"
-                and bool(self._planned_path_points)
-            )
-            if ready:
-                self._return_home_pending = False
-        if not ready:
-            return
-        started, message = self.start_navigation_motion()
-        if not started:
-            with self._navigation_lock:
+            self._navigation_task_state = state
+            self._return_home_pending = state in {
+                "return_planning", "return_waiting_for_safe_path",
+                "return_starting"
+            }
+            if state in {"cancelled", "goal_reached", "home_reached"}:
+                self._clear_navigation_path_locked()
+            if state.startswith("failed_"):
                 self._planning_state = "failed"
-                self._planning_error = "返航路径已生成但自动出发失败：" + message
+                self._planning_error = state
+
+    def _on_navigation_home_state(self, message: PoseStamped) -> None:
+        """Cache the return pose published by the independent task manager."""
+        wrapped = PoseWithCovarianceStamped()
+        wrapped.header = message.header
+        wrapped.pose.pose = message.pose
+        pose = localization_pose_summary(wrapped)
+        if pose is not None:
+            with self._navigation_lock:
+                self._navigation_home = pose
 
     def _clear_navigation_path_locked(self) -> None:
         """Clear active and fallback path copies while holding the nav lock."""
@@ -3958,6 +4070,8 @@ class WebControlNode(Node):
             self._planning_error = ""
             self._navigation_active = False
             self._navigation_follower_state = "stopped"
+            self._navigation_home = None
+            self._navigation_task_state = "idle"
             self._return_home_pending = False
 
     def rgb_preview(self) -> Tuple[Optional[bytes], str]:
@@ -4056,6 +4170,33 @@ class WebControlNode(Node):
                 "traversable_points": list(self._terrain_traversable_points),
                 "obstacle_points": list(self._terrain_obstacle_points),
             }
+
+    def costmap_preview(self) -> Dict[str, Any]:
+        """Return the traversable surface and its normalized edge cost."""
+        terrain = self.terrain_preview()
+        return {
+            "map_id": terrain["map_id"],
+            "variant": terrain["variant"],
+            "resolution": terrain["resolution"],
+            "robot_radius": terrain["robot_radius"],
+            "costmap_margin": terrain["costmap_margin"],
+            "point_count": terrain["traversable_count"],
+            "error": terrain["error"],
+            "points": terrain["traversable_points"],
+        }
+
+    def obstacle_preview(self) -> Dict[str, Any]:
+        """Return the static obstacles segmented from the selected saved map."""
+        terrain = self.terrain_preview()
+        return {
+            "map_id": terrain["map_id"],
+            "variant": terrain["variant"],
+            "resolution": terrain["resolution"],
+            "obstacle_min_height": terrain["obstacle_min_height"],
+            "point_count": terrain["obstacle_count"],
+            "error": terrain["error"],
+            "points": terrain["obstacle_points"],
+        }
 
     def _load_navigation_terrain(
         self, map_id: str, octomap_path: str, cloud_path: Optional[str],
@@ -4587,6 +4728,10 @@ class WebControlNode(Node):
 
     def start_mapping(self) -> Tuple[bool, str]:
         """Start the managed RTAB-Map RGB-D mapping launch."""
+        with self._mapping_postprocess_lock:
+            postprocess_state = self._mapping_postprocess["state"]
+        if postprocess_state in {"waiting", "filtering"}:
+            return False, "上一张地图仍在自动过滤，请等待处理完成"
         d1_status = self.d1_control_status()
         if d1_status["enabled"] and d1_status["posture"] != "standing":
             return False, "请先让机器人站立，再校准 IMU 并开始建图"
@@ -4619,21 +4764,103 @@ class WebControlNode(Node):
                     "mapping nodes are already active outside web control: "
                     + ", ".join(conflicts)
                 )
+        database_snapshot = rtab_map_database_snapshot(self.maps_root)
         started, message = self.mapping.start()
         if started:
+            self._mapping_database_snapshot = database_snapshot
+            with self._mapping_postprocess_lock:
+                self._mapping_postprocess = {
+                    "enabled": self.auto_filter_after_mapping,
+                    "state": "idle",
+                    "map_id": None,
+                    "message": "建图运行中，停止后将自动生成过滤地图",
+                }
             self._clear_cloud_preview()
         return started, message
 
     def stop_mapping(self) -> Tuple[bool, str]:
         """Stop the managed RTAB-Map RGB-D mapping launch."""
+        was_running = self.mapping.status()["state"] == "running"
         stopped, message = self.mapping.stop()
         if stopped:
             self._clear_cloud_preview()
+        if (
+            stopped and was_running and self.auto_filter_after_mapping
+            and not self._closed
+        ):
+            before = self._mapping_database_snapshot
+            self._mapping_database_snapshot = {}
+            database = newest_changed_map_database(
+                before, rtab_map_database_snapshot(self.maps_root)
+            )
+            if database is None:
+                with self._mapping_postprocess_lock:
+                    self._mapping_postprocess = {
+                        "enabled": True,
+                        "state": "failed",
+                        "map_id": None,
+                        "message": "地图数据库已保存，但未识别到新增或更新的 mapNNN.db",
+                    }
+                message += "; automatic filtering could not identify the saved map"
+            else:
+                self._queue_mapping_postprocess(database)
+                message += f"; {database.stem} automatic filtering queued"
         return stopped, message
+
+    def _queue_mapping_postprocess(self, database: Path) -> None:
+        """Filter a newly saved map in the background."""
+        map_id = database.stem
+        with self._mapping_postprocess_lock:
+            self._mapping_postprocess = {
+                "enabled": True,
+                "state": "waiting",
+                "map_id": map_id,
+                "message": f"{map_id} 数据库已保存，等待自动过滤",
+            }
+        thread = threading.Thread(
+            target=self._run_mapping_postprocess,
+            args=(map_id,),
+            name=f"map-filter-{map_id}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_mapping_postprocess(self, map_id: str) -> None:
+        """Generate filtered PLY/OctoMap layers for one saved database."""
+        try:
+            with self._navigation_map_operation_lock:
+                with self._mapping_postprocess_lock:
+                    self._mapping_postprocess["state"] = "filtering"
+                    self._mapping_postprocess["message"] = (
+                        f"{map_id} 正在导出点云、过滤离群点并重建 OctoMap"
+                    )
+                record = next(
+                    (item for item in self.navigation_maps() if item["id"] == map_id),
+                    None,
+                )
+                if record is None:
+                    converted = False
+                    detail = f"map {map_id} is not discoverable after mapping"
+                else:
+                    converted, detail = self._convert_navigation_map(
+                        record, filtered=True
+                    )
+        except Exception as exc:  # Keep the worker failure visible to both UIs.
+            converted = False
+            detail = f"{map_id} automatic filtering failed: {exc}"
+            self.get_logger().error(detail)
+        with self._mapping_postprocess_lock:
+            self._mapping_postprocess["state"] = (
+                "completed" if converted else "failed"
+            )
+            self._mapping_postprocess["message"] = detail
 
     def mapping_status(self) -> Dict[str, Any]:
         """Return the state of the mapping process owned by this node."""
-        return self.mapping.status()
+        status = self.mapping.status()
+        with self._mapping_postprocess_lock:
+            status["postprocess"] = dict(self._mapping_postprocess)
+        return status
 
     def navigation_maps(self) -> list:
         """Discover selectable pairs without exposing arbitrary filesystem paths."""
@@ -4668,6 +4895,8 @@ class WebControlNode(Node):
             "cloud": self.navigation_cloud_preview,
             "voxels": self.voxel_preview,
             "terrain": self.terrain_preview,
+            "costmap": self.costmap_preview,
+            "obstacles": self.obstacle_preview,
             "path": self.path_preview,
         }
         reader = readers.get(layer)
@@ -4804,9 +5033,11 @@ class WebControlNode(Node):
     def semantic_annotations(self, map_id: str) -> dict:
         """Load annotations for one discovered OctoMap."""
         record = self._semantic_map_record(map_id)
-        return self.semantic_annotation_store.load(
+        result = self.semantic_annotation_store.load(
             map_id, Path(record["octomap_path"])
         )
+        result.pop("path", None)
+        return result
 
     def save_semantic_annotations(self, annotation: dict) -> dict:
         """Validate and save annotations without modifying geometry maps."""
@@ -4814,9 +5045,11 @@ class WebControlNode(Node):
         if not isinstance(map_id, str):
             raise ValueError("annotation map_id must be a string")
         record = self._semantic_map_record(map_id)
-        return self.semantic_annotation_store.save(
+        result = self.semantic_annotation_store.save(
             map_id, Path(record["octomap_path"]), annotation
         )
+        result.pop("path", None)
+        return result
 
     def _convert_navigation_map(
         self, record: Dict[str, Any], filtered: bool = False
@@ -5026,6 +5259,8 @@ class WebControlNode(Node):
             self._localization_health = "searching"
             self._localization_health_received_at = None
             self._clear_navigation_path_locked()
+            self._navigation_home = None
+            self._navigation_task_state = "idle"
             self._return_home_pending = False
             self._planner_map_ready = False
             self._planning_state = "loading_map"
@@ -5066,6 +5301,9 @@ class WebControlNode(Node):
                 self._planner_map_ready = False
                 self._navigation_active = False
                 self._navigation_follower_state = "stopped"
+                self._navigation_home = None
+                self._navigation_task_state = "idle"
+                self._return_home_pending = False
         return stopped, message
 
     def start_navigation_motion(self) -> Tuple[bool, str]:
@@ -5118,13 +5356,12 @@ class WebControlNode(Node):
             return False, "wait for a recent accepted ICP localization before selecting a goal"
         if not navigation["planner_map_ready"]:
             return False, "wait for the 3D terrain map to finish loading before selecting a goal"
-        self.halt_navigation_motion(clear_path=True)
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         with self._navigation_lock:
             goal.header.frame_id = self._voxel_frame_id or "map"
             self._clear_navigation_path_locked()
-            self._return_home_pending = auto_start
+            self._navigation_task_state = "planning"
             self._planning_state = "pending"
             self._planning_error = ""
         goal.pose.position.x = x
@@ -5133,12 +5370,19 @@ class WebControlNode(Node):
         goal.pose.orientation.z = math.sin(yaw * 0.5)
         goal.pose.orientation.w = math.cos(yaw * 0.5)
         self.navigation_goal_publisher.publish(goal)
+        if auto_start:
+            start = Bool()
+            start.data = True
+            self.navigation_start_publisher.publish(start)
         return True, "goal position and heading sent to voxel A* planner"
 
     def set_navigation_home(
         self, x: float, y: float, z: float, yaw: float = 0.0
     ) -> Tuple[bool, str]:
-        """Store one manually selected return pose for the loaded map."""
+        """Send a return pose to the independent navigation task manager."""
+        navigation = self.navigation_status()
+        if navigation["state"] != "running":
+            return False, "start map localization before setting a return point"
         with self._navigation_lock:
             map_id = self._navigation_cloud_map_id
             terrain_map_id = self._terrain_map_id
@@ -5148,26 +5392,32 @@ class WebControlNode(Node):
                 "x": float(x), "y": float(y), "z": float(z),
                 "yaw": math.atan2(math.sin(yaw), math.cos(yaw)),
             }
-            self._navigation_homes[map_id] = home
+            self._navigation_home = home
+        pose = PoseStamped()
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.header.frame_id = self._voxel_frame_id or "map"
+        pose.pose.position.x = home["x"]
+        pose.pose.position.y = home["y"]
+        pose.pose.position.z = home["z"]
+        pose.pose.orientation.z = math.sin(home["yaw"] * 0.5)
+        pose.pose.orientation.w = math.cos(home["yaw"] * 0.5)
+        self.navigation_home_publisher.publish(pose)
         return True, f"return point saved for {map_id}"
 
     def return_navigation_home(self) -> Tuple[bool, str]:
-        """Cancel other motion, plan to the saved pose, then auto-start."""
+        """Ask the navigation core to cancel other work and return home."""
         navigation = self.navigation_status()
-        map_id = navigation.get("map_id")
-        with self._navigation_lock:
-            home = dict(self._navigation_homes.get(map_id, {}))
-        if not home:
+        if navigation["state"] != "running":
+            return False, "start map localization before returning"
+        if not navigation.get("home"):
             return False, "set a return point on the current map first"
         self.stop_motion(force=True)
-        accepted, message = self.set_navigation_goal(
-            home["x"], home["y"], home["z"], home["yaw"],
-            auto_start=True,
-        )
-        if not accepted:
-            with self._navigation_lock:
-                self._return_home_pending = False
-            return False, message
+        message = Bool()
+        message.data = True
+        self.navigation_return_home_publisher.publish(message)
+        with self._navigation_lock:
+            self._return_home_pending = True
+            self._navigation_task_state = "return_planning"
         return True, "current navigation cancelled; planning automatic return"
 
     def navigation_status(self) -> Dict[str, Any]:
@@ -5231,9 +5481,11 @@ class WebControlNode(Node):
             status["follower_state"] = (
                 self._navigation_follower_state if running else "stopped"
             )
-            current_map_id = status.get("map_id") or self._navigation_cloud_map_id
-            home = getattr(self, "_navigation_homes", {}).get(current_map_id)
+            home = getattr(self, "_navigation_home", None)
             status["home"] = dict(home) if home else None
+            status["task_state"] = getattr(
+                self, "_navigation_task_state", "idle"
+            )
             status["return_home_pending"] = bool(
                 getattr(self, "_return_home_pending", False)
             )

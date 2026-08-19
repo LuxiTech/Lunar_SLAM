@@ -84,7 +84,8 @@ Eigen::Matrix4d MapOdomAlignment::predict(const Eigen::Matrix4d & odom_from_base
 
 MapOdomCorrection MapOdomAlignment::correct(
   const Eigen::Matrix4d & measured_map_from_base,
-  const Eigen::Matrix4d & odom_from_base)
+  const Eigen::Matrix4d & odom_from_base,
+  const bool apply_correction)
 {
   MapOdomCorrection decision;
   if (!initialized_ || !finite_pose(measured_map_from_base) || !finite_pose(odom_from_base)) {
@@ -107,6 +108,12 @@ MapOdomCorrection MapOdomAlignment::correct(
     return decision;
   }
 
+  decision.accepted = true;
+  if (!apply_correction) {
+    decision.reason = "accepted ICP verification; weak geometry held map correction";
+    return decision;
+  }
+
   const Eigen::Matrix4d measured_map_from_odom =
     planar(measured_map_from_base) * planar_inverse(odom_from_base);
   const double corrected_yaw = IcpLocalizer::yaw(map_from_odom_) +
@@ -120,7 +127,7 @@ MapOdomCorrection MapOdomAlignment::correct(
     map_from_odom_(2, 3) + correction_gain_ *
     (measured_map_from_odom(2, 3) - map_from_odom_(2, 3)),
     corrected_yaw);
-  decision.accepted = true;
+  decision.applied = correction_gain_ > 0.0;
   decision.reason = "accepted odometry-constrained ICP correction";
   return decision;
 }

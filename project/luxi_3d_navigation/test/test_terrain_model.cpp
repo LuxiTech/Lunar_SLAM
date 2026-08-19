@@ -97,12 +97,12 @@ TEST(TerrainModel, DetoursAroundDynamicBlockedColumns)
   }));
 }
 
-TEST(TerrainModel, DefaultOuterCostBoundaryIsFortyCentimetersFromObstacle)
+TEST(TerrainModel, DefaultOuterCostBoundaryIsSixtyCentimetersFromObstacle)
 {
   const luxi_3d_navigation::TerrainParameters parameters;
   EXPECT_DOUBLE_EQ(parameters.robot_radius, 0.25);
-  EXPECT_DOUBLE_EQ(parameters.costmap_margin, 0.15);
-  EXPECT_DOUBLE_EQ(parameters.robot_radius + parameters.costmap_margin, 0.40);
+  EXPECT_DOUBLE_EQ(parameters.costmap_margin, 0.35);
+  EXPECT_DOUBLE_EQ(parameters.robot_radius + parameters.costmap_margin, 0.60);
 }
 
 TEST(TerrainModel, RequiresGroundSupport)

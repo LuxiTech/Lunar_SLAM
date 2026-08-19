@@ -17,6 +17,10 @@
       </div>
     </div>
     <div class="top-actions">
+      <nav class="mode-switcher" aria-label="界面模式切换">
+        <a href="/user" class="active" aria-current="page">用户模式</a>
+        <a href="/developer">开发者模式</a>
+      </nav>
       <button id="restartSystemButton" class="restart-system-button" title="安全关闭全部服务并重新拉起">一键重启</button>
       <div id="connectionBadge" class="connection offline">
         <span class="connection-dot"></span>
@@ -242,6 +246,8 @@
           <div class="endpoint"><code>POST /api/maps/map037/preview</code><span>默认加载过滤版；也可传 JSON：<b>{"filtered": false}</b></span></div>
           <div class="endpoint"><code>GET /api/maps/map037/preview/cloud</code><span>读取该 map 已加载的彩色点云</span></div>
           <div class="endpoint"><code>GET /api/maps/map037/preview/terrain</code><span>读取可通行面、障碍和代价值</span></div>
+          <div class="endpoint"><code>GET /api/maps/map037/preview/costmap</code><span>独立读取可通行点和 0～1 代价值</span></div>
+          <div class="endpoint"><code>GET /api/maps/map037/preview/obstacles</code><span>独立读取静态障碍物点</span></div>
           <div class="endpoint"><code>GET /api/maps/map037/download/cloud</code><span>流式下载 PLY，支持 Range 续传</span></div>
           <div class="endpoint"><code>GET /api/preview/rgb</code><span>拉取当前相机 RGB 图像</span></div>
           <div class="endpoint"><code>POST /api/camera/start</code><span>启动相机，JSON：<b>{"profile":"d455"}</b></span></div>

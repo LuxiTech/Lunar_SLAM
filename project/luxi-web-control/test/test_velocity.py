@@ -46,6 +46,7 @@ from luxi_web_control.web_control_node import make_access_urls
 from luxi_web_control.web_control_node import mapping_graph_conflicts
 from luxi_web_control.web_control_node import NavigationController
 from luxi_web_control.web_control_node import normalize_battery_percentage
+from luxi_web_control.web_control_node import newest_changed_map_database
 from luxi_web_control.web_control_node import parse_body_height
 from luxi_web_control.web_control_node import parse_control_client_id
 from luxi_web_control.web_control_node import parse_octomap_point_output
@@ -56,6 +57,7 @@ from luxi_web_control.web_control_node import parse_velocity, VelocityCommand
 from luxi_web_control.web_control_node import public_navigation_maps
 from luxi_web_control.web_control_node import resolve_d1_http_bind_address
 from luxi_web_control.web_control_node import resolve_d1_http_bind_addresses
+from luxi_web_control.web_control_node import rtab_map_database_snapshot
 from luxi_web_control.web_control_node import validate_d1_http_bind_address
 from luxi_web_control.web_control_node import web_api_capabilities
 from luxi_web_control.web_control_node import WebControlNode
@@ -97,6 +99,72 @@ def test_navigation_preview_uses_measured_twenty_five_centimeter_robot_radius():
         "navigation_robot_radius"
     ]
     assert radius == 0.25
+
+
+def test_navigation_costmap_outer_edge_is_sixty_centimeters():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    parameters = config["web_control"]["ros__parameters"]
+    assert parameters["navigation_robot_radius"] == 0.25
+    assert parameters["navigation_costmap_margin"] == 0.35
+    assert parameters["navigation_robot_radius"] + parameters["navigation_costmap_margin"] == 0.60
+
+
+def test_mapping_auto_filter_is_enabled_and_visible_in_both_pages():
+    web_root = WORKSPACE_ROOT / "project/luxi-web-control/web"
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert config["web_control"]["ros__parameters"]["auto_filter_after_mapping"] is True
+    app = (web_root / "app.js").read_text(encoding="utf-8")
+    portal = (web_root / "map_portal.js").read_text(encoding="utf-8")
+    assert "showAutomaticallyFilteredMap" in app
+    assert "showAutomaticallyFilteredMap" in portal
+
+
+def test_newest_changed_map_database_tracks_mapping_output(tmp_path):
+    maps_root = tmp_path / "maps"
+    rtab_maps = maps_root / "rtab_maps"
+    rtab_maps.mkdir(parents=True)
+    existing = rtab_maps / "map040.db"
+    existing.write_bytes(b"old")
+    before = rtab_map_database_snapshot(maps_root)
+
+    created = rtab_maps / "map041.db"
+    created.write_bytes(b"new map")
+    after = rtab_map_database_snapshot(maps_root)
+
+    assert newest_changed_map_database(before, after) == created.resolve()
+
+
+def test_mapping_postprocess_generates_filtered_variant():
+    node = WebControlNode.__new__(WebControlNode)
+    node._navigation_map_operation_lock = threading.Lock()
+    node._mapping_postprocess_lock = threading.Lock()
+    node._mapping_postprocess = {
+        "enabled": True,
+        "state": "waiting",
+        "map_id": "map041",
+        "message": "",
+    }
+    node.navigation_maps = lambda: [{"id": "map041"}]
+    calls = []
+
+    def convert(record, filtered):
+        calls.append((record["id"], filtered))
+        return True, "filtered map ready"
+
+    node._convert_navigation_map = convert
+    node._run_mapping_postprocess("map041")
+
+    assert calls == [("map041", True)]
+    assert node._mapping_postprocess["state"] == "completed"
+    assert node._mapping_postprocess["message"] == "filtered map ready"
 
 
 def test_mapping_keeps_3d_cloud_with_planar_test_trajectory():
@@ -1008,6 +1076,8 @@ def test_map_portal_is_the_configured_public_ui():
     assert 'id="manualControlState"' in page
     assert 'id="restartSystemButton"' in page
     assert 'id="restartOverlay"' in page
+    assert 'href="/developer"' in page
+    assert "开发者模式" in page
     assert "选择并发送目标点" in page
     assert "开始运动前：请开启相机、开启机器人控制，并完成 IMU 校准" in page
     assert "机器人请确保已开启并保持完全静止" in page
@@ -1065,6 +1135,24 @@ def test_map_portal_is_the_configured_public_ui():
     assert "`/api/maps/${state.loadedMapId}/preview`" in app
 
 
+def test_both_pages_share_navigation_recovery_rules_and_controls():
+    web = WORKSPACE_ROOT / "project/luxi-web-control/web"
+    developer_page = (web / "index.html").read_text(encoding="utf-8")
+    user_page = (web / "map_portal.html").read_text(encoding="utf-8")
+    developer_app = (web / "app.js").read_text(encoding="utf-8")
+    user_app = (web / "map_portal.js").read_text(encoding="utf-8")
+    shared = (web / "map_projection.js").read_text(encoding="utf-8")
+
+    assert '<script src="/map_projection.js" defer></script>' in developer_page
+    assert '<script src="/map_projection.js"></script>' in user_page
+    assert "window.LuxiNavigationUi" in developer_app
+    assert "window.LuxiNavigationUi" in user_app
+    assert "forward_clear" not in developer_app
+    assert "forward_clear" not in user_app
+    assert "丢失前最后一次前方净空" in shared
+    assert "旋转没有时间上限" in shared
+
+
 def test_web_api_capabilities_cover_all_map_and_control_actions():
     capabilities = web_api_capabilities()
     operations = {
@@ -1074,6 +1162,8 @@ def test_web_api_capabilities_cover_all_map_and_control_actions():
     assert ("GET", "/api/maps") in operations
     assert ("GET", "/api/preview/rgb") in operations
     assert ("POST", "/api/maps/{map_id}/preview") in operations
+    assert ("GET", "/api/maps/{map_id}/preview/costmap") in operations
+    assert ("GET", "/api/maps/{map_id}/preview/obstacles") in operations
     assert ("GET", "/api/maps/{map_id}/download/{layer}") in operations
     assert ("POST", "/api/navigation/goal") in operations
     assert ("POST", "/api/navigation/home/set") in operations
@@ -1355,33 +1445,58 @@ def test_navigation_active_transition_clears_finished_task_path():
 
     assert node._planned_path_points == []
     assert node._last_valid_path_points == []
+    # The independent task manager, not this low-level active edge, owns the
+    # return-home state machine.
+    assert node._return_home_pending is True
+
+    task_status = String()
+    task_status.data = "cancelled"
+    node._on_navigation_task_status(task_status)
     assert node._return_home_pending is False
 
 
-def test_navigation_home_is_map_scoped_and_return_cancels_other_motion():
+def test_navigation_home_and_return_are_forwarded_to_task_manager():
     node = WebControlNode.__new__(WebControlNode)
     node._navigation_lock = threading.Lock()
     node._navigation_cloud_map_id = "map039"
     node._terrain_map_id = "map039"
-    node._navigation_homes = {}
+    node._voxel_frame_id = "map"
+    node._navigation_home = None
+    node._navigation_task_state = "idle"
+    node._return_home_pending = False
+    node.navigation_status = lambda: {
+        "state": "running", "home": node._navigation_home,
+    }
+    node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(
+            to_msg=lambda: PoseStamped().header.stamp
+        )
+    )
+    homes = []
+    returns = []
+    node.navigation_home_publisher = SimpleNamespace(publish=homes.append)
+    node.navigation_return_home_publisher = SimpleNamespace(
+        publish=returns.append
+    )
     accepted, _message = node.set_navigation_home(1.0, -0.5, 0.1, 0.4)
     assert accepted
-    assert node._navigation_homes["map039"]["x"] == 1.0
+    assert node._navigation_home["x"] == 1.0
+    assert len(homes) == 1
+    assert homes[0].header.frame_id == "map"
+    assert homes[0].pose.position.x == 1.0
 
     calls = []
-    node.navigation_status = lambda: {"map_id": "map039"}
     node.stop_motion = lambda force=True: calls.append(("stop", force))
-    node.set_navigation_goal = lambda *args, **kwargs: (
-        calls.append((args, kwargs)) or (True, "sent")
-    )
     accepted, _message = node.return_navigation_home()
 
     assert accepted
-    assert calls[0] == ("stop", True)
-    assert calls[1][1]["auto_start"] is True
+    assert calls == [("stop", True)]
+    assert len(returns) == 1
+    assert returns[0].data is True
+    assert node._navigation_task_state == "return_planning"
 
 
-def test_return_home_path_auto_starts_after_planning():
+def test_return_home_path_does_not_auto_start_in_web_process():
     node = WebControlNode.__new__(WebControlNode)
     node._navigation_lock = threading.Lock()
     node._planned_path_points = []
@@ -1403,8 +1518,8 @@ def test_return_home_path_auto_starts_after_planning():
 
     node._on_navigation_path(path)
 
-    assert starts == [True]
-    assert node._return_home_pending is False
+    assert starts == []
+    assert node._return_home_pending is True
 
 
 def test_relocalization_replans_at_slower_rotation_speed():
@@ -1413,8 +1528,12 @@ def test_relocalization_replans_at_slower_rotation_speed():
         .read_text(encoding="utf-8")
     )
     follower = config["terrain_path_follower"]["ros__parameters"]
+    safety = config["navigation_safety_gate"]["ros__parameters"]
     assert follower["localization_recovery_angular_speed"] == 0.10
+    assert follower["localization_recovery_timeout"] == 0.0
     assert follower["replan_request_topic"] == "/navigation/replan_request"
+    assert safety["dead_reckoning_duration"] == 0.80
+    assert safety["maximum_dead_reckoning_linear_speed"] == 0.10
     source = (
         WORKSPACE_ROOT / "project/luxi_3d_navigation/src/"
         "terrain_path_follower_node.cpp"

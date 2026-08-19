@@ -116,6 +116,8 @@ private:
     result.dead_reckoning_duration =
       declare_parameter<double>("dead_reckoning_duration", 0.80);
     result.dead_reckoning_scale = declare_parameter<double>("dead_reckoning_scale", 0.50);
+    result.maximum_dead_reckoning_linear_speed =
+      declare_parameter<double>("maximum_dead_reckoning_linear_speed", 0.10);
     result.maximum_recovery_angular_speed =
       declare_parameter<double>("maximum_recovery_angular_speed", 0.20);
     result.minimum_obstacle_rotation_clearance =

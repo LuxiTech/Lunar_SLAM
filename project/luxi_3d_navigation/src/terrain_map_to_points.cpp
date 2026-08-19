@@ -60,7 +60,7 @@ int main(int argc, char ** argv)
       static_cast<std::size_t>(std::stoul(argv[2])) : 12000U;
     luxi_3d_navigation::TerrainParameters parameters;
     parameters.robot_radius = argc >= 4 ? std::stod(argv[3]) : 0.25;
-    parameters.costmap_margin = argc >= 5 ? std::stod(argv[4]) : 0.15;
+    parameters.costmap_margin = argc >= 5 ? std::stod(argv[4]) : 0.35;
     parameters.costmap_weight = 8.0;
     if (parameters.robot_radius < 0.0 || parameters.costmap_margin < 0.0) {
       throw std::runtime_error("robot radius and costmap margin must be non-negative");

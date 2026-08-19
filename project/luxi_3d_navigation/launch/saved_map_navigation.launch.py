@@ -110,6 +110,13 @@ def generate_launch_description() -> LaunchDescription:
             }.items(),
         ),
         Node(
+            package="luxi_3d_navigation",
+            executable="navigation_task_manager_node",
+            name="navigation_task_manager",
+            parameters=[config_path],
+            output="screen",
+        ),
+        Node(
             package="luxi_voxel_navigation",
             executable="octomap_file_loader_node",
             name="octomap_file_loader",

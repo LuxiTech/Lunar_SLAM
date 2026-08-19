@@ -44,7 +44,7 @@ public:
     const auto active_topic = declare_parameter<std::string>(
       "navigation_active_topic", "/navigation/active");
     const auto stop_topic = declare_parameter<std::string>(
-      "navigation_stop_topic", "/navigation/stop");
+      "navigation_stop_topic", "/navigation/task/cancel");
     const auto emergency_stop_topic = declare_parameter<std::string>(
       "emergency_stop_topic", "/navigation/emergency_stop");
     invert_angular_z_ = declare_parameter<bool>("invert_angular_z", false);

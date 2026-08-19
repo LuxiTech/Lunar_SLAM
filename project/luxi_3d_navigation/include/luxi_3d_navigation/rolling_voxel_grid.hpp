@@ -67,6 +67,7 @@ public:
   VoxelIndex pointToVoxel(const Point3D & point) const;
   Point3D voxelCenter(const VoxelIndex & voxel) const;
   std::size_t entryCount() const;
+  void clear();
 
 private:
   struct Entry

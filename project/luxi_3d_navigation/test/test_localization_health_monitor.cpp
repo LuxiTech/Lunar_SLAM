@@ -59,6 +59,48 @@ TEST(LocalizationRecoveryController, RotatesWhileVerifyingThenHoldsBeforeResume)
     luxi_3d_navigation::LocalizationRecoveryAction::kTrack);
 }
 
+TEST(LocalizationRecoveryController, RotatesWithoutTimeoutUntilTrackingReturns)
+{
+  luxi_3d_navigation::LocalizationRecoveryParameters parameters;
+  parameters.dead_reckoning_duration = 0.8;
+  parameters.recovery_timeout = 0.0;
+  luxi_3d_navigation::LocalizationRecoveryController controller(parameters);
+
+  EXPECT_EQ(
+    controller.update("degraded", 10.0, true),
+    luxi_3d_navigation::LocalizationRecoveryAction::kDeadReckon);
+  EXPECT_EQ(
+    controller.update("searching", 3600.0, false),
+    luxi_3d_navigation::LocalizationRecoveryAction::kRotate);
+  EXPECT_EQ(
+    controller.update("tracking", 3600.1),
+    luxi_3d_navigation::LocalizationRecoveryAction::kHold);
+  EXPECT_EQ(
+    controller.update("tracking", 3601.1),
+    luxi_3d_navigation::LocalizationRecoveryAction::kTrack);
+}
+
+TEST(LocalizationRecoveryController, HoldsTranslationWithoutClearForwardSnapshot)
+{
+  luxi_3d_navigation::LocalizationRecoveryController controller;
+
+  EXPECT_EQ(
+    controller.update("degraded", 20.0, false),
+    luxi_3d_navigation::LocalizationRecoveryAction::kHold);
+  EXPECT_EQ(
+    controller.update("searching", 20.8, false),
+    luxi_3d_navigation::LocalizationRecoveryAction::kRotate);
+}
+
+TEST(LocalizationRecoveryController, RejectsNegativeRecoveryTimeout)
+{
+  luxi_3d_navigation::LocalizationRecoveryParameters parameters;
+  parameters.recovery_timeout = -1.0;
+  EXPECT_THROW(
+    luxi_3d_navigation::LocalizationRecoveryController controller(parameters),
+    std::invalid_argument);
+}
+
 TEST(LocalizationHealthMonitor, StopsPersistentFaultAfterGracePeriod)
 {
   luxi_3d_navigation::LocalizationHealthMonitor monitor(8.0);
