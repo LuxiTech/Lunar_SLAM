@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+
+# Unified, read-only map viewer.  The name intentionally follows the project
+# command requested by users: maps_viwer.
+set -euo pipefail
+
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+workspace="$(cd "${script_directory}/.." && pwd)"
+dry_run=false
+check_display=false
+color_view=false
+both_view=false
+map_path=""
+runtime_directory=""
+worker_pid=""
+extra_worker_pid=""
+
+usage() {
+  cat <<'EOF'
+Usage: maps_viwer [--dry-run] [--color|--both] MAP
+
+Open a saved map in the appropriate read-only viewer:
+  *.yaml, *.yml          2D occupancy-grid map (Nav2 map YAML)
+  *.pgm, *.png           2D occupancy-grid image with a same-name YAML file
+  *.db                   RTAB-Map database, exported to its 3D OccupancyMap view
+  *.bt, *.ot             OctoMap / voxel map, displayed as 3D occupied voxels
+
+--dry-run validates and reports the selected viewer without opening a GUI.
+--color shows a .db file as RTAB-Map's colored RGB-D point-cloud map.
+--both shows a .db file with both colored point cloud and OccupancyMap voxels.
+--check-display validates the X11 configuration without opening a map.
+EOF
+}
+
+error() {
+  echo "maps_viwer: $*" >&2
+  exit 2
+}
+
+cleanup() {
+  local pid
+  for pid in "${worker_pid}" "${extra_worker_pid}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  if [[ -n "${runtime_directory}" ]]; then
+    rm -rf "${runtime_directory}"
+  fi
+}
+
+load_ros_environment() {
+  # ROS setup scripts read variables that are not defined under `set -u`.
+  set +u
+  source /opt/ros/humble/setup.bash
+  source "${workspace}/install/setup.bash"
+  source "${workspace}/device/D435i/ros2_ws/install/setup.bash"
+  set -u
+  export LD_LIBRARY_PATH="${workspace}/3parts/octomap/install/lib:${LD_LIBRARY_PATH:-}"
+}
+
+prepare_graphics_environment() {
+  [[ -n "${DISPLAY:-}" ]] || error "DISPLAY is not set; run: export DISPLAY=:0 XAUTHORITY=/tmp/.docker.xauth QT_X11_NO_MITSHM=1"
+
+  local display_number="${DISPLAY#:}"
+  display_number="${display_number%%.*}"
+  if [[ "${DISPLAY}" =~ ^:[0-9]+(\.[0-9]+)?$ ]] && [[ ! -S "/tmp/.X11-unix/X${display_number}" ]]; then
+    if [[ -S /tmp/.X11-unix/X0 ]]; then
+      echo "maps_viwer: DISPLAY=${DISPLAY} has no X11 socket; using DISPLAY=:0" >&2
+      export DISPLAY=:0
+    else
+      error "X11 socket /tmp/.X11-unix/X${display_number} is unavailable; mount X11 and use DISPLAY=:0"
+    fi
+  fi
+  if [[ -z "${XAUTHORITY:-}" && -r /tmp/.docker.xauth ]]; then
+    export XAUTHORITY=/tmp/.docker.xauth
+  fi
+  export QT_X11_NO_MITSHM="${QT_X11_NO_MITSHM:-1}"
+}
+
+yaml_image_path() {
+  local yaml_path="$1"
+  python3 - "${yaml_path}" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+path = Path(sys.argv[1]).resolve()
+try:
+    content = yaml.safe_load(path.read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+    raise SystemExit(f"cannot read occupancy-grid YAML: {error}")
+if not isinstance(content, dict) or not isinstance(content.get("image"), str):
+    raise SystemExit("YAML has no string 'image' field")
+image = Path(content["image"])
+if not image.is_absolute():
+    image = path.parent / image
+if not image.is_file():
+    raise SystemExit(f"referenced image does not exist: {image}")
+print(image.resolve())
+PY
+}
+
+write_2d_rviz_config() {
+  cat > "${runtime_directory}/2d.rviz" <<'EOF'
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 160
+      Enabled: true
+      Name: Grid
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Alpha: 0.85
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Occupancy Grid
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /maps_viwer/map
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 20
+Window Geometry:
+  Height: 900
+  Width: 1400
+EOF
+}
+
+write_voxel_rviz_config() {
+  cat > "${runtime_directory}/3d.rviz" <<'EOF'
+Panels: []
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Occupied Voxels
+      Namespaces:
+        occupied_voxels: true
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /maps_viwer/occupied_voxels
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 12
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.65
+      Yaw: 0.75
+Window Geometry:
+  Height: 900
+  Width: 1400
+EOF
+}
+
+write_colored_cloud_rviz_config() {
+  cat > "${runtime_directory}/colored_cloud.rviz" <<'EOF'
+Panels: []
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/PointCloud2
+      Color Transformer: RGB8
+      Enabled: true
+      Name: RTAB-Map Colored Point Cloud
+      Position Transformer: XYZ
+      Queue Size: 1
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.02
+      Style: Points
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /maps_viwer/rtabmap_colored_cloud
+      Use Fixed Frame: true
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 24; 24; 24
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.65
+      Yaw: 0.75
+Window Geometry:
+  Height: 900
+  Width: 1400
+EOF
+}
+
+write_combined_rviz_config() {
+  cat > "${runtime_directory}/combined.rviz" <<'EOF'
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/PointCloud2
+      Color Transformer: RGB8
+      Enabled: true
+      Name: RTAB-Map Colored Point Cloud
+      Position Transformer: XYZ
+      Queue Size: 1
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.02
+      Style: Points
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /maps_viwer/rtabmap_colored_cloud
+      Use Fixed Frame: true
+      Value: true
+    - Alpha: 0.35
+      Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: RTAB-Map OccupancyMap Voxels
+      Namespaces:
+        occupied_voxels: true
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /maps_viwer/occupied_voxels
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 24; 24; 24
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.65
+      Yaw: 0.75
+Window Geometry:
+  Height: 900
+  Width: 1400
+EOF
+}
+
+wait_for_lifecycle_node() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if ros2 lifecycle get /maps_viwer_map_server >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+view_2d() {
+  local yaml_path="$1"
+  yaml_image_path "${yaml_path}" >/dev/null || error "invalid 2D occupancy-grid map: ${yaml_path}"
+  if [[ "${dry_run}" == true ]]; then
+    printf '2d-occupancy-grid %s\n' "${yaml_path}"
+    return
+  fi
+
+  load_ros_environment
+  prepare_graphics_environment
+  runtime_directory="$(mktemp -d "${TMPDIR:-/tmp}/maps_viwer.XXXXXX")"
+  trap cleanup EXIT INT TERM
+  write_2d_rviz_config
+  ros2 run nav2_map_server map_server --ros-args \
+    -r __node:=maps_viwer_map_server \
+    -r map:=/maps_viwer/map \
+    -p yaml_filename:="${yaml_path}" &
+  worker_pid=$!
+  wait_for_lifecycle_node || error "Nav2 map_server did not start"
+  ros2 lifecycle set /maps_viwer_map_server configure >/dev/null
+  ros2 lifecycle set /maps_viwer_map_server activate >/dev/null
+  echo "Opening 2D occupancy grid: ${yaml_path}"
+  rviz2 -d "${runtime_directory}/2d.rviz"
+}
+
+view_voxel() {
+  local voxel_path="$1"
+  if [[ "${dry_run}" == true ]]; then
+    printf '3d-voxel %s\n' "${voxel_path}"
+    return
+  fi
+
+  load_ros_environment
+  prepare_graphics_environment
+  runtime_directory="$(mktemp -d "${TMPDIR:-/tmp}/maps_viwer.XXXXXX")"
+  trap cleanup EXIT INT TERM
+  write_voxel_rviz_config
+  ros2 run luxi_voxel_navigation octomap_file_loader_node --ros-args \
+    -r __node:=maps_viwer_voxel_loader \
+    -p initial_octomap_path:="${voxel_path}" \
+    -p octomap_topic:=/maps_viwer/octomap \
+    -p marker_topic:=/maps_viwer/occupied_voxels &
+  worker_pid=$!
+  sleep 0.5
+  kill -0 "${worker_pid}" 2>/dev/null || error "OctoMap loader exited before the viewer could start"
+  echo "Opening 3D voxel map: ${voxel_path}"
+  rviz2 -d "${runtime_directory}/3d.rviz"
+}
+
+view_rtabmap_combined() {
+  local database_path="$1"
+  local map_name
+  map_name="$(basename "${database_path%.db}")"
+  local exported_directory="${workspace}/maps/octo_maps/${map_name}_octomap"
+  local octomap_path="${exported_directory}/${map_name}.bt"
+  local cloud_path=""
+  if [[ -d "${exported_directory}" ]]; then
+    cloud_path="$(find "${exported_directory}" -maxdepth 1 -type f -name '*_cloud.ply' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-)"
+  fi
+
+  if [[ ! -s "${octomap_path}" || -z "${cloud_path}" || ! -s "${cloud_path}" ]]; then
+    echo "Creating missing paired maps for ${map_name}..."
+    "${script_directory}/export_rtabmap_octomap.sh" "${database_path}" "${exported_directory}"
+    cloud_path="$(find "${exported_directory}" -maxdepth 1 -type f -name '*_cloud.ply' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-)"
+  fi
+  [[ -s "${octomap_path}" ]] || error "paired OccupancyMap was not created: ${octomap_path}"
+  [[ -n "${cloud_path}" && -s "${cloud_path}" ]] || error "paired colored cloud was not created"
+
+  write_combined_rviz_config
+  ros2 run luxi_voxel_navigation octomap_file_loader_node --ros-args \
+    -r __node:=maps_viwer_combined_voxel_loader \
+    -p initial_octomap_path:="${octomap_path}" \
+    -p octomap_topic:=/maps_viwer/octomap \
+    -p marker_topic:=/maps_viwer/occupied_voxels &
+  worker_pid=$!
+  python3 "${script_directory}/maps_viwer_cloud_publisher.py" "${cloud_path}" &
+  extra_worker_pid=$!
+  sleep 0.8
+  kill -0 "${worker_pid}" 2>/dev/null || error "combined OccupancyMap loader exited before the viewer could start"
+  kill -0 "${extra_worker_pid}" 2>/dev/null || error "combined colored point-cloud publisher exited before the viewer could start"
+  echo "Opening combined RTAB-Map view: ${map_name} (both displays enabled)"
+  echo "Use the two checkboxes in RViz Displays to toggle colored points and OccupancyMap voxels."
+  rviz2 -d "${runtime_directory}/combined.rviz"
+}
+
+view_rtabmap() {
+  local database_path="$1"
+  local colored="$2"
+  local combined="$3"
+  if [[ "${dry_run}" == true ]]; then
+    if [[ "${combined}" == true ]]; then
+      printf '3d-rtabmap-combined %s\n' "${database_path}"
+    elif [[ "${colored}" == true ]]; then
+      printf '3d-rtabmap-colored %s\n' "${database_path}"
+    else
+      printf '3d-rtabmap %s\n' "${database_path}"
+    fi
+    return
+  fi
+  if pgrep -f '/rtabmap_slam/lib/rtabmap_slam/rtabmap' >/dev/null; then
+    error "RTAB-Map is still writing a database; stop mapping before viewing it"
+  fi
+
+  load_ros_environment
+  prepare_graphics_environment
+  runtime_directory="$(mktemp -d "${TMPDIR:-/tmp}/maps_viwer.XXXXXX")"
+  trap cleanup EXIT INT TERM
+  export ROS_LOG_DIR="${ROS_LOG_DIR:-${runtime_directory}/ros_logs}"
+  mkdir -p "${ROS_LOG_DIR}"
+  local exporter="${workspace}/install/rtabmap/bin/rtabmap-export"
+  if [[ ! -x "${exporter}" ]]; then
+    exporter="$(command -v rtabmap-export || true)"
+  fi
+  [[ -n "${exporter}" && -x "${exporter}" ]] || error "rtabmap-export is unavailable"
+  if [[ "${combined}" == true ]]; then
+    view_rtabmap_combined "${database_path}"
+    return
+  fi
+  if [[ "${colored}" == true ]]; then
+    echo "Preparing RTAB-Map colored 3D point cloud: ${database_path}"
+    "${exporter}" --cloud --opt 3 --decimation 4 --voxel 0.03 --min_range 0.2 --max_range 4.0 \
+      --output rtabmap --output_dir "${runtime_directory}" "${database_path}"
+    local cloud_path="${runtime_directory}/rtabmap_cloud.ply"
+    [[ -s "${cloud_path}" ]] || error "RTAB-Map did not produce a colored 3D point cloud"
+    write_colored_cloud_rviz_config
+    python3 "${script_directory}/maps_viwer_cloud_publisher.py" "${cloud_path}" &
+    worker_pid=$!
+    sleep 0.5
+    kill -0 "${worker_pid}" 2>/dev/null || error "colored point-cloud publisher exited before the viewer could start"
+    echo "Opening direct RTAB-Map colored 3D view: ${database_path}"
+    rviz2 -d "${runtime_directory}/colored_cloud.rviz"
+    return
+  fi
+
+  echo "Preparing RTAB-Map 3D OccupancyMap: ${database_path}"
+  "${exporter}" --octomap --opt 3 \
+    --output rtabmap --output_dir "${runtime_directory}" "${database_path}"
+  local octomap_path="${runtime_directory}/rtabmap_octomap.bt"
+  [[ -s "${octomap_path}" ]] || error "RTAB-Map did not produce a 3D OccupancyMap"
+  write_voxel_rviz_config
+  ros2 run luxi_voxel_navigation octomap_file_loader_node --ros-args \
+    -r __node:=maps_viwer_rtabmap_voxel_loader \
+    -p initial_octomap_path:="${octomap_path}" \
+    -p octomap_topic:=/maps_viwer/octomap \
+    -p marker_topic:=/maps_viwer/occupied_voxels &
+  worker_pid=$!
+  sleep 0.5
+  kill -0 "${worker_pid}" 2>/dev/null || error "RTAB-Map OccupancyMap loader exited before the viewer could start"
+  echo "Opening direct RTAB-Map 3D OccupancyMap view: ${database_path}"
+  rviz2 -d "${runtime_directory}/3d.rviz"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      dry_run=true
+      ;;
+    --check-display)
+      check_display=true
+      ;;
+    --color)
+      color_view=true
+      ;;
+    --both)
+      both_view=true
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      [[ $# -eq 1 ]] || error "exactly one map path is required"
+      map_path="$1"
+      ;;
+    -*)
+      error "unknown option: $1"
+      ;;
+    *)
+      [[ -z "${map_path}" ]] || error "exactly one map path is required"
+      map_path="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ "${check_display}" == true ]]; then
+  prepare_graphics_environment
+  printf 'X11 graphics environment is ready: DISPLAY=%s XAUTHORITY=%s\n' \
+    "${DISPLAY}" "${XAUTHORITY:-<default>}"
+  [[ -n "${map_path}" ]] || exit 0
+fi
+
+[[ -n "${map_path}" ]] || {
+  usage >&2
+  exit 2
+}
+[[ -f "${map_path}" ]] || error "map file does not exist: ${map_path}"
+map_path="$(realpath "${map_path}")"
+extension="${map_path##*.}"
+extension="${extension,,}"
+
+if [[ ( "${color_view}" == true || "${both_view}" == true ) && "${extension}" != db ]]; then
+  error "--color and --both are only supported for RTAB-Map .db files"
+fi
+if [[ "${color_view}" == true && "${both_view}" == true ]]; then
+  error "--color and --both cannot be used together"
+fi
+
+case "${extension}" in
+  yaml|yml)
+    view_2d "${map_path}"
+    ;;
+  pgm|png)
+    sidecar_yaml="${map_path%.*}.yaml"
+    [[ -f "${sidecar_yaml}" ]] || sidecar_yaml="${map_path%.*}.yml"
+    [[ -f "${sidecar_yaml}" ]] || error "2D image needs a same-name .yaml/.yml metadata file"
+    sidecar_image="$(yaml_image_path "${sidecar_yaml}")" || error "invalid 2D occupancy-grid metadata: ${sidecar_yaml}"
+    [[ "${sidecar_image}" == "${map_path}" ]] || error "metadata image does not match input file: ${sidecar_yaml}"
+    view_2d "$(realpath "${sidecar_yaml}")"
+    ;;
+  db)
+    view_rtabmap "${map_path}" "${color_view}" "${both_view}"
+    ;;
+  bt|ot)
+    view_voxel "${map_path}"
+    ;;
+  *)
+    error "unsupported map suffix '.${extension}' (supported: .yaml/.yml, .pgm/.png, .db, .bt/.ot)"
+    ;;
+esac

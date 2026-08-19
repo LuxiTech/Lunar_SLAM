@@ -1,0 +1,30 @@
+[submodule "3parts/hloc"]
+	path = 3parts/hloc
+	url = https://github.com/cvg/Hierarchical-Localization.git
+	ignore = untracked
+[submodule "3parts/lightglue"]
+	path = 3parts/lightglue
+	url = https://github.com/cvg/LightGlue.git
+	ignore = untracked
+[submodule "3parts/octomap"]
+	path = 3parts/octomap
+	url = https://github.com/OctoMap/octomap.git
+	ignore = untracked
+[submodule "3parts/open3d"]
+	path = 3parts/open3d
+	url = https://github.com/isl-org/Open3D.git
+	ignore = untracked
+[submodule "3parts/rtabmap"]
+	path = 3parts/rtabmap
+	url = https://github.com/introlab/rtabmap.git
+	ignore = untracked
+[submodule "3parts/rtabmap_ros"]
+	path = 3parts/rtabmap_ros
+	url = https://github.com/introlab/rtabmap_ros.git
+	ignore = untracked
+[submodule "demo/jie_3d_nav"]
+	path = demo/jie_3d_nav
+	url = https://github.com/6-robot/jie_3d_nav.git
+[submodule "demo/lucid-atlas"]
+	path = demo/lucid-atlas
+	url = https://gitee.com/fxx360724/lucid-atlas.git

@@ -1,0 +1,26 @@
+image_width: 1024
+image_height: 750
+camera_name: mvch120_stereo/left
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [456.48563, 0.0, 505.20575,
+         0.0, 456.76715, 375.70413,
+         0.0, 0.0, 1.0]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [-0.107622, 0.040928, 0.000120, -0.000785, 0.000000]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [0.99982332, -0.00815935, -0.01693374,
+         0.00810587, 0.99996195, -0.00322419,
+         0.01695941, 0.00308635, 0.99985142]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [455.09521, 0.0, 520.36755, 0.0,
+         0.0, 455.09521, 382.18261, 0.0,
+         0.0, 0.0, 1.0, 0.0]

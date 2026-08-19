@@ -1,0 +1,17 @@
+map_cloud_filter:
+  # Statistical outlier removal. Set mean_k to 0 to disable.
+  mean_k: 20
+  standard_deviation: 2.0
+
+  # Radius outlier removal. Set radius to 0 to disable.
+  radius: 0.12
+  minimum_neighbors: 4
+
+  # Remove disconnected clusters smaller than this number of points.
+  # Set minimum_cluster_size to 0 to disable.
+  cluster_tolerance: 0.12
+  minimum_cluster_size: 20
+
+  # Optional map-frame height limits. Uncomment only after confirming map Z.
+  # minimum_z: -1.0
+  # maximum_z: 2.0

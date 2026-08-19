@@ -1,0 +1,47 @@
+stereo_node:
+  ros__parameters:
+    # Camera module currently installed on D1 d15042176. Both UVC sensors use
+    # the same generic serial, so bind them by the NX USB hub topology.
+    left_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.3:1.0-video-index0
+    right_device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0
+    auto_discover_devices: true
+    pixel_format: MJPG
+    output_encoding: bgr8
+    width: 1920
+    height: 1080
+    frame_rate_hz: 10.0
+
+    # This module has no external trigger pulse. Hardware mode opens both UVC
+    # nodes but produces zero frames; video mode was measured at 10.00 Hz on
+    # both sensors. stereo_node pairs frames with the kernel V4L2 capture/SOE
+    # timestamps (not userspace dequeue time) and assigns one atomic timestamp
+    # to each pair.
+    trigger_mode: video
+
+    # Reuse the currently deployed camera/H30 clock correction provisionally.
+    # The launch synchronization gate verifies it on every start.
+    timestamp_offset_sec: -0.09126181637751751
+    # Bound motion blur while adapting between indoor shadows and bright
+    # openings. One controller writes identical controls to both sensors.
+    auto_exposure: false
+    exposure_absolute: 90
+    gain: 40
+    synchronized_auto_exposure: true
+    # A lower, wider target prevents the controller from sitting at maximum
+    # analogue gain on the reflective floor. Ten-frame updates also avoid
+    # changing brightness between consecutive 3 Hz CREStereo inferences.
+    auto_exposure_target_luma: 60
+    auto_exposure_luma_deadband: 10
+    auto_exposure_update_interval_frames: 10
+    auto_exposure_min_exposure_absolute: 20
+    # Live corridor validation showed 120/58 stopped at luma 53-57, below the
+    # 58 lower edge of the target band. Permit 15 ms exposure before adding
+    # any more analogue gain; at the 10 Hz sensor cadence this remains bounded
+    # while recovering wall/floor texture needed by passive stereo.
+    auto_exposure_max_exposure_absolute: 150
+    auto_exposure_min_gain: 0
+    auto_exposure_max_gain: 58
+    auto_exposure_max_exposure_step: 8
+    auto_exposure_max_gain_step: 3
+    left_frame_id: left_camera_optical_frame
+    right_frame_id: right_camera_optical_frame

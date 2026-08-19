@@ -1,0 +1,34 @@
+/camera/camera:
+  ros__parameters:
+    camera_namespace: camera
+    camera_name: camera
+    # Reject a connected D435/D435i instead of silently using its narrower RGB FOV.
+    device_type: d455
+    enable_color: true
+    enable_depth: true
+    enable_infra1: false
+    enable_infra2: false
+    enable_gyro: true
+    enable_accel: true
+    unite_imu_method: 2
+    enable_sync: true
+    align_depth.enable: true
+    # Preserve the wide global-shutter RGB profile at a rate that is stable on
+    # the deployed Jetson/USB path. Both streams advertise 15 Hz support.
+    rgb_camera.color_profile: 848,480,15
+    depth_module.depth_profile: 848,480,15
+    spatial_filter.enable: true
+    temporal_filter.enable: true
+    hole_filling_filter.enable: false
+    pointcloud.enable: false
+    publish_tf: true
+    tf_publish_rate: 0.0
+    initial_reset: false
+    reconnect_timeout: 6.0
+    rgb_camera.power_line_frequency: 2
+    # Automatic white balance repeatedly drifted from R/B~1.00 to 2.54 under
+    # the deployment lighting, producing the visible warm-color flash. A fixed
+    # 3450 K held R/B at 1.035..1.037 in the same scene. Keep color stable for
+    # mapping; recalibrate deliberately if deployment lighting changes.
+    rgb_camera.enable_auto_white_balance: false
+    rgb_camera.white_balance: 3450.0

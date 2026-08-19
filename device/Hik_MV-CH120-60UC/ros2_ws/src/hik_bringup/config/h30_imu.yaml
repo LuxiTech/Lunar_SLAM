@@ -1,0 +1,15 @@
+yesense_pub:
+  ros__parameters:
+    # Stable udev alias for the H30 USB CDC device (VID:PID 1a86:55d4,
+    # serial 5C2C063825). See config/99-h30-imu.rules.
+    serial_port: /dev/H30-imu
+    baud_rate: 921600
+    frame_id: imu_link
+    driver_type: ros_serial
+    # H30 protocol data ID 0x51. Unit: microseconds; it resets to zero at
+    # each external SYNC pulse and is used to remove UART receive jitter.
+    use_sample_timestamp: true
+    # Standard message for ROS 2 tools and later camera-IMU fusion.
+    imu_topic_ros: /imu/data
+    # WheelTec/Yesense extended message: temperature and sample fields.
+    imu_topic: /imu/data_extend

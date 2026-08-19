@@ -1,0 +1,6 @@
+opencv_focus_viewer:
+  ros__parameters:
+    camera_topic: /left_camera/image/compressed
+    roi_size: 500
+    display_scale: 0.65
+    zoom_size: 380

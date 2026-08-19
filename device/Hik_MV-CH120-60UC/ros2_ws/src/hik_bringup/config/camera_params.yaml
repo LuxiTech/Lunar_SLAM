@@ -1,0 +1,14 @@
+stereo_node:
+  ros__parameters:
+    # Do not override external_trigger here. The MVS/UserSet-compatible value
+    # in the package's stereo_camera.xml is the single source of truth for
+    # acquisition mode.  Config and calibration defaults are resolved through
+    # ament_index_cpp, so this file is portable after colcon install.
+    # Keep one explicit parameter: the Humble parameter-file parser rejects an
+    # otherwise empty ros__parameters map.
+    # RViz-only 256x188 preview. The mapping/depth stream below remains at the
+    # calibrated 1024x750 resolution; this small full-FOV display copy sustains
+    # the 10 Hz trigger rate without changing SLAM input pixels or precision.
+    rviz_preview_scale: 0.25
+    # Full-FOV 2048x1500 -> calibrated 1024x750 image stream.
+    capture_scale: 0.5

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Edit this file, then restart stereo_node for the changes to take effect. -->
+<stereo_camera>
+  <left_camera 
+  serial="DA7672183" 
+  />
+  
+  <right_camera 
+  serial="DB0431802" 
+  />
+
+  <!-- Keep the trigger source stored in UserSet1; it matches the rig wiring. -->
+  <acquisition 
+  user_set="UserSet1" 
+  external_trigger="true" 
+  trigger_source="Default"
+  frame_rate_hz="0.0" />
+
+  <!-- Fixed exposure for consistent stereo brightness: 25000 us = 25 ms. -->
+  <exposure 
+  auto="false" 
+  time_us="25000"
+  />
+
+  <gain 
+  auto="false"
+  value="23.8" 
+  />
+  
+  <!-- Hardware decimation is unavailable with the current camera UserSet.
+       Full-FOV scaling is performed by stereo_node after capture instead. -->
+  <image 
+  pixel_format="Default" 
+  width="0" height="0" 
+  offset_x="0" 
+  offset_y="0"
+  binning_horizontal="1" 
+  binning_vertical="1"
+  decimation_horizontal="1" 
+  decimation_vertical="1"
+  swap_red_blue="true" 
+  override_white_balance="true"
+  auto_white_balance="false" 
+  />
+
+</stereo_camera>

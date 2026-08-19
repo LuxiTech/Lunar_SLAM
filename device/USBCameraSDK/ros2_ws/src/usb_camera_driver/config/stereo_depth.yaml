@@ -1,0 +1,85 @@
+usb_stereo_depth_node:
+  ros__parameters:
+    # stereo_rgbd.launch.py supplies the installed calibration file.
+    calibration_file: ''
+    compressed_input: true
+    left_image_topic: /left_camera/image/compressed
+    right_image_topic: /right_camera/image/compressed
+    color_output_topic: /usb_stereo/left/image_rect_color
+    # RViz-only full-FOV view. It reuses the 480x270 image already scaled for
+    # stereo processing, so enabling the preview adds no resize or JPEG work.
+    preview_output_topic: /usb_stereo/left/image_preview
+    depth_output_topic: /usb_stereo/depth
+    # Display-only crop of the valid rectification ROI. RGB-D and camera_info
+    # continue to use depth_output_topic with the calibrated full frame.
+    depth_preview_output_topic: /usb_stereo/depth_preview
+    camera_info_output_topic: /usb_stereo/left/camera_info
+    rgbd_output_topic: /usb_stereo/rgbd_image
+    point_cloud_output_topic: /usb_stereo/points
+    disparity_output_topic: /usb_stereo/disparity
+    output_frame_id: left_camera_optical_frame
+
+    # Match stereo at 960x540 with VPI OFA, then publish 480x270. Doubling the
+    # matching resolution halves the disparity-induced metric depth error,
+    # while the unchanged output size preserves DDS and RTAB-Map throughput.
+    processing_scale: 0.5
+    output_scale: 0.25
+    # The USB depth node contains only OFA eSGM, PVA filtering and VIC
+    # conversion. VPI failure is reported instead of changing algorithms.
+    # OFA eSGM + PVA confidence/median + VIC block-linear conversion. Absolute
+    # confidence uses the hardware left/right check to reject passive-stereo
+    # ambiguity on blank walls; this threshold is tuned below by A/B tests.
+    vpi_confidence_type: absolute
+    vpi_confidence_threshold: 64875
+    vpi_p1: 8
+    vpi_p2: 81
+    vpi_uniqueness: -1.0
+    vpi_ofa_window_size: 7
+    # One eSGM pass sustains the trigger stream with the lowest pose latency.
+    # Two passes were rejected by live A/B: depth fell to about 6.5 Hz and
+    # static pose jitter increased even though CPU/GPU limits still passed.
+    vpi_ofa_num_passes: 1
+    # Full-resolution CPU disparity filtering did not improve the final map
+    # enough to justify its lower coverage. Keep OFA/PVA hardware output and
+    # apply the inexpensive published-resolution filter below instead.
+    vpi_ofa_apply_cpu_postfilters: false
+    # The bounded 5x5 output median runs after 480x270 downsampling. It removes
+    # OFA flying pixels without filtering the full-resolution depth image a
+    # second time.
+    vpi_output_median_filter_size: 5
+    vpi_output_median_max_difference_m: 0.08
+    # Keep the maximum calibrated field of view. This only changes the
+    # startup rectification maps; the per-frame image size and bandwidth stay
+    # at 480x270. A value of 0 would zoom until all rectified borders vanish.
+    rectification_alpha: 1.0
+    # Do not apply a second timer gate, which would drop frames on small
+    # trigger jitter.
+    max_processing_fps: 0.0
+    # Keep RGB-D/depth at the full trigger rate. Five hertz is smooth enough
+    # for the RViz-only live cloud and avoids rebuilding ~50k XYZRGB points on
+    # every frame; accumulated RTAB-Map clouds are unaffected.
+    point_cloud_max_fps: 5.0
+    # Keep the RGB-D/depth image at the calibrated 6 m limit, but omit the
+    # passive-stereo far rays from the RViz-only cloud. RTAB-Map is likewise
+    # configured to map the reliable 0.4-3.0 m interval.
+    point_cloud_max_depth_m: 3.0
+    # VPI owns stereo matching. Two OpenCV workers keep resize/filter latency
+    # below the camera period without the >1-core spikes seen with three.
+    opencv_num_threads: 2
+    # At the 960x540 matching resolution, fx=503.5 px and the 90.3 mm baseline
+    # require about 114 px disparity at the configured 0.4 m minimum depth.
+    max_disparity: 128
+    # A 3x3 median is applied only when the raw sub-pixel disparity agrees
+    # within this threshold. It reduces planar depth shimmer without bridging
+    # foreground/background discontinuities.
+    disparity_median_filter_size: 3
+    disparity_median_max_difference: 1.5
+    min_depth_m: 0.4
+    max_depth_m: 6.0
+    # Reject thin low-disparity sheets caused by horizontal-edge ambiguity.
+    # Large surfaces beyond 3 m survive the 7x7 support test; isolated rays do
+    # not. Near mapping geometry is left untouched.
+    far_artifact_depth_m: 3.0
+    # Keep sparse but real room-scale surfaces. The previous 7x7 gate was too
+    # aggressive beyond 3 m for passive stereo in a large indoor scene.
+    far_artifact_support_size: 3

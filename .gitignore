@@ -1,0 +1,37 @@
+# Excluded standalone demo repository
+/demo/luxi_-lunar/
+
+# ROS/colcon generated directories (at any workspace depth)
+build/
+install/
+log/
+/logs/
+/tools/test/
+
+# Common generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor and OS metadata
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Locally captured RTAB-Map databases and exports; keep maps/README.md tracked.
+/maps/**
+!/maps/README.md
+
+# Machine-local third-party runtimes, Python packages, and downloaded models.
+# Source repositories under 3parts/ are managed as Git submodules instead.
+/3parts/hloc_gpu_python/
+/3parts/hloc_python/
+/3parts/hloc_models/
+
+# Vendor SDK archives are installed locally and exceed remote single-file limits.
+/device/Hik_MV-CH120-60UC/SDK/*.zip
+
+# D455 upstream SDK/wrapper clones are pinned locally; project integration stays tracked.
+/device/D455/ros2_ws/3parts/librealsense/
+/device/D455/ros2_ws/src/realsense-ros/

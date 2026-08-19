@@ -1,0 +1,34 @@
+# Stereo camera--IMU extrinsics reviewed from Kalibr.
+#
+# Source bag: /home/changxin/kalibr_data/stereo_imu_dynamic_05.bag
+# Source result: config/kalibr_dynamic_05_camchain.yaml
+# Calibration date: 2026-07-31
+# Camera output during calibration: 1024x750, 10 Hz, hardware-triggered.
+kalibr_camera_imu:
+  status: reviewed
+  reference_camera_frame: left_camera_optical_frame
+  imu_frame: imu_link
+
+  # Kalibr T_cam0_imu transforms imu_link coordinates into
+  # left_camera_optical_frame, so publish it directly as parent->child TF.
+  translation_m: [-0.06080516708588524, -0.017371973406354727, -0.12304891470347533]
+  rotation_xyzw: [0.6868459901794202, 0.024915427523349555, -0.0010234338137173815, 0.7263750820540378]
+  transform_matrix:
+    - [0.998756348109116, 0.03571291661686888, 0.0347900086010373, -0.06080516708588524]
+    - [0.03273932933520552, 0.05648307671536246, -0.9978666235321476, -0.017371973406354727]
+    - [-0.03760177424570056, 0.997764626368105, 0.05524361449156201, -0.12304891470347533]
+    - [0.0, 0.0, 0.0, 1.0]
+
+  # Kalibr convention: t_imu = t_camera + camera_to_imu_time_offset_sec.
+  # Static TF cannot apply this; pass it to a VIO/fusion component when used.
+  camera_to_imu_time_offset_sec: -0.03776861601888945
+  right_camera_to_imu_time_offset_sec: -0.03656614786633172
+
+  quality:
+    cam0_reprojection_mean_px: 1.7940825553957307
+    cam0_reprojection_median_px: 1.1419288909799339
+    cam1_reprojection_mean_px: 1.641186194309151
+    cam1_reprojection_median_px: 1.0968618223315323
+    gyro_residual_mean_rad_s: 0.01088851089051547
+    accel_residual_mean_m_s2: 0.36710571891925786
+    note: 'Usable for testing and SLAM integration; improve target coverage and motion if sub-pixel VIO accuracy is required.'

@@ -1,0 +1,1 @@
+/usr/bin/c++  -pedantic -Wno-missing-field-initializers -Wno-switch -Wno-multichar -Wsequence-point -Wformat -Wformat-security -mstrict-align -ftree-vectorize -pthread  -O3 -DNDEBUG CMakeFiles/rs-embed.dir/rs-embed.cpp.o -o ../../Release/rs-embed  ../../Release/librs_lz4.a 

@@ -1,0 +1,33 @@
+# Validated spatial and temporal calibration from the full run04 dataset.
+# Kalibr convention: T_cam_imu transforms imu_link coordinates into the
+# corresponding camera optical frame.
+kalibr_camera_imu:
+  status: validated
+  source: calibration/data/run04-camchain-imucam.yaml
+  reference_camera_frame: left_camera_optical_frame
+  imu_frame: imu_link
+
+  T_cam0_imu:
+    - [0.9998860285132339, 0.01282196748872135, -0.007970391066408596, 0.04391590957628977]
+    - [-0.007930489472440747, -0.0031598121730641656, -0.999963560797972, 0.0007111012450178807]
+    - [-0.012846685205173345, 0.9999128025666788, -0.0030577675663876554, -0.03359544596572737]
+    - [0.0, 0.0, 0.0, 1.0]
+
+  # Derived from the 2026-08-11 OpenCV T_cam1_cam0 * T_cam0_imu.
+  T_cam1_imu:
+    - [0.9999262013245448, 0.00772087439703546, -0.009379765626711601, -0.045875551678438264]
+    - [-0.009350300570984352, -0.0038435765295197202, -0.9999488980936451, 0.0007271365867297705]
+    - [-0.0077565316926502675, 0.9999628068173375, -0.0037711003823797866, -0.03188840886924362]
+    - [0.0, 0.0, 0.0, 1.0]
+
+  translation_m: [0.04391590957628977, 0.0007111012450178807, -0.03359544596572737]
+  rotation_xyzw: [0.7081849349309625, 0.0017267657694375585, -0.007348742978277029, 0.7059866232397363]
+  camera_to_imu_time_offset_sec: -0.09126181637751751
+
+  quality:
+    reprojection_mean_px: 0.36806783484052424
+    gyroscope_mean_rad_s: 0.0045008893002276605
+    accelerometer_mean_m_s2: 0.04996412861263125
+    translation_repeatability_mm: 2.331585645013518
+    rotation_repeatability_deg: 0.26751365868266846
+    temporal_repeatability_ms: 0.2954111092110523

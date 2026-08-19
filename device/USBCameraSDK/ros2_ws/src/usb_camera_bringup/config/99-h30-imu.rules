@@ -1,0 +1,3 @@
+# WheelTec / Yesense H30 on the QinHeng USB CDC interface.
+# Match this individual adapter so other serial devices are unaffected.
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", ATTRS{serial}=="5A6C092260", OWNER:="nvidia", GROUP:="dialout", MODE:="0660", ENV{ID_MM_DEVICE_IGNORE}:="1", SYMLINK+="imu-H30"

@@ -1,0 +1,117 @@
+SLAM模块局域网话题订阅说明（拟确认）
+
+SLAM模块通过ROS 2在局域网内发送以下两个话题：
+
+  /cmd_vel    速度控制命令
+  /slam/pose  载体坐标信息
+
+
+一、接收端网络配置
+
+接收端需要接入SLAM模块所在的192.168.123.xx局域网，并配置一个未被其他设备使用的固定IP。
+
+示例配置：
+
+  IP地址：192.168.123.50（仅为示例，使用前必须确认没有被占用）
+  子网掩码：255.255.255.0
+
+请避开SLAM模块、载体控制器、相机和其他已有设备的IP。配置前可执行：
+
+  ping 192.168.123.50
+
+如能收到回复，说明该IP已被占用，应更换其他地址。建议由双方统一分配IP，不能只依靠ping
+结果判断，因为已占用但关机的设备不会回复。
+
+
+二、接收端ROS 2配置
+
+接收端安装ROS 2 Humble后，在终端执行：
+
+  source /opt/ros/humble/setup.bash
+  export ROS_DOMAIN_ID=0
+  export ROS_LOCALHOST_ONLY=0
+
+SLAM发送端和接收端的ROS_DOMAIN_ID必须相同，并允许局域网UDP和组播通信。
+
+检查是否发现SLAM话题：
+
+  ros2 topic list
+
+正常情况下应能看到：
+
+  /cmd_vel
+  /slam/pose
+
+
+三、订阅/cmd_vel速度命令
+
+  话题名称：/cmd_vel
+  消息类型：geometry_msgs/msg/Twist
+
+查看消息类型：
+
+  ros2 topic type /cmd_vel
+
+实时订阅：
+
+  ros2 topic echo /cmd_vel
+
+检查发送频率：
+
+  ros2 topic hz /cmd_vel
+
+主要字段：
+
+  linear.x：前进/后退速度，单位m/s，向前为正；
+  linear.y：左右横移速度，单位m/s，向左为正；
+  angular.z：转向角速度，单位rad/s，逆时针为正；
+  其他字段当前发送0。
+
+示例：
+
+  linear:  {x: 0.20, y: 0.0, z: 0.0}
+  angular: {x: 0.0, y: 0.0, z: 0.10}
+
+
+四、订阅/slam/pose坐标信息
+
+  话题名称：/slam/pose
+  消息类型：geometry_msgs/msg/PoseWithCovarianceStamped
+
+查看消息类型：
+
+  ros2 topic type /slam/pose
+
+实时订阅：
+
+  ros2 topic echo /slam/pose
+
+检查发送频率：
+
+  ros2 topic hz /slam/pose
+
+主要字段：
+
+  header.stamp：坐标数据时间戳；
+  header.frame_id：地图坐标系，拟固定为map；
+  pose.pose.position.x/y/z：载体位置，单位m；
+  pose.pose.orientation.x/y/z/w：载体姿态四元数；
+  pose.covariance：位姿协方差。
+
+坐标系采用右手系：X轴向前、Y轴向左、Z轴向上。该消息表示map坐标系下base_link的
+位置和姿态。
+
+
+五、无法收到话题时的检查
+
+1. 确认双方IP均为192.168.123.xx，子网掩码均为255.255.255.0；
+2. 确认双方能够互相ping通；
+3. 确认双方ROS_DOMAIN_ID相同；
+4. 确认ROS_LOCALHOST_ONLY=0；
+5. 确认防火墙、交换机没有禁止UDP组播；
+6. 执行ros2 daemon stop和ros2 daemon start后重新检查；
+7. 使用ros2 topic info /cmd_vel -v或ros2 topic info /slam/pose -v检查发布端是否已出现。
+
+
+以上IP、ROS_DOMAIN_ID和话题格式为当前拟确认方案。如后续需要调整，我方会提前沟通并更新
+正式说明。

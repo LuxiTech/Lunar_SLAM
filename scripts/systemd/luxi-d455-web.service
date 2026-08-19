@@ -1,0 +1,27 @@
+[Unit]
+Description=Luxi D455 mapping and navigation web control
+Documentation=file:/home/agx/Desktop/lunar_-slam/project/luxi-web-control/README.md
+Wants=network-online.target NetworkManager-wait-online.service
+After=network-online.target NetworkManager-wait-online.service
+RequiresMountsFor=/home/agx/Desktop/lunar_-slam
+
+[Service]
+Type=simple
+User=agx
+Group=agx
+WorkingDirectory=/home/agx/Desktop/lunar_-slam
+Environment=HOME=/home/agx
+Environment=ROS_DOMAIN_ID=42
+Environment=ROS_LOCALHOST_ONLY=0
+Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ExecStart=/home/agx/Desktop/lunar_-slam/scripts/start_luxi_boot.sh
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0002
+
+[Install]
+WantedBy=multi-user.target
+

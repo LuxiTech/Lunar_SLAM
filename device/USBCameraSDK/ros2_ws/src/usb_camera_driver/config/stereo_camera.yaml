@@ -1,0 +1,34 @@
+stereo_node:
+  ros__parameters:
+    # Discover the installed RER pair by VID:PID and order it by physical USB
+    # topology. This survives the hub changing 2.1/2.3 to 2.3/2.4 on reboot.
+    left_device: auto
+    right_device: auto
+    auto_discover_devices: true
+    pixel_format: MJPG
+    output_encoding: bgr8
+    width: 1920
+    height: 1080
+    frame_rate_hz: 10.0
+    trigger_mode: hardware
+    # Full run04 Kalibr result: t_imu = t_camera + offset.
+    timestamp_offset_sec: -0.09126181637751751
+    # Run one bounded controller for both independent UVC sensors. Native AE
+    # would let left/right exposure wander independently and may use a long
+    # exposure while D1 is walking. Keep clear of this module's measured
+    # exposure discontinuity at 180 and gain discontinuity near 70.
+    auto_exposure: false
+    exposure_absolute: 100
+    gain: 50
+    synchronized_auto_exposure: true
+    auto_exposure_target_luma: 85
+    auto_exposure_luma_deadband: 8
+    auto_exposure_update_interval_frames: 5
+    auto_exposure_min_exposure_absolute: 20
+    auto_exposure_max_exposure_absolute: 150
+    auto_exposure_min_gain: 0
+    auto_exposure_max_gain: 68
+    auto_exposure_max_exposure_step: 10
+    auto_exposure_max_gain_step: 4
+    left_frame_id: left_camera_optical_frame
+    right_frame_id: right_camera_optical_frame
