@@ -91,6 +91,10 @@ if [[ "${RUNTIME_INSTALL}" == "${WORKSPACE}/runtime/lunar-client/install" ]]; th
     ensure_symlink "../tools" "${WORKSPACE}/runtime/tools"
     ensure_symlink "../maps" "${WORKSPACE}/runtime/maps"
     ensure_symlink "../3parts" "${WORKSPACE}/runtime/3parts"
+    ensure_symlink "../../tools" "${WORKSPACE}/runtime/lunar-client/tools"
+    ensure_symlink "../../maps" "${WORKSPACE}/runtime/lunar-client/maps"
+    ensure_symlink "../../3parts" "${WORKSPACE}/runtime/lunar-client/3parts"
+    ensure_symlink "../../device" "${WORKSPACE}/runtime/lunar-client/device"
 
     declare -a runtime_tool_links=(
         "luxi_hloc/rtab_hloc_exporter"
