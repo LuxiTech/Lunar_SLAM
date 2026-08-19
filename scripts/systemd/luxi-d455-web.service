@@ -1,6 +1,6 @@
 [Unit]
 Description=Luxi D455 mapping and navigation web control
-Documentation=file:/home/agx/Desktop/lunar_-slam/project/luxi-web-control/README.md
+Documentation=file:/home/agx/Desktop/lunar_-slam/README.md
 Wants=network-online.target NetworkManager-wait-online.service
 After=network-online.target NetworkManager-wait-online.service
 RequiresMountsFor=/home/agx/Desktop/lunar_-slam
@@ -24,4 +24,3 @@ UMask=0002
 
 [Install]
 WantedBy=multi-user.target
-

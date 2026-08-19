@@ -6,8 +6,42 @@ readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 readonly WORKSPACE="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly STATUS_URL="http://127.0.0.1:8080/api/status"
-readonly D1_LAN_DDS_SETUP="${WORKSPACE}/install/slam_d1_bridge/lib/slam_d1_bridge/setup_d1_lan_dds.sh"
 readonly STARTUP_TIMEOUT_SECONDS="${LUXI_STARTUP_TIMEOUT_SECONDS:-120}"
+
+runtime_install="${LUXI_RUNTIME_INSTALL_PREFIX:-}"
+if [[ -z "${runtime_install}" && \
+      -f "${WORKSPACE}/runtime/lunar-client/install/local_setup.bash" ]]; then
+    runtime_install="${WORKSPACE}/runtime/lunar-client/install"
+fi
+if [[ -z "${runtime_install}" ]]; then
+    runtime_install="${WORKSPACE}/install"
+fi
+readonly RUNTIME_INSTALL="${runtime_install}"
+unset runtime_install
+
+runtime_setup=""
+for setup_candidate in \
+        "${RUNTIME_INSTALL}/setup.bash" \
+        "${RUNTIME_INSTALL}/local_setup.bash"; do
+    if [[ -r "${setup_candidate}" ]]; then
+        runtime_setup="${setup_candidate}"
+        break
+    fi
+done
+readonly RUNTIME_SETUP="${runtime_setup}"
+unset runtime_setup setup_candidate
+
+d1_lan_dds_setup=""
+for dds_candidate in \
+        "${RUNTIME_INSTALL}/lib/slam_d1_bridge/setup_d1_lan_dds.sh" \
+        "${RUNTIME_INSTALL}/slam_d1_bridge/lib/slam_d1_bridge/setup_d1_lan_dds.sh"; do
+    if [[ -r "${dds_candidate}" ]]; then
+        d1_lan_dds_setup="${dds_candidate}"
+        break
+    fi
+done
+readonly D1_LAN_DDS_SETUP="${d1_lan_dds_setup}"
+unset d1_lan_dds_setup dds_candidate
 
 launch_pid=""
 
@@ -58,12 +92,12 @@ shutdown_launch()
 }
 trap shutdown_launch EXIT INT TERM
 
-if [[ ! -r "${WORKSPACE}/install/setup.bash" ]]; then
-    echo "Luxi workspace is not built: ${WORKSPACE}/install/setup.bash" >&2
+if [[ -z "${RUNTIME_SETUP}" ]]; then
+    echo "Luxi runtime overlay is missing in ${RUNTIME_INSTALL}." >&2
     exit 1
 fi
-if [[ ! -r "${D1_LAN_DDS_SETUP}" ]]; then
-    echo "D1 LAN DDS setup is missing; rebuild slam_d1_bridge." >&2
+if [[ -z "${D1_LAN_DDS_SETUP}" ]]; then
+    echo "D1 LAN DDS setup is missing from ${RUNTIME_INSTALL}." >&2
     exit 1
 fi
 
@@ -83,6 +117,7 @@ until ip -4 -o addr show scope global | grep -Eq \
 done
 
 # shellcheck disable=SC1091
+export LUXI_RUNTIME_INSTALL_PREFIX="${RUNTIME_INSTALL}"
 source "${WORKSPACE}/scripts/luxi_env.sh"
 # Restrict DDS discovery and D1 command traffic to loopback plus the dedicated
 # 192.168.123.0/24 Ethernet interface.
@@ -93,7 +128,18 @@ echo "Starting Luxi web control on 0.0.0.0:8080 with D455 profile."
 ros2 launch luxi_web_control lekiwi_web_control.launch.py \
     bind_address:=0.0.0.0 \
     http_port:=8080 \
-    web_ui_mode:=map_portal &
+    web_ui_mode:=map_portal \
+    d1_start_script:="${RUNTIME_INSTALL}/lib/slam_d1_bridge/start_slam_d1_bridge.sh" \
+    d1_stop_script:="${RUNTIME_INSTALL}/lib/slam_d1_bridge/stop_slam_d1_bridge.sh" \
+    d1_control_log_path:="${WORKSPACE}/log/luxi_web_control_d1.log" \
+    camera_workspace_setup:="${WORKSPACE}/device/D455/ros2_ws/install/setup.bash" \
+    camera_log_path:="${WORKSPACE}/log/luxi_web_control_camera.log" \
+    mapping_workspace_setup:="${RUNTIME_SETUP}" \
+    mapping_log_path:="${WORKSPACE}/log/luxi_web_control_rtabmap.log" \
+    navigation_workspace_setup:="${RUNTIME_SETUP}" \
+    navigation_log_path:="${WORKSPACE}/log/luxi_web_control_navigation.log" \
+    maps_root:="${WORKSPACE}/maps" \
+    semantic_maps_root:="${WORKSPACE}/maps/semantic_maps" &
 launch_pid=$!
 
 deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
