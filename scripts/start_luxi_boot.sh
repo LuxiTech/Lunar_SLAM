@@ -5,8 +5,48 @@ set -euo pipefail
 readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 readonly WORKSPACE="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-readonly STATUS_URL="http://127.0.0.1:8080/api/status"
 readonly STARTUP_TIMEOUT_SECONDS="${LUXI_STARTUP_TIMEOUT_SECONDS:-120}"
+
+BIND_ADDRESS="0.0.0.0"
+HTTP_PORT="8080"
+WEB_UI_MODE="map_portal"
+
+while (( $# > 0 )); do
+    case "$1" in
+        --bind-address)
+            BIND_ADDRESS="${2:-}"
+            shift 2
+            ;;
+        --http-port)
+            HTTP_PORT="${2:-}"
+            shift 2
+            ;;
+        --web-ui-mode)
+            WEB_UI_MODE="${2:-}"
+            shift 2
+            ;;
+        *)
+            echo "Unknown boot argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+python3 - "${BIND_ADDRESS}" "${HTTP_PORT}" "${WEB_UI_MODE}" <<'PY'
+import ipaddress
+import sys
+
+address, raw_port, mode = sys.argv[1:]
+ipaddress.ip_address(address)
+port = int(raw_port)
+if not 1 <= port <= 65535:
+    raise SystemExit("http port is outside 1..65535")
+if mode not in {"developer", "map_portal"}:
+    raise SystemExit("invalid web UI mode")
+PY
+
+readonly BIND_ADDRESS HTTP_PORT WEB_UI_MODE
+readonly STATUS_URL="http://127.0.0.1:${HTTP_PORT}/api/status"
 
 runtime_install="${LUXI_RUNTIME_INSTALL_PREFIX:-}"
 if [[ -z "${runtime_install}" && \
@@ -18,6 +58,56 @@ if [[ -z "${runtime_install}" ]]; then
 fi
 readonly RUNTIME_INSTALL="${runtime_install}"
 unset runtime_install
+
+ensure_symlink()
+{
+    local target="$1"
+    local link_path="$2"
+    local expected_path
+
+    if [[ "${target}" == /* ]]; then
+        expected_path="$(readlink -f -- "${target}")"
+    else
+        expected_path="$(readlink -f -- "$(dirname -- "${link_path}")/${target}")"
+    fi
+
+    if [[ -L "${link_path}" ]]; then
+        [[ "$(readlink -f -- "${link_path}")" == "${expected_path}" ]] && return 0
+        echo "Runtime compatibility link points to the wrong target: ${link_path}" >&2
+        return 1
+    fi
+    if [[ -e "${link_path}" ]]; then
+        return 0
+    fi
+    mkdir -p "$(dirname -- "${link_path}")"
+    ln -s "${target}" "${link_path}"
+}
+
+# The closed-source merged install is nested at runtime/lunar-client/install,
+# while the compiled web backend derives helper paths from runtime/. Recreate
+# those compatibility paths on every boot so a freshly extracted SDK works.
+if [[ "${RUNTIME_INSTALL}" == "${WORKSPACE}/runtime/lunar-client/install" ]]; then
+    ensure_symlink "lunar-client/install" "${WORKSPACE}/runtime/install"
+    ensure_symlink "../tools" "${WORKSPACE}/runtime/tools"
+    ensure_symlink "../maps" "${WORKSPACE}/runtime/maps"
+    ensure_symlink "../3parts" "${WORKSPACE}/runtime/3parts"
+
+    declare -a runtime_tool_links=(
+        "luxi_hloc/rtab_hloc_exporter"
+        "luxi_hloc/build_reference_model.py"
+        "luxi_semantic_annotation/semantic_annotation_tool"
+        "luxi_voxel_navigation/octomap_to_points"
+        "luxi_3d_navigation/terrain_map_to_points"
+    )
+    for runtime_tool in "${runtime_tool_links[@]}"; do
+        runtime_package="${runtime_tool%%/*}"
+        runtime_executable="${runtime_tool#*/}"
+        ensure_symlink \
+            "../../../lib/${runtime_package}/${runtime_executable}" \
+            "${RUNTIME_INSTALL}/${runtime_package}/lib/${runtime_package}/${runtime_executable}"
+    done
+    unset runtime_tool runtime_package runtime_executable runtime_tool_links
+fi
 
 runtime_setup=""
 for setup_candidate in \
@@ -51,7 +141,7 @@ post_json()
     local body="$2"
     curl --fail --silent --show-error --connect-timeout 1 --max-time 30 \
         -X POST -H "Content-Type: application/json" -d "${body}" \
-        "http://127.0.0.1:8080${path}"
+        "http://127.0.0.1:${HTTP_PORT}${path}"
 }
 
 http_listener_belongs_to_launch()
@@ -71,7 +161,7 @@ http_listener_belongs_to_launch()
             )"
         done
     done < <(
-        ss -H -ltnp 'sport = :8080' 2>/dev/null |
+        ss -H -ltnp "sport = :${HTTP_PORT}" 2>/dev/null |
             grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
     )
     return 1
@@ -119,16 +209,18 @@ done
 # shellcheck disable=SC1091
 export LUXI_RUNTIME_INSTALL_PREFIX="${RUNTIME_INSTALL}"
 source "${WORKSPACE}/scripts/luxi_env.sh"
+export LUXI_WORKSPACE_ROOT="${WORKSPACE}"
+export SLAM_D1_WORKSPACE="$(cd -- "${RUNTIME_INSTALL}/.." && pwd)"
 # Restrict DDS discovery and D1 command traffic to loopback plus the dedicated
 # 192.168.123.0/24 Ethernet interface.
 # shellcheck disable=SC1090
 source "${D1_LAN_DDS_SETUP}"
 
-echo "Starting Luxi web control on 0.0.0.0:8080 with D455 profile."
+echo "Starting Luxi web control on ${BIND_ADDRESS}:${HTTP_PORT} with D455 profile."
 ros2 launch luxi_web_control lekiwi_web_control.launch.py \
-    bind_address:=0.0.0.0 \
-    http_port:=8080 \
-    web_ui_mode:=map_portal \
+    bind_address:="${BIND_ADDRESS}" \
+    http_port:="${HTTP_PORT}" \
+    web_ui_mode:="${WEB_UI_MODE}" \
     d1_start_script:="${RUNTIME_INSTALL}/lib/slam_d1_bridge/start_slam_d1_bridge.sh" \
     d1_stop_script:="${RUNTIME_INSTALL}/lib/slam_d1_bridge/stop_slam_d1_bridge.sh" \
     d1_control_log_path:="${WORKSPACE}/log/luxi_web_control_d1.log" \
@@ -194,5 +286,5 @@ raise SystemExit(0 if camera.get("profile") == "d455"
     sleep 2
 done
 
-echo "Luxi boot service ready: http://127.0.0.1:8080 (D455 ready, zero command, emergency stop released)."
+echo "Luxi boot service ready: ${STATUS_URL%/api/status} (D455 ready, zero command, emergency stop released)."
 wait "${launch_pid}"

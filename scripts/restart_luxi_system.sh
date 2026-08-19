@@ -54,21 +54,16 @@ echo "[$(date --iso-8601=seconds)] Restart requested." >>"${RESTART_LOG}"
 sleep 2
 bash "${WORKSPACE}/scripts/stop_luxi_system.sh" >>"${RESTART_LOG}" 2>&1
 
-set +u
-# shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
-# shellcheck disable=SC1091
-source "${WORKSPACE}/install/setup.bash"
-set -u
-
-export ROS_DOMAIN_ID=42
-export ROS_LOCALHOST_ONLY=0
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-
-setsid ros2 launch luxi_web_control lekiwi_web_control.launch.py \
-    "bind_address:=${BIND_ADDRESS}" \
-    "http_port:=${HTTP_PORT}" \
-    "web_ui_mode:=${WEB_UI_MODE}" >"${LAUNCH_LOG}" 2>&1 &
+readonly BOOT_SCRIPT="${WORKSPACE}/scripts/start_luxi_boot.sh"
+if [[ ! -x "${BOOT_SCRIPT}" ]]; then
+    echo "Luxi boot script is unavailable: ${BOOT_SCRIPT}" >&2
+    exit 1
+fi
+setsid "${BOOT_SCRIPT}" \
+    --bind-address "${BIND_ADDRESS}" \
+    --http-port "${HTTP_PORT}" \
+    --web-ui-mode "${WEB_UI_MODE}" \
+    >"${LAUNCH_LOG}" 2>&1 &
 launch_pid=$!
 echo "${launch_pid}" >"${PID_FILE}"
 

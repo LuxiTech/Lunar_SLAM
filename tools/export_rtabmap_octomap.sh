@@ -46,9 +46,20 @@ fi
 local output_directory="${2:-${octo_maps_directory}/$(basename "${database_path%.db}")_octomap}"
 set +u
 source /opt/ros/humble/setup.bash
-if [[ -f "${workspace}/install/setup.bash" ]]; then
-  source "${workspace}/install/setup.bash"
+local runtime_install="${LUXI_RUNTIME_INSTALL_PREFIX:-}"
+if [[ -z "${runtime_install}" && -f "${workspace}/runtime/lunar-client/install/local_setup.bash" ]]; then
+  runtime_install="${workspace}/runtime/lunar-client/install"
 fi
+for setup_candidate in \
+  "${runtime_install}/setup.bash" \
+  "${runtime_install}/local_setup.bash" \
+  "${workspace}/install/setup.bash" \
+  "${workspace}/install/local_setup.bash"; do
+  if [[ -n "${setup_candidate%/setup.bash}" && -f "${setup_candidate}" ]]; then
+    source "${setup_candidate}"
+    break
+  fi
+done
 set -u
 sanitize_mvs_library_path
 export LD_LIBRARY_PATH="${workspace}/3parts/octomap/install/lib:${LD_LIBRARY_PATH:-}"
