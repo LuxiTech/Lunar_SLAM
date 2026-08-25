@@ -156,7 +156,8 @@ await fetch(`${robot}/api/navigation/goal`, {
 ## 4. 在网页中启动或切换相机
 
 1. 打开网页中的“相机选择与开关”；
-2. 选择 `D455 / D455F`、`D435i` 或 `HIK 双目 + H30 IMU`；
+2. 选择 `D455 / D455F`、`D435i`、`HIK 双目 + H30 IMU` 或
+   `ZED X + ZED Link Duo`；
 3. 点击“启动 / 切换”，等待状态显示“运行中”且 RGB 画面出现；
 4. D435i/D455 首次启动或更换支架后，将机器人放在水平面并点击“一键水平校准”；
 5. 再点击“开始建图”。建图结束必须点击“停止建图”并等待数据库保存完成。
@@ -164,6 +165,33 @@ await fetch(`${robot}/api/navigation/goal`, {
 切换相机会自动停止行驶、建图和定位，再关闭旧相机并启动新 profile。同一时间只允许
 一套传感器发布者。不要在其他终端手工启动 `sensor_bringup.launch.py`；网页发现外部
 相机时会拒绝接管，以免误杀未知进程。
+
+ZED X 对应网页 profile 为 `zedx`。它通过同一条
+`luxi_adapter sensor_bringup.launch.py hardware:=zedx` 链路发布统一的
+`/sensors/rgbd/*` 和 `/sensors/imu/data`。网页检测到当前 profile 为 `zedx` 时，建图
+按钮只为该设备选择 `zedx_mapping.launch.py`：局部位姿来自 ZED SDK 的双目惯性
+`/zed/zed_node/odom`，RTAB-Map 独立负责全局回环。D455、D435i 和 HIK 仍使用原来的
+`rgbd_mapping_learned.launch.py` 及原有参数。当前 ZED X 配置为 `HD1200@30` 抓取、
+`960x600@10 Hz` 发布和 `NEURAL` 深度；`d455` 仍是默认选项。切换设备前不要在其他
+终端单独运行 ZED Wrapper 或 RealSense。
+
+ZED X 不是“只允许左右转动”。其专用 profile 当前为完整 6DoF：ZED Wrapper 的
+`pos_tracking.two_d_mode=false`，RTAB-Map 的 `Reg/Force3DoF=false` 和
+`RGBD/ForceOdom3DoF=false`，因此会保留 x/y/z 与 roll/pitch/yaw。原先启用平面约束是
+针对轮式机器人在水平地面行驶时减少垂向漂移的设计；相机被手持、上下移动或倾斜时，
+该假设不成立，会把带俯仰/横滚的深度帧错误压到同一平面上。D455、D435i、HIK 继续使用
+全局 `mapping_planar_motion: true`，只有 ZED X 使用
+`mapping_zedx_planar_motion: false`，不会改变其他相机的现有行为。
+
+网页中使用 ZED X 建图的顺序为：选择 `ZED X + ZED Link Duo` → 点击“启动 / 切换” →
+等待 RGB 预览和“运行中”状态 → 点击“开始建图” → 移动机器人完成往返闭环 → 点击
+“停止建图”并等待数据库保存和过滤完成。完成测试后再点击“关闭相机”。
+
+当前 `config/web_control.yaml` 临时启用了无机器人建图测试模式：
+`mapping_require_robot_standing: false`。因此不需要启动 D1 控制或让机器人站立；开启相机并
+等到 RGB-D 与 IMU 链路各自只有一个发布者后，就能点击“开始建图”。这个选项只跳过机器人
+姿态门禁，不会跳过相机健康、IMU 校准（支持该服务的设备）、重复发布者或冲突建图进程检查。
+恢复机器人移动建图前请将该参数改回 `true`，重新构建并重启网页服务。
 
 D455F 在当前室内照明下启用自动白平衡时，实测会在正常与明显暖色之间反复漂移。
 驱动现已固定为 `3450 K`：启动后色彩立即稳定，适合建图连续帧。如果机器人换到色温

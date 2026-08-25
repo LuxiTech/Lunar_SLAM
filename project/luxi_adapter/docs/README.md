@@ -32,6 +32,8 @@ ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=hik
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 # or
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d455
+# or
+ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=zedx
 ```
 
 Names are case-insensitive. `hardware:=hik` selects `launch/hik.launch.py` and
@@ -39,6 +41,8 @@ Names are case-insensitive. `hardware:=hik` selects `launch/hik.launch.py` and
 `launch/d435i.launch.py` and the current default `config/sensor_bringup.yaml`.
 `hardware:=d455` selects `launch/d455.launch.py` and
 `config/d455_sensor_bringup.yaml`.
+`hardware:=zedx` selects `launch/zedx.launch.py` and
+`config/zedx_sensor_bringup.yaml`.
 An explicit `config:=...` is an optional full-profile override, and launch fails
 immediately if that file declares a different `hardware_profile`.
 
@@ -104,6 +108,46 @@ The front-mounted D455 is measured at `camera_x=0.18 m` from the robot rotation
 center. Measure y/z and yaw again if the bracket changes; stationary web
 calibration determines only roll and pitch.
 
+## ZED X GMSL2 profile
+
+The `zedx` profile sources the pinned ZED SDK 5.4 / ROS 2 Wrapper 5.4 workspace
+under `device/sterellab_ZEDX`, refreshes the container's host Argus/IMU sockets,
+and opens camera serial `45570700`. The camera grabs `HD1200@30` internally and
+publishes registered RGB/depth at `960x600@10 Hz` using `NEURAL`. ZED
+positional tracking, its `map -> odom`/`odom -> camera` TF and native point cloud
+publication are disabled: Luxi's learned frontend remains the only odometry TF
+owner and RTAB-Map remains the map TF owner.
+
+ZED raw IMU is relayed through the same Madgwick filter used by the RealSense
+profiles. The ZED Wrapper publishes the camera-to-IMU and camera optical TF
+tree, while this profile publishes only `base_link -> zed_camera_link`.
+
+```bash
+cd /home/lunar/project/lunar_slam
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=zedx
+```
+
+The checked-in `base_link -> zed_camera_link` transform is identity for bench
+testing because the final robot mounting pose has not been provided. Measure
+and update `camera_x/y/z` and `camera_roll/pitch/yaw` in
+`config/zedx_sensor_bringup.yaml` before judging trajectory accuracy or using
+the camera for navigation.
+
+After the canonical topics pass, start the common mapper without a second ZED
+driver or ZED RViz instance:
+
+```bash
+ros2 launch luxi_rtab_map rgbd_mapping_learned.launch.py \
+  rviz:=false new_map:=true load_saved_map:=false
+```
+
+The completed Jetson/ZED X acceptance measurements and expected warnings are
+recorded in [zedx_test_report.md](zedx_test_report.md).
+
 ## Hik stereo + H30 profile
 
 The HIK profile is optional.  A D435i-only host does not need the HIK MVS SDK,
@@ -163,6 +207,7 @@ After the selected camera is physically enumerated by `lsusb` and
 ```bash
 ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d435i
 # D455 alternative: hardware:=d455
+# ZED X alternative: hardware:=zedx
 ```
 
 In a second terminal, source the same two setup files and verify every

@@ -49,7 +49,9 @@ web_control:
     # The web process owns exactly one primary camera profile. Switching first
     # stops mapping/localization, then replaces the complete sensor pipeline.
     enable_camera_control: true
-    camera_profiles: [d455, d435i, hik]
+    # Keep D455 as the existing default. ZED X is an explicit opt-in profile,
+    # so adding it does not change D455/D435i/HIK startup behavior.
+    camera_profiles: [d455, d435i, hik, zedx]
     camera_default_profile: d455
     camera_launch_package: luxi_adapter
     camera_launch_file: sensor_bringup.launch.py
@@ -64,11 +66,20 @@ web_control:
     # The web node can start/stop the project's device-independent RTAB-Map launch.
     # Hardware is started separately through luxi_adapter and publishes /sensors/*.
     enable_mapping_control: true
+    # Temporary camera-only mapping test mode: starting RTAB-Map does not require
+    # the D1 bridge/controller or a standing posture. Set true before robot motion.
+    mapping_require_robot_standing: false
     mapping_launch_package: luxi_rtab_map
     mapping_launch_file: rgbd_mapping_learned.launch.py
+    # ZED X alone uses its SDK stereo-inertial odometry. Other camera profiles
+    # continue to use mapping_launch_file and its existing learned parameters.
+    mapping_zedx_launch_file: zedx_mapping.launch.py
     # Current validation surface is flat. This constrains only robot poses;
     # RGB-D points, obstacles and pits remain full 3D.
     mapping_planar_motion: true
+    # ZED X camera-body/handheld mapping preserves Z, roll and pitch. This is
+    # selected only for the zedx profile; existing cameras remain planar.
+    mapping_zedx_planar_motion: false
     # Stopping a successful mapping session automatically exports, filters and
     # rebuilds the newest map's PLY/OctoMap layers in the background.
     auto_filter_after_mapping: true

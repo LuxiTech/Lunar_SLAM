@@ -1,0 +1,89 @@
+luxi_adapter:
+  ros__parameters:
+    hardware_profile: zedx
+    input_mode: separate
+    rgbd_output_topic: /sensors/rgbd/rgbd_image
+    maximum_sensor_time_difference: 0.05
+
+    # ZED X registered RGB-D inputs. The Wrapper publishes both images and
+    # CameraInfo in zed_left_camera_frame_optical with the same SDK timestamp.
+    color_input_topic: /zed/zed_node/rgb/color/rect/image
+    depth_input_topic: /zed/zed_node/depth/depth_registered
+    camera_info_input_topic: /zed/zed_node/rgb/color/rect/camera_info
+    imu_input_topic: /zed/zed_node/imu/data_raw
+    compressed_color_input_topic: /zed/zed_node/rgb/color/rect/image/compressed
+
+    # Hardware-independent contract consumed by mapping and navigation.
+    color_output_topic: /sensors/rgbd/color/image_raw
+    depth_output_topic: /sensors/rgbd/depth/image_raw
+    camera_info_output_topic: /sensors/rgbd/color/camera_info
+    imu_output_topic: /sensors/imu/data_raw
+    compressed_color_output_topic: /sensors/rgbd/color/image_raw/compressed
+    generate_compressed_color_from_raw: true
+    compressed_color_rate: 10.0
+    compressed_color_jpeg_quality: 80
+    enable_imu: true
+
+    # Empty paths select device/sterellab_ZEDX under the detected workspace.
+    zedx_setup: ""
+    zedx_runtime_prepare: ""
+    zedx_runtime_user: lunar
+    rmw_implementation: rmw_fastrtps_cpp
+    ros_domain_id: 42
+    zedx_camera_name: zed
+    zedx_serial_number: 45570700
+    zedx_grab_resolution: HD1200
+    zedx_grab_frame_rate: 30
+    # Divide each native image dimension by two and publish at a conservative
+    # 10 Hz. Native stereo-inertial odometry remains independent at about 30 Hz,
+    # while RTAB-Map performs place recognition at 1 Hz. This preserves temporal
+    # margin while reducing image copies and GPU depth output. Depth remains
+    # metric 32FC1 and registered to the RGB optical frame.
+    zedx_publish_resolution: CUSTOM
+    zedx_publish_downscale_factor: 2.0
+    zedx_publish_frame_rate: 10.0
+    # Mapping prioritizes temporal/geometric depth quality over the lighter
+    # obstacle-detection preset. NEURAL is the closest ZED mode to the filtered
+    # D455 depth used by the same frontend.
+    zedx_depth_mode: NEURAL
+    # Positional tracking is enabled explicitly below, so depth stabilization
+    # can stay disabled instead of starting a second implicit tracking path.
+    zedx_depth_stabilization: 0
+    # Reject the least reliable disparities without the severe valid-pixel
+    # collapse observed below 80 on this indoor scene.
+    zedx_depth_confidence: 80
+    zedx_depth_texture_confidence: 100
+    zedx_publish_point_cloud: false
+    # ZED X only: use the SDK's stereo-inertial odometry for motion mapping.
+    # The generic learned frontend produced false +61.9/-115.1 degree yaw
+    # jumps in map043 even though the source images changed only slightly.
+    zedx_enable_positional_tracking: true
+    zedx_positional_tracking_mode: AUTO
+    zedx_positional_tracking_imu_fusion: true
+    # RTAB-Map remains the only global loop-closure owner. ZED publishes local
+    # odometry plus odom->zed_camera_link TF, but no map TF or area-memory
+    # corrections. The dedicated ZED mapping launch does not republish odom TF.
+    zedx_positional_tracking_area_memory: false
+    zedx_reset_odom_with_loop_closure: false
+    # Keep full 6DoF for camera-body and handheld 3D mapping. A robot-mounted
+    # planar profile may opt into 2D only after the camera is rigidly mounted.
+    zedx_positional_tracking_two_d_mode: false
+    zedx_set_gravity_as_origin: true
+
+    # Bench-test transform only. Replace translation and rotation with measured
+    # robot mounting extrinsics before evaluating trajectory or navigation.
+    base_frame: base_link
+    camera_frame: zed_camera_link
+    camera_x: 0.0
+    camera_y: 0.0
+    camera_z: 0.0
+    camera_roll: 0.0
+    camera_pitch: 0.0
+    camera_yaw: 0.0
+
+sensor_imu_filter:
+  ros__parameters:
+    use_mag: false
+    world_frame: enu
+    publish_tf: false
+    gain: 0.03

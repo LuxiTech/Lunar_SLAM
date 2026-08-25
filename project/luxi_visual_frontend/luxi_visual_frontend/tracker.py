@@ -62,11 +62,12 @@ class TrackerConfig:
     maximum_consecutive_tracking_failures: int = 3
     minimum_depth_consistency_matches: int = 20
     maximum_depth_consistency_error: float = 0.08
-    maximum_imu_rotation_error: float = math.radians(12.0)
+    maximum_imu_rotation_error: float = math.radians(3.0)
     maximum_imu_gravity_error: float = math.radians(10.0)
-    # Absolute AHRS yaw is never used. A bounded relative rotation is required
-    # to preserve motion across a short visual gap, while PnP keeps authority
-    # whenever visual geometry is available.
+    # Keep the historical parameter name for config compatibility. When
+    # enabled, depth from both frames refines translation, while PnP remains
+    # the rotation authority. IMU rotation only validates gravity/agreement and
+    # bridges a short visual gap in _maybe_reseed_keyframe().
     use_imu_depth_translation: bool = True
     use_imu_reseed_rotation: bool = True
 
@@ -412,20 +413,21 @@ class VisualOdometryTracker:
                 and len(consistent_match_positions)
                 >= self.config.minimum_depth_consistency_matches
             ):
-                fixed_rotation_pose = estimate_translation_with_rotation(
+                visual_rotation = pose.current_from_reference[:3, :3].copy()
+                depth_translation_pose = estimate_translation_with_rotation(
                     reference.points3d[
                         reference_indices[pnp_match_indices[consistent_match_positions]]
                     ],
                     points3d[pnp_current_indices[consistent_match_positions]],
                     features.keypoints[pnp_current_indices[consistent_match_positions]],
                     intrinsics,
-                    imu_current_from_reference,
+                    visual_rotation,
                     self.config.maximum_depth_consistency_error,
                     self.config.minimum_depth_consistency_matches,
                 )
                 if (
-                    fixed_rotation_pose is not None
-                    and fixed_rotation_pose.reprojection_rmse
+                    depth_translation_pose is not None
+                    and depth_translation_pose.reprojection_rmse
                     <= self.config.maximum_reprojection_rmse
                     and imu_rotation_error
                     <= self.config.maximum_imu_rotation_error
@@ -433,14 +435,23 @@ class VisualOdometryTracker:
                     <= self.config.maximum_imu_gravity_error
                 ):
                     remapped_inliers = pnp_match_indices[
-                        consistent_match_positions[fixed_rotation_pose.inlier_indices]
+                        consistent_match_positions[depth_translation_pose.inlier_indices]
                     ]
-                    pose = type(pose)(
-                        fixed_rotation_pose.current_from_reference,
-                        remapped_inliers,
-                        fixed_rotation_pose.reprojection_rmse,
+                    # Never integrate unobservable AHRS yaw into a visually
+                    # tracked pose. Madgwick/ZED IMU yaw can drift while the
+                    # camera is stationary; accepting it here repeatedly bends
+                    # an otherwise consistent map and makes valid loop closures
+                    # fail graph optimization.
+                    visual_depth_transform = (
+                        depth_translation_pose.current_from_reference.copy()
                     )
-                    pose_source = "IMU_DEPTH"
+                    visual_depth_transform[:3, :3] = visual_rotation
+                    pose = type(pose)(
+                        visual_depth_transform,
+                        remapped_inliers,
+                        depth_translation_pose.reprojection_rmse,
+                    )
+                    pose_source = "PNP_DEPTH"
                     depth_consistency_inliers = len(remapped_inliers)
 
         inlier_count = len(pose.inlier_indices)
@@ -456,6 +467,15 @@ class VisualOdometryTracker:
             and imu_gravity_error > self.config.maximum_imu_gravity_error
         ):
             rejection = "IMU_GRAVITY_MISMATCH"
+        elif (
+            imu_rotation is not None
+            and reference.world_from_camera_rotation is not None
+            and imu_rotation_error > self.config.maximum_imu_rotation_error
+        ):
+            # A large visual/gyro disagreement is normally a planar-PnP or
+            # motion-blur ambiguity. Never put that pose in RTAB-Map's graph;
+            # the bounded IMU reseed path will bridge repeated bad frames.
+            rejection = "IMU_ROTATION_MISMATCH"
         elif inlier_count < self.config.minimum_inliers:
             rejection = "INLIERS_LOW"
         elif inlier_ratio < self.config.minimum_inlier_ratio:
@@ -531,7 +551,7 @@ class VisualOdometryTracker:
             points3d,
             True,
             "TRACKING",
-            "ACCEPTED_IMU_DEPTH" if pose_source == "IMU_DEPTH" else "ACCEPTED",
+            "ACCEPTED_PNP_DEPTH" if pose_source == "PNP_DEPTH" else "ACCEPTED",
             odom_from_camera,
             match_count,
             depth_match_count,

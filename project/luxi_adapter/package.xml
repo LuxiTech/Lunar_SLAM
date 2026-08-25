@@ -25,6 +25,9 @@
        resolved by sensor_bringup.launch.py only when hardware:=hik; keeping
        hik_bringup out of the unconditional dependency graph lets a
        RealSense-only host build and run without the MVS SDK and H30 driver. -->
+  <!-- ZED X is also optional. Its independently pinned Wrapper/SDK workspace
+       is sourced only by zedx.launch.py, so no unconditional zed_wrapper
+       dependency is added to the generic adapter package. -->
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

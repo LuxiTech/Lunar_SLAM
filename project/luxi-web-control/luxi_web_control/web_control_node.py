@@ -1262,6 +1262,7 @@ class CameraController:
         "d455": "D455 / D455F",
         "d435i": "D435i",
         "hik": "HIK 双目 + H30 IMU",
+        "zedx": "ZED X + ZED Link Duo",
     }
 
     def __init__(
@@ -1511,6 +1512,8 @@ class MappingController:
         self.workspace_setup = workspace_setup
         self.log_path = log_path
         self.planar_motion = planar_motion
+        self._active_launch_file = launch_file
+        self._active_planar_motion = planar_motion
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
         self._started_at: Optional[float] = None
@@ -1518,8 +1521,16 @@ class MappingController:
         self._last_error = ""
         self._stop_requested = False
 
-    def _command(self) -> list:
+    def _command(
+        self,
+        launch_file: Optional[str] = None,
+        planar_motion: Optional[bool] = None,
+    ) -> list:
         """Build a shell-free, source-aware RTAB-Map launch command."""
+        selected_launch_file = launch_file or self.launch_file
+        selected_planar_motion = (
+            self.planar_motion if planar_motion is None else planar_motion
+        )
         source_commands = []
         if self.sensor_setup is not None:
             source_commands.append(
@@ -1535,9 +1546,9 @@ class MappingController:
             "ros2",
             "launch",
             self.package,
-            self.launch_file,
+            selected_launch_file,
             "new_map:=true",
-            f"planar_motion:={'true' if self.planar_motion else 'false'}",
+            f"planar_motion:={'true' if selected_planar_motion else 'false'}",
             "rviz:=false",
             "rtabmap_viz:=false",
         ])
@@ -1545,7 +1556,11 @@ class MappingController:
         script += f"; exec {launch_command}"
         return ["/bin/bash", "-c", script]
 
-    def start(self) -> Tuple[bool, str]:
+    def start(
+        self,
+        launch_file: Optional[str] = None,
+        planar_motion: Optional[bool] = None,
+    ) -> Tuple[bool, str]:
         """Start a fresh managed RTAB-Map process when prerequisites exist."""
         with self._lock:
             if not self.enabled:
@@ -1562,13 +1577,22 @@ class MappingController:
                     + ", ".join(str(path) for path in missing)
                 )
             try:
+                selected_launch_file = launch_file or self.launch_file
+                selected_planar_motion = (
+                    self.planar_motion
+                    if planar_motion is None
+                    else planar_motion
+                )
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
                 with self.log_path.open("a", encoding="utf-8") as log_file:
                     log_file.write(
                         "\n===== RTAB-Map started by luxi_web_control =====\n"
                     )
                     self._process = subprocess.Popen(
-                        self._command(),
+                        self._command(
+                            selected_launch_file,
+                            selected_planar_motion,
+                        ),
                         stdout=log_file,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
@@ -1579,6 +1603,8 @@ class MappingController:
                 self._last_error = str(exc)
                 return False, f"unable to start RTAB-Map: {exc}"
             self._started_at = time.monotonic()
+            self._active_launch_file = selected_launch_file
+            self._active_planar_motion = selected_planar_motion
             self._last_exit_code = None
             self._last_error = ""
             self._stop_requested = False
@@ -1651,6 +1677,8 @@ class MappingController:
             started_at = self._started_at
             exit_code = self._last_exit_code
             error = self._last_error
+            active_launch_file = self._active_launch_file
+            active_planar_motion = self._active_planar_motion
         if not self.enabled:
             state = "disabled"
         elif running:
@@ -1670,7 +1698,8 @@ class MappingController:
             "last_exit_code": exit_code,
             "last_error": error,
             "log_path": str(self.log_path),
-            "planar_motion": self.planar_motion,
+            "planar_motion": active_planar_motion,
+            "launch_file": active_launch_file,
         }
 
 
@@ -2605,7 +2634,7 @@ class WebControlNode(Node):
         )
         self.declare_parameter("enable_camera_control", True)
         self.declare_parameter(
-            "camera_profiles", ["d455", "d435i", "hik"]
+            "camera_profiles", ["d455", "d435i", "hik", "zedx"]
         )
         self.declare_parameter("camera_default_profile", "d455")
         self.declare_parameter("camera_launch_package", "luxi_adapter")
@@ -2628,8 +2657,13 @@ class WebControlNode(Node):
             "camera_rgbd_topic", "/sensors/rgbd/rgbd_image"
         )
         self.declare_parameter("enable_mapping_control", True)
+        # Keep the production-safe default. Deployments may explicitly disable
+        # only this posture gate for stationary, camera-only mapping tests.
+        self.declare_parameter("mapping_require_robot_standing", True)
         self.declare_parameter("mapping_launch_package", "luxi_rtab_map")
         self.declare_parameter("mapping_launch_file", "rgbd_mapping_learned.launch.py")
+        self.declare_parameter("mapping_zedx_launch_file", "")
+        self.declare_parameter("mapping_zedx_planar_motion", False)
         self.declare_parameter(
             "mapping_rmw_implementation",
             "rmw_cyclonedds_cpp",
@@ -2937,6 +2971,15 @@ class WebControlNode(Node):
         )
         self.mapping_imu_topic = str(
             self.get_parameter("mapping_imu_topic").value
+        )
+        self.mapping_require_robot_standing = bool(
+            self.get_parameter("mapping_require_robot_standing").value
+        )
+        self.mapping_zedx_launch_file = str(
+            self.get_parameter("mapping_zedx_launch_file").value
+        ).strip()
+        self.mapping_zedx_planar_motion = bool(
+            self.get_parameter("mapping_zedx_planar_motion").value
         )
         navigation_sensor_setup = str(
             self.get_parameter("navigation_sensor_setup").value
@@ -4733,7 +4776,11 @@ class WebControlNode(Node):
         if postprocess_state in {"waiting", "filtering"}:
             return False, "上一张地图仍在自动过滤，请等待处理完成"
         d1_status = self.d1_control_status()
-        if d1_status["enabled"] and d1_status["posture"] != "standing":
+        if (
+            self.mapping_require_robot_standing
+            and d1_status["enabled"]
+            and d1_status["posture"] != "standing"
+        ):
             return False, "请先让机器人站立，再校准 IMU 并开始建图"
         calibration = self.imu_calibration_status()
         if calibration["service_available"] and (
@@ -4765,7 +4812,20 @@ class WebControlNode(Node):
                     + ", ".join(conflicts)
                 )
         database_snapshot = rtab_map_database_snapshot(self.maps_root)
-        started, message = self.mapping.start()
+        camera_profile = self.camera.status().get("profile")
+        zedx_profile = camera_profile == "zedx"
+        launch_file = (
+            self.mapping_zedx_launch_file
+            if zedx_profile and self.mapping_zedx_launch_file
+            else None
+        )
+        planar_motion = (
+            self.mapping_zedx_planar_motion if zedx_profile else None
+        )
+        started, message = self.mapping.start(
+            launch_file=launch_file,
+            planar_motion=planar_motion,
+        )
         if started:
             self._mapping_database_snapshot = database_snapshot
             with self._mapping_postprocess_lock:
@@ -4858,6 +4918,9 @@ class WebControlNode(Node):
     def mapping_status(self) -> Dict[str, Any]:
         """Return the state of the mapping process owned by this node."""
         status = self.mapping.status()
+        status["require_robot_standing"] = self.mapping_require_robot_standing
+        status["sensor_profile"] = self.camera.status().get("profile")
+        status["zedx_planar_motion"] = self.mapping_zedx_planar_motion
         with self._mapping_postprocess_lock:
             status["postprocess"] = dict(self._mapping_postprocess)
         return status

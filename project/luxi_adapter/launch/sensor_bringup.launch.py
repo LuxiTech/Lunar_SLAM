@@ -25,6 +25,7 @@ SENSOR_PROCESS_SIGNATURES = (
     "luxi_adapter/lib/luxi_adapter/sensor_adapter_node",
     "imu_filter_madgwick_node",
     "luxi_adapter/lib/luxi_adapter/imu_level_calibrator_node",
+    "__node:=zed_container",
 )
 
 
@@ -149,7 +150,7 @@ def generate_launch_description():
             "hardware",
             default_value="auto",
             description=(
-                "Hardware profile to start (for example hik, d435i or d455). "
+                "Hardware profile to start (for example hik, d435i, d455 or zedx). "
                 "auto preserves config-driven selection."
             ),
         ),

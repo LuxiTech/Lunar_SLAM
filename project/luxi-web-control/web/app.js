@@ -2217,7 +2217,9 @@ function updateMapping(mapping) {
       ? "请先在上方启动相机并等待图像、内参与 RGB-D 就绪。"
       : (calibrationRequired
         ? "请先将机器人放在水平面并完成 IMU 一键校准。"
-        : "相机链路已就绪，可以开始建图。");
+        : (mapping.require_robot_standing === false
+          ? "相机链路已就绪；当前为无机器人测试模式，可以直接开始建图。"
+          : "相机链路已就绪，可以开始建图。"));
   }
 }
 

@@ -210,7 +210,7 @@ def test_tracker_reseed_propagates_from_last_accepted_visual_pose():
     np.testing.assert_allclose(recovered.odom_from_camera[:3, 3], 0.0, atol=1e-6)
 
 
-def test_tracker_keeps_visual_yaw_when_full_imu_rotation_disagrees(monkeypatch):
+def test_tracker_rejects_visual_yaw_when_full_imu_rotation_disagrees(monkeypatch):
     pixels = np.array(
         [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
     )
@@ -260,11 +260,65 @@ def test_tracker_keeps_visual_yaw_when_full_imu_rotation_disagrees(monkeypatch):
         world_from_camera_rotation=imu_yaw_20deg,
     )
 
-    assert result.accepted
+    assert not result.accepted
     assert result.pose_source == "PNP"
-    assert result.reason == "ACCEPTED"
+    assert result.reason == "IMU_ROTATION_MISMATCH"
     assert np.isclose(np.rad2deg(result.imu_rotation_error), 20.0)
     assert np.isclose(result.imu_gravity_error, 0.0)
+    np.testing.assert_allclose(result.odom_from_camera, np.eye(4), atol=1e-6)
+
+
+def test_tracker_keeps_visual_yaw_when_small_imu_drift_agrees(monkeypatch):
+    pixels = np.array(
+        [[80.0 + x * 70.0, 80.0 + y * 70.0] for y in range(3) for x in range(4)]
+    )
+    tracker = VisualOdometryTracker(
+        SequenceBackend([_features(pixels), _features(pixels)]),
+        TrackerConfig(
+            minimum_keypoints=8,
+            minimum_matches=8,
+            minimum_depth_matches=8,
+            minimum_inliers=6,
+            minimum_grid_coverage=0.0,
+            minimum_depth_consistency_matches=6,
+        ),
+    )
+    inliers = np.arange(len(pixels), dtype=np.int64)
+    visual_pose = RelativePose(np.eye(4), inliers, 0.1)
+    drifted_depth_pose = np.eye(4)
+    drifted_depth_pose[:3, :3], _ = cv2.Rodrigues(
+        np.array([0.0, 0.0, np.deg2rad(-2.0)])
+    )
+    monkeypatch.setattr(
+        tracker_module, "estimate_relative_pose", lambda *_args: visual_pose
+    )
+    monkeypatch.setattr(
+        tracker_module,
+        "estimate_translation_with_rotation",
+        lambda *_args: RelativePose(drifted_depth_pose, inliers, 0.1),
+    )
+    depth = np.full((480, 640), 2000, dtype=np.uint16)
+    intrinsics = np.array(
+        [[520.0, 0.0, 320.0], [0.0, 520.0, 240.0], [0.0, 0.0, 1.0]]
+    )
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    imu_yaw_2deg, _ = cv2.Rodrigues(
+        np.array([0.0, 0.0, np.deg2rad(2.0)])
+    )
+
+    tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.0,
+        world_from_camera_rotation=np.eye(3),
+    )
+    result = tracker.process(
+        rgb, depth, intrinsics, 0.001, 1.1,
+        world_from_camera_rotation=imu_yaw_2deg,
+    )
+
+    assert result.accepted
+    assert result.pose_source == "PNP_DEPTH"
+    assert result.reason == "ACCEPTED_PNP_DEPTH"
+    assert np.isclose(np.rad2deg(result.imu_rotation_error), 2.0)
     np.testing.assert_allclose(result.odom_from_camera, np.eye(4), atol=1e-6)
 
 

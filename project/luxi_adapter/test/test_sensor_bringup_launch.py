@@ -72,6 +72,22 @@ def test_d455_argument_selects_d455_driver_and_complete_config():
     )
 
 
+def test_zedx_argument_selects_zedx_driver_and_complete_config():
+    module = _load_launch_module()
+
+    selection = module.resolve_hardware_selection(
+        hardware="ZEDX",
+        config_path="",
+        package_share=PACKAGE_ROOT,
+    )
+
+    assert selection.profile == "zedx"
+    assert selection.launch_path == PACKAGE_ROOT / "launch" / "zedx.launch.py"
+    assert selection.config_path == (
+        PACKAGE_ROOT / "config" / "zedx_sensor_bringup.yaml"
+    )
+
+
 def test_sensor_bringup_detects_residual_components(tmp_path):
     module = _load_launch_module()
     current = tmp_path / str(1234)
@@ -179,6 +195,11 @@ def test_all_sensor_configs_share_the_algorithm_facing_topics():
             encoding="utf-8"
         )
     )["luxi_adapter"]["ros__parameters"]
+    zedx = yaml.safe_load(
+        (PACKAGE_ROOT / "config" / "zedx_sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["luxi_adapter"]["ros__parameters"]
     public_topics = (
         "rgbd_output_topic",
         "color_output_topic",
@@ -191,6 +212,44 @@ def test_all_sensor_configs_share_the_algorithm_facing_topics():
     for topic_name in public_topics:
         assert hik[topic_name] == d435i[topic_name]
         assert d455[topic_name] == d435i[topic_name]
+        assert zedx[topic_name] == d435i[topic_name]
+
+
+def test_zedx_uses_registered_rgbd_and_owns_only_local_odom_tf():
+    yaml = pytest.importorskip("yaml")
+    adapter = yaml.safe_load(
+        (PACKAGE_ROOT / "config" / "zedx_sensor_bringup.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["luxi_adapter"]["ros__parameters"]
+    launch_source = (PACKAGE_ROOT / "launch" / "zedx.launch.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert adapter["color_input_topic"] == "/zed/zed_node/rgb/color/rect/image"
+    assert adapter["depth_input_topic"] == "/zed/zed_node/depth/depth_registered"
+    assert adapter["camera_info_input_topic"] == (
+        "/zed/zed_node/rgb/color/rect/camera_info"
+    )
+    assert adapter["imu_input_topic"] == "/zed/zed_node/imu/data_raw"
+    assert adapter["zedx_serial_number"] == 45570700
+    assert adapter["zedx_publish_downscale_factor"] == pytest.approx(2.0)
+    assert adapter["zedx_publish_frame_rate"] == pytest.approx(10.0)
+    assert adapter["zedx_depth_mode"] == "NEURAL"
+    assert adapter["zedx_depth_stabilization"] == 0
+    assert adapter["zedx_depth_confidence"] == 80
+    assert adapter["zedx_depth_texture_confidence"] == 100
+    assert adapter["zedx_enable_positional_tracking"] is True
+    assert adapter["zedx_positional_tracking_imu_fusion"] is True
+    assert adapter["zedx_positional_tracking_area_memory"] is False
+    assert adapter["zedx_reset_odom_with_loop_closure"] is False
+    assert adapter["zedx_positional_tracking_two_d_mode"] is False
+    assert 'f"publish_tf:={bool_text(enable_positional_tracking)}"' in launch_source
+    assert '"publish_map_tf:=false"' in launch_source
+    assert (
+        'f"pos_tracking.publish_odom_pose:={bool_text(enable_positional_tracking)}"'
+        in launch_source
+    )
 
 
 def test_d455_uses_wide_matched_profiles_and_aligned_depth():

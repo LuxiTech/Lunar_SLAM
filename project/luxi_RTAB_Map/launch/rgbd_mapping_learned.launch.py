@@ -43,6 +43,14 @@ def generate_launch_description() -> LaunchDescription:
             "--Optimizer/Robust true "
             "--RGBD/OptimizeMaxError 1.0 "
             "--Mem/UseOdomFeatures true "
+            # Low-motion/rehearsed frames are not part of the optimized graph.
+            # Dropping them prevents a stationary 10 Hz ZED stream from growing
+            # the database by hundreds of megabytes without adding map geometry.
+            "--Mem/NotLinkedNodesKept false "
+            "--Mem/IntermediateNodeDataKept false "
+            # ZED publishes registered metric depth as 32FC1. RTAB cannot use
+            # RVL for that representation and otherwise falls back with a warning.
+            "--Mem/DepthCompressionFormat .png "
             "--Grid/DepthDecimation ",
             LaunchConfiguration("grid_depth_decimation"),
             " --Grid/RangeMin ",

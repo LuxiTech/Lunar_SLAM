@@ -324,6 +324,33 @@ def test_d1_web_control_is_enabled_and_exposes_switch():
     assert 'api("/api/robot/control", {active: requested})' in app
 
 
+def test_mapping_camera_only_mode_is_explicit_and_visible():
+    config = yaml.safe_load(
+        (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
+        .read_text(encoding="utf-8")
+    )
+    parameters = config["web_control"]["ros__parameters"]
+    assert parameters["enable_d1_control"] is True
+    assert parameters["mapping_require_robot_standing"] is False
+    assert parameters["mapping_launch_file"] == "rgbd_mapping_learned.launch.py"
+    assert parameters["mapping_zedx_launch_file"] == "zedx_mapping.launch.py"
+    assert parameters["mapping_planar_motion"] is True
+    assert parameters["mapping_zedx_planar_motion"] is False
+
+    zedx_launch = (
+        WORKSPACE_ROOT / "project/luxi_RTAB_Map/launch/zedx_mapping.launch.py"
+    ).read_text(encoding="utf-8")
+    assert 'DeclareLaunchArgument("planar_motion", default_value="false")' in zedx_launch
+    assert '"--Reg/Force3DoF ",' in zedx_launch
+    assert '" --RGBD/ForceOdom3DoF ",' in zedx_launch
+
+    app = (WORKSPACE_ROOT / "project/luxi-web-control/web/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "mapping.require_robot_standing === false" in app
+    assert "当前为无机器人测试模式" in app
+
+
 def test_d1_web_exposes_bridge_battery_and_body_height_interfaces():
     config = yaml.safe_load(
         (WORKSPACE_ROOT / "project/luxi-web-control/config/web_control.yaml")
@@ -715,13 +742,20 @@ def test_mapping_start_only_requires_workspace_setup(tmp_path):
     assert "new_map:=true" in command
     assert "planar_motion:=true" in command
 
+    zedx_command = controller._command(
+        "zedx_mapping.launch.py", planar_motion=False
+    )[-1]
+    assert "ros2 launch luxi_rtab_map zedx_mapping.launch.py" in zedx_command
+    assert "planar_motion:=false" in zedx_command
+    assert "planar_motion:=true" in command
+
 
 def test_camera_controller_uses_allow_list_and_project_sensor_bringup(tmp_path):
     workspace_setup = Path(tmp_path / "setup.bash")
     workspace_setup.touch()
     controller = CameraController(
         enabled=True,
-        profiles=("d455", "d435i", "hik"),
+        profiles=("d455", "d435i", "hik", "zedx"),
         default_profile="d455",
         package="luxi_adapter",
         launch_file="sensor_bringup.launch.py",
@@ -735,13 +769,19 @@ def test_camera_controller_uses_allow_list_and_project_sensor_bringup(tmp_path):
     assert "ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=d455" in command
     assert "export ROS_DOMAIN_ID=42" in command
     assert "export RMW_IMPLEMENTATION=rmw_fastrtps_cpp" in command
+    zedx_command = controller._command("zedx")[-1]
+    assert (
+        "ros2 launch luxi_adapter sensor_bringup.launch.py hardware:=zedx"
+        in zedx_command
+    )
     started, message = controller.switch("unknown")
     assert started is False
     assert "unsupported camera profile" in message
     status = controller.status()
     assert [profile["id"] for profile in status["profiles"]] == [
-        "d455", "d435i", "hik",
+        "d455", "d435i", "hik", "zedx",
     ]
+    assert status["default_profile"] == "d455"
 
 
 def test_camera_controls_are_in_the_first_web_column():

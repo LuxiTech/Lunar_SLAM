@@ -79,18 +79,22 @@ luxi_visual_frontend:
     # A fast turn can invalidate the old keyframe. Reseed locally after three
     # rejected updates so RTAB-Map is not starved indefinitely.
     maximum_consecutive_tracking_failures: 3
-    # When AHRS rotation is available, estimate translation from depth on both
-    # frames. This removes rotation/translation coupling during in-place turns.
+    # When AHRS agrees with vision, refine translation from depth on both
+    # frames while retaining PnP rotation. In particular, never integrate the
+    # unobservable Madgwick yaw into ordinary accepted frames.
     minimum_depth_consistency_matches: 20
     maximum_depth_consistency_error: 0.08
     # Full IMU rotation may be used for short-term depth translation only when
     # it agrees with PnP. Gravity is checked independently so visual yaw wins.
-    maximum_imu_rotation_error_deg: 12.0
+    # Reject planar-PnP yaw ambiguities before they can create rotated copies
+    # of the same cloud. This is disagreement with IMU, not an absolute turn
+    # limit, so legitimate fast rotation is retained when both sensors agree.
+    maximum_imu_rotation_error_deg: 3.0
     maximum_imu_gravity_error_deg: 10.0
-    # D435i has no magnetometer, so PnP remains the absolute yaw authority.
-    # Short relative IMU rotation is nevertheless required across a visual
-    # gap: otherwise reseeding at the stale visual pose silently discards the
-    # angle turned during blurred frames. Both paths are guarded by the PnP
-    # agreement, gravity and angular-rate checks above.
+    # D435i, D455 and ZED X do not provide a magnetically anchored yaw here, so
+    # PnP remains the yaw authority. Short relative IMU rotation is used only
+    # across a visual gap; otherwise reseeding at a stale pose would discard the
+    # angle turned during blurred frames. Both paths are guarded by agreement,
+    # gravity and angular-rate checks above.
     use_imu_depth_translation: true
     use_imu_reseed_rotation: true

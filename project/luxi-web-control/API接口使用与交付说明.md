@@ -517,10 +517,11 @@ GET /api/status
 
 ```text
 POST /api/camera/start
-{"profile":"d455"}
+{"profile":"zedx"}
 ```
 
-可用 profile 从 `status.camera.profiles` 获取，当前配置为：`d455`、`d435i`、`hik`。
+可用 profile 从 `status.camera.profiles` 获取，当前配置为：`d455`、`d435i`、`hik`、
+`zedx`。默认值仍为 `d455`；`zedx` 显示为 `ZED X + ZED Link Duo`。
 
 关闭：
 
@@ -764,8 +765,11 @@ POST /api/mapping/stop
 {}
 ```
 
-开始前相机链必须健康，且不能存在网页之外启动的冲突建图节点。停止接口会等待托管进程退出和
-数据库保存，不能收到请求后立刻断电。
+开始前相机链必须健康，且不能存在网页之外启动的冲突建图节点。响应中的
+`mapping.require_robot_standing` 表示是否启用机器人站立门禁。当前测试配置为 `false`，
+相机就绪后无需启动 D1 即可建图；这不会跳过 RGB-D/IMU 唯一发布者、IMU 校准或冲突节点
+检查。机器人移动建图前应把 `mapping_require_robot_standing` 恢复为 `true`。停止接口会
+等待托管进程退出和数据库保存，不能收到请求后立刻断电。
 
 开发者模式实时点云：
 

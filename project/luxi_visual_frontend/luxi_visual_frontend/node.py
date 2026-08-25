@@ -193,7 +193,7 @@ class VisualOdometryNode(Node):
             "maximum_consecutive_tracking_failures": 3,
             "minimum_depth_consistency_matches": 20,
             "maximum_depth_consistency_error": 0.08,
-            "maximum_imu_rotation_error_deg": 12.0,
+            "maximum_imu_rotation_error_deg": 3.0,
             "maximum_imu_gravity_error_deg": 10.0,
             "use_imu_depth_translation": True,
             "use_imu_reseed_rotation": True,

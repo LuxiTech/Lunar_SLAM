@@ -211,8 +211,10 @@ def test_http_command_watchdog_and_estop_reach_ros(tmp_path):
 
         camera = node.status()["camera"]
         assert [profile["id"] for profile in camera["profiles"]] == [
-            "d455", "d435i", "hik",
+            "d455", "d435i", "hik", "zedx",
         ]
+        assert camera["profiles"][-1]["label"] == "ZED X + ZED Link Duo"
+        assert camera["default_profile"] == "d455"
         try:
             _post(base_url, "/api/camera/start", {"profile": "unknown"})
             assert False, "an unknown camera profile must be rejected"
